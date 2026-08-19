@@ -1,0 +1,25 @@
+version: 1
+states:
+  - unknown
+  - observed
+  - proposed
+  - approved
+  - shadow
+  - calibrated
+  - advisory
+  - enforced
+  - structural
+  - retired
+transitions:
+  - [unknown, observed]
+  - [observed, proposed]
+  - [proposed, approved]
+  - [approved, shadow]
+  - [shadow, calibrated]
+  - [calibrated, advisory]
+  - [advisory, enforced]
+  - [enforced, structural]
+  - [approved, retired]
+  - [shadow, retired]
+  - [advisory, retired]
+  - [enforced, retired]

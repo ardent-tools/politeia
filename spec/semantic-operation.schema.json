@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:politeia:semantic-operation:v1",
+  "title": "SemanticOperationIntent",
+  "type": "object",
+  "required": [
+    "operation",
+    "principal",
+    "resources",
+    "effects"
+  ],
+  "properties": {
+    "operation": {
+      "type": "string"
+    },
+    "principal": {
+      "type": "string"
+    },
+    "delegation": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "effects": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "data_classes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "budget": {
+      "type": "object"
+    },
+    "evidence_obligations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,13 @@
+name: release
+on:
+  workflow_dispatch:
+
+jobs:
+  fail-closed:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Release intentionally disabled in starter."
+          echo "Enable only after complete runtime-generation signing, provenance,"
+          echo "update metadata, atomic activation, and rollback are implemented."
+          exit 1

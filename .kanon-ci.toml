@@ -1,0 +1,30 @@
+# archetype: A
+# forge-only: false
+# spdx: LicenseRef-PolyForm-Shield-1.0.0
+
+[pipeline]
+stages = ["cargo fmt", "cargo check", "cargo clippy", "cargo test", "xtask check", "xtask derive"]
+
+[stages."cargo fmt"]
+cmd = "cargo fmt --all -- --check"
+timeout_secs = 300
+
+[stages."cargo check"]
+cmd = "cargo check --workspace --all-targets"
+timeout_secs = 600
+
+[stages."cargo clippy"]
+cmd = "cargo clippy --workspace --all-targets -- -D warnings"
+timeout_secs = 600
+
+[stages."cargo test"]
+cmd = "cargo test --workspace"
+timeout_secs = 600
+
+[stages."xtask check"]
+cmd = "cargo run -p xtask -- check"
+timeout_secs = 300
+
+[stages."xtask derive"]
+cmd = "cargo run -p xtask -- derive && git diff --exit-code"
+timeout_secs = 300

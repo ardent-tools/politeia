@@ -1,0 +1,14 @@
+[advisories]
+version = 2
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[licenses]
+version = 2
+allow = ["Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT", "Unicode-3.0", "Zlib", "LicenseRef-PolyForm-Noncommercial-1.0.0", "LicenseRef-PolyForm-Shield-1.0.0", "LicenseRef-Proprietary"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

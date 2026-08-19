@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+politeia-core = { path = "../crates/politeia-core" }
+politeia-policy = { path = "../crates/politeia-policy" }
+politeia-evidence = { path = "../crates/politeia-evidence" }
+politeia-protocol = { path = "../crates/politeia-protocol" }
+politeia-sdk = { path = "../crates/politeia-sdk" }
