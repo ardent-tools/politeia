@@ -97,7 +97,10 @@ impl ResourceBudget {
             && narrows(self.memory_bytes, parent.memory_bytes)
             && narrows(self.io_bytes, parent.io_bytes)
             && narrows(self.network_bytes, parent.network_bytes)
-            && narrows(self.external_cost_microunits, parent.external_cost_microunits)
+            && narrows(
+                self.external_cost_microunits,
+                parent.external_cost_microunits,
+            )
     }
 }
 
@@ -215,7 +218,9 @@ mod tests {
             data_classes: parent.data_classes.clone(),
             audience: parent.audience.clone(),
             expires_at: parent.expires_at,
-            budget: ResourceBudget { ..parent.budget.clone() },
+            budget: ResourceBudget {
+                ..parent.budget.clone()
+            },
         }
     }
 
