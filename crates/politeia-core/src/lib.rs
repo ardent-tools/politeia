@@ -6,13 +6,19 @@ use uuid::Uuid;
 
 macro_rules! typed_id {
     ($name:ident) => {
-        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
+        #[derive(
+            Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+        )]
         pub struct $name(pub Uuid);
         impl $name {
-            pub fn new() -> Self { Self(Uuid::now_v7()) }
+            pub fn new() -> Self {
+                Self(Uuid::now_v7())
+            }
         }
         impl Default for $name {
-            fn default() -> Self { Self::new() }
+            fn default() -> Self {
+                Self::new()
+            }
         }
     };
 }

@@ -1,4 +1,6 @@
-use politeia_core::{AdapterId, DelegationId, Digest, EvidenceId, PolicyBundleId, PrincipalId, RuntimeGenerationId};
+use politeia_core::{
+    AdapterId, DelegationId, Digest, EvidenceId, PolicyBundleId, PrincipalId, RuntimeGenerationId,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
