@@ -34,4 +34,6 @@ Start with [`START_HERE.md`](START_HERE.md).
 
 ## License
 
-Source-available under the **PolyForm Shield License 1.0.0** — see [`LICENSE`](LICENSE). You may read, evaluate, and build on this for any purpose that does not compete with Ardent Works LLC's products or services. Copyright © Ardent Works LLC (<https://ardent.tools>).
+Open source under the **Mozilla Public License 2.0** — see [`LICENSE`](LICENSE). Modifications to
+this project's own files stay MPL when distributed; adapters, domain packs, and configuration
+built on top remain yours to keep private. Copyright Ardent Works LLC (<https://ardent.tools>).

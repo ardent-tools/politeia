@@ -1,6 +1,6 @@
 # archetype: A
 # forge-only: false
-# spdx: LicenseRef-PolyForm-Shield-1.0.0
+# spdx: MPL-2.0
 
 [pipeline]
 stages = ["cargo fmt", "cargo check", "cargo clippy", "cargo test", "xtask check", "xtask derive"]
