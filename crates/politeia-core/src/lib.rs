@@ -6,15 +6,17 @@
 
 #![deny(missing_docs)]
 
+use std::collections::BTreeSet;
+
 use jiff::Timestamp;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 macro_rules! typed_id {
     ($name:ident, $doc:expr) => {
         #[doc = $doc]
+        #[repr(transparent)]
         #[derive(
             Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
         )]
@@ -59,20 +61,75 @@ typed_id!(
     EvidenceId,
     "Identity of a provenance-bearing evidence record admitted for a claim."
 );
-
+typed_id!(
+    EffectLeaseId,
+    "Identity of one dispatcher-issued, single-use effect lease."
+);
+typed_id!(
+    BudgetReservationId,
+    "Identity of one atomically reserved operation budget."
+);
 /// A content digest (blake3, lowercase hex).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Digest(pub String);
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct Digest(#[schemars(length(equal = 64), regex(pattern = "^[0-9a-f]{64}$"))] String);
+
+/// A string was not a canonical lowercase 32-byte hexadecimal digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidDigest;
+
+impl std::fmt::Display for InvalidDigest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("digest must be exactly 64 lowercase hexadecimal characters")
+    }
+}
+
+impl std::error::Error for InvalidDigest {}
 
 impl Digest {
     /// Hash bytes with blake3 and return the hex digest.
     pub fn blake3(bytes: &[u8]) -> Self {
         Self(blake3::hash(bytes).to_hex().to_string())
     }
+
+    /// The canonical lowercase hexadecimal representation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Digest {
+    type Error = InvalidDigest;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let valid = value.len() == 64
+            && value
+                .as_bytes()
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte));
+        valid.then_some(Self(value)).ok_or(InvalidDigest)
+    }
+}
+
+impl std::str::FromStr for Digest {
+    type Err = InvalidDigest;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Digest {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::try_from(value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// An externally visible effect a protected operation may produce.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum Effect {
     /// Read from a filesystem.
     ReadFilesystem,
@@ -98,6 +155,8 @@ pub enum Effect {
 
 /// A data classification governing sources, transforms, retention, locality, and sinks.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum DataClass {
     /// Public information.
     Public,
@@ -120,7 +179,8 @@ pub enum DataClass {
 }
 
 /// Bounded consumption limits on a delegation or operation.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceBudget {
     /// Wall-clock limit in milliseconds.
     pub wall_ms: Option<u64>,
@@ -137,6 +197,20 @@ pub struct ResourceBudget {
 }
 
 impl ResourceBudget {
+    /// True when every resource axis has an explicit finite cap.
+    ///
+    /// A finite request can be atomically reserved. `None` remains useful on
+    /// parent delegations to mean uncapped authority, but an invocation may
+    /// not ask a ledger to reserve an unknown maximum.
+    pub fn is_finite(&self) -> bool {
+        self.wall_ms.is_some()
+            && self.cpu_ms.is_some()
+            && self.memory_bytes.is_some()
+            && self.io_bytes.is_some()
+            && self.network_bytes.is_some()
+            && self.external_cost_microunits.is_some()
+    }
+
     /// A budget narrows a parent budget when every dimension is capped at most
     /// the parent's cap. A dimension the parent leaves uncapped may gain a cap
     /// in the child (narrowing); a dimension the parent caps may never become
@@ -147,9 +221,8 @@ impl ResourceBudget {
         fn narrows(child: Option<u64>, parent: Option<u64>) -> bool {
             match (child, parent) {
                 (Some(c), Some(p)) => c <= p,
-                (Some(_), None) => true,
                 (None, Some(_)) => false,
-                (None, None) => true,
+                (_, None) => true,
             }
         }
         narrows(self.wall_ms, parent.wall_ms)
@@ -166,7 +239,8 @@ impl ResourceBudget {
 
 /// An attenuation from one authority context to another. A child delegation
 /// must narrow its parent on every axis; it may never exceed it.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Delegation {
     /// This delegation's identity.
     pub id: DelegationId,
@@ -216,6 +290,8 @@ impl Delegation {
 /// The epistemic state of an institutional claim. Inference never becomes
 /// approved truth silently.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum EpistemicState {
     /// A sourced statement about reality.
     Observation,
@@ -230,6 +306,7 @@ pub enum EpistemicState {
 /// An interpreted proposition about the institution, carrying its epistemic
 /// state, confidence, provenance, and the axes known to be missing.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Claim {
     /// The claim's key (what fact is claimed about).
     pub key: String,
@@ -247,7 +324,8 @@ pub struct Claim {
 
 /// A typed operation contract: what an operation may do, which effects and
 /// data classes it touches, and which evidence it owes.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OperationSpec {
     /// The operation's identity.
     pub id: OperationId,
@@ -269,8 +347,9 @@ pub struct OperationSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use jiff::SignedDuration;
+
+    use super::*;
 
     fn budget(wall_ms: Option<u64>) -> ResourceBudget {
         ResourceBudget {
@@ -284,13 +363,61 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "wire fixtures must fail loudly if canonical digest encoding drifts"
+    )]
+    fn digest_wire_format_enforces_canonical_lowercase_hex() {
+        let digest = Digest::blake3(b"canonical digest fixture");
+        assert_eq!(
+            digest.as_str().len(),
+            64,
+            "a blake3 digest must encode exactly 32 bytes"
+        );
+        let encoded = serde_json::to_string(&digest).expect("a valid digest must serialize");
+        let decoded: Digest =
+            serde_json::from_str(&encoded).expect("a canonical digest must deserialize");
+        assert_eq!(decoded, digest, "a canonical digest must round-trip");
+
+        for invalid in [
+            "short",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+        ] {
+            let encoded = serde_json::to_string(invalid).expect("the invalid fixture must encode");
+            assert!(
+                serde_json::from_str::<Digest>(&encoded).is_err(),
+                "non-canonical digest {invalid:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
     fn budget_attenuation_matrix() {
-        assert!(budget(Some(10)).is_attenuation_of(&budget(Some(10))));
-        assert!(budget(Some(5)).is_attenuation_of(&budget(Some(10))));
-        assert!(!budget(Some(11)).is_attenuation_of(&budget(Some(10))));
-        assert!(budget(Some(5)).is_attenuation_of(&budget(None)));
-        assert!(!budget(None).is_attenuation_of(&budget(Some(10))));
-        assert!(budget(None).is_attenuation_of(&budget(None)));
+        assert!(
+            budget(Some(10)).is_attenuation_of(&budget(Some(10))),
+            "an equal cap must attenuate"
+        );
+        assert!(
+            budget(Some(5)).is_attenuation_of(&budget(Some(10))),
+            "a tighter cap must attenuate"
+        );
+        assert!(
+            !budget(Some(11)).is_attenuation_of(&budget(Some(10))),
+            "a wider cap must not attenuate"
+        );
+        assert!(
+            budget(Some(5)).is_attenuation_of(&budget(None)),
+            "adding a cap to an unbounded parent must attenuate"
+        );
+        assert!(
+            !budget(None).is_attenuation_of(&budget(Some(10))),
+            "dropping a parent cap must not attenuate"
+        );
+        assert!(
+            budget(None).is_attenuation_of(&budget(None)),
+            "equal unbounded budgets must attenuate"
+        );
     }
 
     fn root() -> Delegation {
@@ -331,7 +458,10 @@ mod tests {
     fn identical_child_is_an_attenuation() {
         let parent = root();
         let child = child_of(&parent);
-        assert!(child.is_attenuation_of(&parent));
+        assert!(
+            child.is_attenuation_of(&parent),
+            "an identical child must attenuate its parent"
+        );
     }
 
     #[test]
@@ -339,7 +469,10 @@ mod tests {
         let parent = root();
         let mut child = child_of(&parent);
         child.budget.wall_ms = Some(5000);
-        assert!(!child.is_attenuation_of(&parent));
+        assert!(
+            !child.is_attenuation_of(&parent),
+            "a wider wall-time budget must break attenuation"
+        );
     }
 
     #[test]
@@ -347,7 +480,10 @@ mod tests {
         let parent = root();
         let mut child = child_of(&parent);
         child.budget.wall_ms = None;
-        assert!(!child.is_attenuation_of(&parent));
+        assert!(
+            !child.is_attenuation_of(&parent),
+            "dropping a wall-time cap must break attenuation"
+        );
     }
 
     #[test]
@@ -358,7 +494,10 @@ mod tests {
         child.effects = BTreeSet::from([Effect::ReadExternalSystem]);
         child.data_classes = BTreeSet::from([DataClass::Public]);
         child.budget.wall_ms = Some(250);
-        assert!(child.is_attenuation_of(&parent));
+        assert!(
+            child.is_attenuation_of(&parent),
+            "narrowing every changed axis must preserve attenuation"
+        );
     }
 
     #[test]
@@ -366,6 +505,9 @@ mod tests {
         let parent = root();
         let mut child = child_of(&parent);
         child.expires_at = parent.expires_at + SignedDuration::from_hours(1);
-        assert!(!child.is_attenuation_of(&parent));
+        assert!(
+            !child.is_attenuation_of(&parent),
+            "a later expiry must break attenuation"
+        );
     }
 }

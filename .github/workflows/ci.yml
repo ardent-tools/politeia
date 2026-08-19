@@ -14,16 +14,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust:
+  msrv:
+    name: msrv (1.85.0)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          # The toolchain version itself comes from rust-toolchain.toml (one
-          # fact, one place); only components are declared here.
+          toolchain: "1.85.0"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: msrv-1.85.0
+      - run: cargo +1.85.0 check --workspace --all-targets --locked
+
+  rust:
+    name: rust (1.97.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - id: repository-toolchain
+        name: Read repository toolchain
+        shell: bash
+        run: |
+          channel="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: ${{ steps.repository-toolchain.outputs.channel }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # --locked everywhere: a stale Cargo.lock fails fast at the step that
@@ -32,6 +56,25 @@ jobs:
       - run: cargo check --workspace --all-targets --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - id: derive-schemas
+        name: Derive public schemas
+        shell: bash
+        run: |
+          cargo run -p xtask --locked -- derive
+          if git diff --quiet -- spec/extension-manifest.schema.json spec/semantic-operation.schema.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload stale schema replacements
+        if: steps.derive-schemas.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: politeia-generated-schemas-${{ github.sha }}
+          path: |
+            spec/extension-manifest.schema.json
+            spec/semantic-operation.schema.json
+          if-no-files-found: error
+          retention-days: 7
       - run: cargo run -p xtask --locked -- check
-      - run: cargo run -p xtask --locked -- derive
       - run: git diff --exit-code

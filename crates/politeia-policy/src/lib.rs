@@ -6,7 +6,7 @@
 
 #![deny(missing_docs)]
 
-use politeia_core::{PolicyBundleId, PrincipalId};
+use politeia_core::{Digest, PolicyBundleId, PrincipalId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -104,10 +104,15 @@ pub struct PolicyBinding {
 }
 
 /// A normalized authorization/governance result.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyDecision {
     /// The policy bundle the decision was made under.
     pub bundle: PolicyBundleId,
+    /// Digest of the exact policy bundle bytes used for the decision.
+    pub policy_digest: Digest,
+    /// Digest of the exact normalized operation intent that was decided.
+    pub intent_digest: Digest,
     /// The principal the decision is for.
     pub principal: PrincipalId,
     /// Whether the operation is allowed.

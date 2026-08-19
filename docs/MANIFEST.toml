@@ -1,0 +1,237 @@
+# Documentation inventory for Politeia.
+
+[[doc]]
+path = "docs/00-CHARTER.md"
+type = "authored"
+evergreen = true
+description = "Product charter and institutional-control-plane purpose."
+
+[[doc]]
+path = "docs/01-ANTI_SCOPE.md"
+type = "authored"
+evergreen = true
+description = "Explicit product boundaries and excluded responsibilities."
+
+[[doc]]
+path = "docs/02-CONSTITUTION.md"
+type = "spec"
+evergreen = true
+description = "Constitutional invariants for institutional operation."
+
+[[doc]]
+path = "docs/03-ONTOLOGY.md"
+type = "spec"
+evergreen = true
+description = "Canonical institutional ontology and relationship model."
+
+[[doc]]
+path = "docs/04-KERNEL_CONTRACT.md"
+type = "spec"
+evergreen = true
+description = "Trusted semantic-kernel and effect-lease contract."
+
+[[doc]]
+path = "docs/05-SEMANTIC_PROTOCOL.md"
+type = "spec"
+evergreen = true
+description = "Transport-independent semantic protocol contract."
+
+[[doc]]
+path = "docs/06-POLICY_COMPILER.md"
+type = "spec"
+evergreen = true
+description = "Normative policy compilation and projection contract."
+
+[[doc]]
+path = "docs/07-BOOTSTRAP.md"
+type = "spec"
+evergreen = true
+description = "Uncertainty-preserving institutional bootstrap sequence."
+
+[[doc]]
+path = "docs/08-SELF_MANAGEMENT.md"
+type = "spec"
+evergreen = true
+description = "Self-maintenance authority and evidence boundaries."
+
+[[doc]]
+path = "docs/09-PERSISTENCE.md"
+type = "spec"
+evergreen = true
+description = "Normalized state and immutable journal persistence model."
+
+[[doc]]
+path = "docs/10-EXTENSIONS.md"
+type = "spec"
+evergreen = true
+description = "Typed extension classes, manifests, and isolation boundaries."
+
+[[doc]]
+path = "docs/11-FAILURE_SEMANTICS.md"
+type = "spec"
+evergreen = true
+description = "Required failure, retry, and partial-effect semantics."
+
+[[doc]]
+path = "docs/12-ASSURANCE_CASE.md"
+type = "authored"
+evergreen = true
+description = "Assurance claims and the evidence each claim requires."
+
+[[doc]]
+path = "docs/13-THREAT_MODEL.md"
+type = "authored"
+evergreen = true
+description = "Threat actors, failure classes, and security assumptions."
+
+[[doc]]
+path = "docs/14-TESTING_STRATEGY.md"
+type = "authored"
+evergreen = true
+description = "Claim-oriented verification and adversarial test strategy."
+
+[[doc]]
+path = "docs/15-SUPPLY_CHAIN.md"
+type = "authored"
+evergreen = true
+description = "Build, dependency, provenance, and update integrity policy."
+
+[[doc]]
+path = "docs/16-DATA_GOVERNANCE.md"
+type = "spec"
+evergreen = true
+description = "Data classification, retention, locality, and sink contract."
+
+[[doc]]
+path = "docs/17-OBSERVABILITY_AND_EVIDENCE.md"
+type = "spec"
+evergreen = true
+description = "Separation of telemetry from admissible institutional evidence."
+
+[[doc]]
+path = "docs/18-FIRST_VERTICAL_SLICE.md"
+type = "authored"
+evergreen = true
+description = "First end-to-end protected-operation scenario and acceptance."
+
+[[doc]]
+path = "docs/19-ROADMAP.md"
+type = "authored"
+evergreen = false
+description = "Ordered implementation phases and their exit conditions."
+
+[[doc]]
+path = "docs/20-ENGINEERING_HANDOFF.md"
+type = "authored"
+evergreen = false
+description = "Engineering start order and handoff constraints."
+
+[[doc]]
+path = "docs/21-CONTEXT_COMPILATION.md"
+type = "spec"
+evergreen = true
+description = "Derived agent-context inputs, outputs, and provenance contract."
+
+[[doc]]
+path = "docs/22-DEPLOYMENT_PROFILES.md"
+type = "spec"
+evergreen = true
+description = "Deployment topology and assurance profile boundaries."
+
+[[doc]]
+path = "docs/adr/0001-semantic-kernel.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: place the semantic kernel at the product center."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0002-transport-independent-protocol.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: keep the semantic protocol independent of transport."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0003-complete-mediation.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: mediate every protected effect through one boundary."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0004-capability-delegation.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: require monotonic capability delegation."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0005-policy-separation.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: separate clauses, detectors, and bindings."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0006-evidence-attestation.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: bind evidence attestations to exact subjects."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0007-bootstrap-epistemics.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: preserve uncertainty during institutional bootstrap."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0008-self-maintenance.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: separate self-maintenance from self-authorization."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0009-modular-monolith.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: begin with a modular monolith."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0010-state-plus-journals.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: pair normalized state with immutable journals."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0011-extension-boundary.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: use typed manifests and sandboxed extension boundaries."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0012-runtime-generations.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: bind operation to complete immutable runtime generations."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0013-telemetry-not-evidence.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: do not treat telemetry as institutional evidence."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0014-postgres-first.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: use PostgreSQL as the first durable authority."
+decided = "2026-08-19"

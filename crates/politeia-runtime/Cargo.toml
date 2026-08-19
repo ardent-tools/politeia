@@ -1,6 +1,6 @@
 [package]
 name = "politeia-runtime"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -8,15 +8,17 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 schemars.workspace = true
-thiserror.workspace = true
-uuid.workspace = true
+snafu.workspace = true
 jiff.workspace = true
-blake3.workspace = true
 serde_json.workspace = true
-async-trait.workspace = true
-politeia-core = { path = "../politeia-core" }
-politeia-policy = { path = "../politeia-policy" }
-politeia-evidence = { path = "../politeia-evidence" }
-
-[dev-dependencies]
 tokio.workspace = true
+politeia-core.workspace = true
+politeia-policy.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.kanon]
+maturity = "scaffold"
+since = "2026-08-19"
+exit-criteria = "The first vertical slice re-authorizes nested operations and enforces dispatcher-issued leases, including expiry, audience, single-use replay, budget reservation, and TOCTOU tests"
