@@ -1,54 +1,398 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "First authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. The earlier starter schema was non-authoritative. Do not hand-edit.",
+  "$defs": {
+    "DataClass": {
+      "description": "A data classification governing sources, transforms, retention, locality, and sinks.",
+      "oneOf": [
+        {
+          "const": "public",
+          "description": "Public information.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Internal information.",
+          "type": "string"
+        },
+        {
+          "const": "confidential",
+          "description": "Confidential information.",
+          "type": "string"
+        },
+        {
+          "const": "secret",
+          "description": "Secrets.",
+          "type": "string"
+        },
+        {
+          "const": "regulated",
+          "description": "Regulated data.",
+          "type": "string"
+        },
+        {
+          "const": "personal",
+          "description": "Personal data.",
+          "type": "string"
+        },
+        {
+          "const": "health",
+          "description": "Health data.",
+          "type": "string"
+        },
+        {
+          "const": "financial",
+          "description": "Financial data.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A client-restricted class named by the client.",
+          "properties": {
+            "client_restricted": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_restricted"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Delegation": {
+      "additionalProperties": false,
+      "description": "An attenuation from one authority context to another. A child delegation\nmust narrow its parent on every axis; it may never exceed it.",
+      "properties": {
+        "actions": {
+          "description": "Permitted semantic actions.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "audience": {
+          "description": "Audiences the delegation may act for.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "budget": {
+          "$ref": "#/$defs/ResourceBudget",
+          "description": "Consumption bounds."
+        },
+        "data_classes": {
+          "description": "Data classes the delegation may touch.",
+          "items": {
+            "$ref": "#/$defs/DataClass"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "effects": {
+          "description": "Effects the delegation may produce.",
+          "items": {
+            "$ref": "#/$defs/Effect"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "expires_at": {
+          "description": "Expiry instant (fail-closed at and after this time).",
+          "format": "date-time",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/DelegationId",
+          "description": "This delegation's identity."
+        },
+        "issuer": {
+          "$ref": "#/$defs/PrincipalId",
+          "description": "The principal issuing the delegation."
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DelegationId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The parent delegation this one attenuates, if any."
+        },
+        "resources": {
+          "description": "Resources the delegation reaches.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "subject": {
+          "$ref": "#/$defs/PrincipalId",
+          "description": "The principal receiving the delegation."
+        }
+      },
+      "required": [
+        "id",
+        "issuer",
+        "subject",
+        "actions",
+        "resources",
+        "effects",
+        "data_classes",
+        "audience",
+        "expires_at",
+        "budget"
+      ],
+      "type": "object"
+    },
+    "DelegationId": {
+      "description": "Identity of a delegation from one authority context to another.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Effect": {
+      "description": "An externally visible effect a protected operation may produce.",
+      "oneOf": [
+        {
+          "const": "read_filesystem",
+          "description": "Read from a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "write_filesystem",
+          "description": "Write to a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "spawn_process",
+          "description": "Spawn a process.",
+          "type": "string"
+        },
+        {
+          "const": "network_egress",
+          "description": "Egress to a network.",
+          "type": "string"
+        },
+        {
+          "const": "read_secret",
+          "description": "Read a secret.",
+          "type": "string"
+        },
+        {
+          "const": "write_secret",
+          "description": "Write a secret.",
+          "type": "string"
+        },
+        {
+          "const": "read_external_system",
+          "description": "Read from an external system.",
+          "type": "string"
+        },
+        {
+          "const": "write_external_system",
+          "description": "Write to an external system.",
+          "type": "string"
+        },
+        {
+          "const": "create_artifact",
+          "description": "Create an artifact.",
+          "type": "string"
+        },
+        {
+          "const": "change_authorization",
+          "description": "Change an authorization.",
+          "type": "string"
+        }
+      ]
+    },
+    "OperationId": {
+      "description": "Identity of a typed operation contract.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "OperationSpec": {
+      "additionalProperties": false,
+      "description": "A typed operation contract: what an operation may do, which effects and\ndata classes it touches, and which evidence it owes.",
+      "properties": {
+        "actions": {
+          "description": "Semantic actions the operation performs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "data_classes": {
+          "description": "Data classes the operation may touch.",
+          "items": {
+            "$ref": "#/$defs/DataClass"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "effects": {
+          "description": "Effects the operation may produce.",
+          "items": {
+            "$ref": "#/$defs/Effect"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "evidence_obligations": {
+          "description": "Evidence obligations the operation owes on completion.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/OperationId",
+          "description": "The operation's identity."
+        },
+        "name": {
+          "description": "Human-readable operation name.",
+          "type": "string"
+        },
+        "requires_idempotency": {
+          "description": "Whether the operation requires idempotency keys.",
+          "type": "boolean"
+        },
+        "retryable": {
+          "description": "Whether the operation is safe to retry.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "actions",
+        "effects",
+        "data_classes",
+        "evidence_obligations",
+        "retryable",
+        "requires_idempotency"
+      ],
+      "type": "object"
+    },
+    "PrincipalId": {
+      "description": "Identity of an actor capable of requesting work.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ResourceBudget": {
+      "additionalProperties": false,
+      "description": "Bounded consumption limits on a delegation or operation.",
+      "properties": {
+        "cpu_ms": {
+          "description": "CPU-time limit in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "external_cost_microunits": {
+          "description": "External spend limit in microunits.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "io_bytes": {
+          "description": "I/O limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "memory_bytes": {
+          "description": "Memory limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_bytes": {
+          "description": "Network transfer limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wall_ms": {
+          "description": "Wall-clock limit in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
   "$id": "urn:politeia:semantic-operation:v1",
-  "title": "SemanticOperationIntent",
-  "type": "object",
-  "required": [
-    "operation",
-    "principal",
-    "resources",
-    "effects"
-  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A request to perform one bounded operation: who asks, under which\ndelegation, which operation contract, over which resources.",
   "properties": {
-    "operation": {
-      "type": "string"
+    "budget": {
+      "$ref": "#/$defs/ResourceBudget",
+      "description": "The bounded resources this invocation requests."
     },
-    "principal": {
-      "type": "string"
+    "delegation_chain": {
+      "description": "The complete root-to-leaf delegation chain under which the request proceeds.",
+      "items": {
+        "$ref": "#/$defs/Delegation"
+      },
+      "type": "array"
     },
-    "delegation": {
+    "idempotency_key": {
+      "description": "Stable operation key required when the operation declares idempotency.",
       "type": [
         "string",
         "null"
       ]
     },
+    "operation": {
+      "$ref": "#/$defs/OperationSpec",
+      "description": "The operation contract being invoked."
+    },
+    "principal": {
+      "$ref": "#/$defs/PrincipalId",
+      "description": "The requesting principal."
+    },
     "resources": {
-      "type": "array",
+      "description": "The resources the invocation touches.",
       "items": {
         "type": "string"
-      }
-    },
-    "effects": {
+      },
       "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "data_classes": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "budget": {
-      "type": "object"
-    },
-    "evidence_obligations": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
+      "uniqueItems": true
     }
   },
-  "additionalProperties": false
+  "required": [
+    "principal",
+    "delegation_chain",
+    "operation",
+    "resources",
+    "budget"
+  ],
+  "title": "OperationIntent",
+  "type": "object"
 }
