@@ -1,60 +1,403 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "First authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. The earlier starter schema was non-authoritative. Do not hand-edit.",
+  "$defs": {
+    "DataClass": {
+      "description": "A data classification governing sources, transforms, retention, locality, and sinks.",
+      "oneOf": [
+        {
+          "const": "public",
+          "description": "Public information.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Internal information.",
+          "type": "string"
+        },
+        {
+          "const": "confidential",
+          "description": "Confidential information.",
+          "type": "string"
+        },
+        {
+          "const": "secret",
+          "description": "Secrets.",
+          "type": "string"
+        },
+        {
+          "const": "regulated",
+          "description": "Regulated data.",
+          "type": "string"
+        },
+        {
+          "const": "personal",
+          "description": "Personal data.",
+          "type": "string"
+        },
+        {
+          "const": "health",
+          "description": "Health data.",
+          "type": "string"
+        },
+        {
+          "const": "financial",
+          "description": "Financial data.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A client-restricted class named by the client.",
+          "properties": {
+            "client_restricted": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_restricted"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Digest": {
+      "description": "A content digest (blake3, lowercase hex).",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Effect": {
+      "description": "An externally visible effect a protected operation may produce.",
+      "oneOf": [
+        {
+          "const": "read_filesystem",
+          "description": "Read from a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "write_filesystem",
+          "description": "Write to a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "spawn_process",
+          "description": "Spawn a process.",
+          "type": "string"
+        },
+        {
+          "const": "network_egress",
+          "description": "Egress to a network.",
+          "type": "string"
+        },
+        {
+          "const": "read_secret",
+          "description": "Read a secret.",
+          "type": "string"
+        },
+        {
+          "const": "write_secret",
+          "description": "Write a secret.",
+          "type": "string"
+        },
+        {
+          "const": "read_external_system",
+          "description": "Read from an external system.",
+          "type": "string"
+        },
+        {
+          "const": "write_external_system",
+          "description": "Write to an external system.",
+          "type": "string"
+        },
+        {
+          "const": "create_artifact",
+          "description": "Create an artifact.",
+          "type": "string"
+        },
+        {
+          "const": "change_authorization",
+          "description": "Change an authorization.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExtensionProvenance": {
+      "additionalProperties": false,
+      "description": "Provenance and signature binding for an extension package.",
+      "properties": {
+        "package_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact extension package."
+        },
+        "signature": {
+          "description": "Signature over the package digest.",
+          "type": "string"
+        },
+        "signer": {
+          "description": "Identity of the signer or attesting authority.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "package_digest",
+        "signer",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "ExtensionRequirements": {
+      "additionalProperties": false,
+      "description": "Capabilities and effect surfaces requested by an extension.",
+      "properties": {
+        "actions": {
+          "description": "Semantic actions the extension requests.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "budget": {
+          "$ref": "#/$defs/ResourceBudget",
+          "description": "Resource budget requested from the host."
+        },
+        "capabilities": {
+          "description": "Named host capabilities the extension requests.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "data_classes": {
+          "description": "Data classes the extension handles.",
+          "items": {
+            "$ref": "#/$defs/DataClass"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "effects": {
+          "description": "Externally visible effects the extension requests.",
+          "items": {
+            "$ref": "#/$defs/Effect"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "filesystem": {
+          "description": "Filesystem access the extension requests.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "network": {
+          "description": "Network access the extension requests.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "process": {
+          "description": "Process execution the extension requests.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "resources": {
+          "description": "Resource patterns the extension requests.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "schemas": {
+          "description": "Schemas the extension consumes or produces.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "capabilities",
+        "actions",
+        "effects",
+        "resources",
+        "data_classes",
+        "network",
+        "process",
+        "filesystem",
+        "schemas",
+        "budget"
+      ],
+      "type": "object"
+    },
+    "ProtocolRequirement": {
+      "additionalProperties": false,
+      "description": "A fail-closed compatibility requirement declared by an extension or peer.",
+      "properties": {
+        "major": {
+          "description": "Required protocol major version.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "minimum_minor": {
+          "description": "Oldest protocol minor version that satisfies the requirement.",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "major",
+        "minimum_minor"
+      ],
+      "type": "object"
+    },
+    "ResourceBudget": {
+      "additionalProperties": false,
+      "description": "Bounded consumption limits on a delegation or operation.",
+      "properties": {
+        "cpu_ms": {
+          "description": "CPU-time limit in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "external_cost_microunits": {
+          "description": "External spend limit in microunits.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "io_bytes": {
+          "description": "I/O limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "memory_bytes": {
+          "description": "Memory limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_bytes": {
+          "description": "Network transfer limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wall_ms": {
+          "description": "Wall-clock limit in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TrustClass": {
+      "description": "The trust class of an extension, per docs/10-EXTENSIONS.md.",
+      "oneOf": [
+        {
+          "const": "declarative",
+          "description": "Declarative domain pack: knowledge, probes, mappings, policy templates.",
+          "type": "string"
+        },
+        {
+          "const": "trusted_in_process",
+          "description": "Small audited kernel-adjacent component running in process.",
+          "type": "string"
+        },
+        {
+          "const": "isolated_native",
+          "description": "External-system bridge under OS/process isolation.",
+          "type": "string"
+        },
+        {
+          "const": "sandboxed_component",
+          "description": "Third-party executable code under the sandboxed component boundary.",
+          "type": "string"
+        }
+      ]
+    }
+  },
   "$id": "urn:politeia:extension-manifest:v1",
-  "title": "ExtensionManifest",
-  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A typed extension manifest: the capabilities an extension requests. Every\nrequirement is a request the host may deny, never an entitlement.",
+  "properties": {
+    "compatibility": {
+      "$ref": "#/$defs/ProtocolRequirement",
+      "description": "Typed compatibility requirement for the host semantic protocol."
+    },
+    "id": {
+      "description": "Stable extension identity.",
+      "type": "string"
+    },
+    "provenance": {
+      "$ref": "#/$defs/ExtensionProvenance",
+      "description": "Provenance and signature over the exact extension package."
+    },
+    "provides": {
+      "description": "Semantic operations the extension provides.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "requires": {
+      "$ref": "#/$defs/ExtensionRequirements",
+      "description": "Capabilities and bounded resources requested from the host."
+    },
+    "trust_class": {
+      "$ref": "#/$defs/TrustClass",
+      "description": "The trust class requested."
+    },
+    "version": {
+      "description": "Extension version.",
+      "type": "string"
+    }
+  },
   "required": [
     "id",
     "version",
+    "compatibility",
     "trust_class",
     "provides",
-    "requires"
+    "requires",
+    "provenance"
   ],
-  "properties": {
-    "id": {
-      "type": "string"
-    },
-    "version": {
-      "type": "string"
-    },
-    "trust_class": {
-      "enum": [
-        "declarative",
-        "trusted_in_process",
-        "isolated_native",
-        "sandboxed_component"
-      ]
-    },
-    "provides": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "requires": {
-      "type": "object",
-      "properties": {
-        "actions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "effects": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "data_classes": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "additionalProperties": false
-    }
-  },
-  "additionalProperties": false
+  "title": "ExtensionManifest",
+  "type": "object"
 }

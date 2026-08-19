@@ -34,6 +34,6 @@ Start with [`START_HERE.md`](START_HERE.md).
 
 ## License
 
-Open source under the **Mozilla Public License 2.0** — see [`LICENSE`](LICENSE). Modifications to
-this project's own files stay MPL when distributed; adapters, domain packs, and configuration
+Open source under the **Mozilla Public License 2.0**. See [`LICENSE`](LICENSE). Modifications to
+this project's own files stay MPL when distributed. Adapters, domain packs, and configuration
 built on top remain yours to keep private. Copyright Ardent Works LLC (<https://ardent.tools>).

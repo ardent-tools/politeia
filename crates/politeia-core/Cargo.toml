@@ -1,6 +1,6 @@
 [package]
 name = "politeia-core"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -8,9 +8,15 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 schemars.workspace = true
-thiserror.workspace = true
 uuid.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 blake3.workspace = true
 serde_json.workspace = true
 
+[lints]
+workspace = true
+
+[package.metadata.kanon]
+maturity = "scaffold"
+since = "2026-08-19"
+exit-criteria = "Phase 0 ontology, identity, delegation, operation/effect, and budget invariants are finalized and their property and negative tests pass"

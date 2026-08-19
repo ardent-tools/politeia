@@ -1,6 +1,6 @@
 [package]
 name = "politeiad"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -8,4 +8,11 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
-politeia-protocol = { path = "../politeia-protocol" }
+
+[lints]
+workspace = true
+
+[package.metadata.kanon]
+maturity = "scaffold"
+since = "2026-08-19"
+exit-criteria = "The daemon demonstrates the complete docs/18 first vertical slice under adversarial tests with every trusted component explained"

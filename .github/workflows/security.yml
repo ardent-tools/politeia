@@ -1,0 +1,64 @@
+# WHY: block merges on known vulnerabilities and license/source/ban
+# violations. Runs `cargo deny` (licenses, sources, bans, advisories) and an
+# independent `cargo audit` (RustSec DB) on every PR and daily against main so
+# newly-published advisories against existing deps surface even when no PR is
+# open.
+name: security
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Daily at 05:17 CST (11:17 UTC). Off-peak minute per the fleet rule about
+    # avoiding :00/:30 cron schedules.
+    - cron: "17 11 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    # WHY: licenses, banned crates, source registries, and the RustSec
+    # advisory DB in one pass, driven by deny.toml. Suppressions require a
+    # deny.toml entry with a reason, not silent flags.
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check advisories licenses bans sources
+          arguments: --all-features
+
+  cargo-audit:
+    # WHY: a second, independent advisory scanner so a bug or config drift in
+    # either tool cannot silently disable both.
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      # WHY: a prebuilt scanner binary decouples the scanner's own MSRV from
+      # this repo's toolchain. The scanner version is pinned and deliberately
+      # reviewed, never floated.
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: cargo-audit@0.22.2
+      - name: cargo audit
+        run: cargo audit --deny unmaintained --deny unsound --deny yanked

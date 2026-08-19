@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,13 @@ rust-version.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
-politeia-core = { path = "../crates/politeia-core" }
-politeia-policy = { path = "../crates/politeia-policy" }
-politeia-evidence = { path = "../crates/politeia-evidence" }
-politeia-protocol = { path = "../crates/politeia-protocol" }
-politeia-sdk = { path = "../crates/politeia-sdk" }
+politeia-runtime.workspace = true
+politeia-sdk.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.kanon]
+maturity = "scaffold"
+since = "2026-08-19"
+exit-criteria = "CI derives ExtensionManifest and OperationIntent schemas from their Rust owners to a byte-for-byte fixed point and rejects stale checked-in projections"

@@ -1,0 +1,9 @@
+# Reasoned suppressions — each entry names WHY the rule does not apply here, so the
+# remaining lint output stays a check that can pass.
+#
+# WRITING/ai-trope:harness: "agent harness" is the product's core technical
+# vocabulary (harness independence is a constitutional property, docs/02 and
+# ADR-0002), not an AI-trope filler word. Scoped to the surfaces that use it
+# technically.
+WRITING/ai-trope:harness:README.md
+WRITING/ai-trope:harness:docs/**

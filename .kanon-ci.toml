@@ -10,21 +10,21 @@ cmd = "cargo fmt --all -- --check"
 timeout_secs = 300
 
 [stages."cargo check"]
-cmd = "cargo check --workspace --all-targets"
+cmd = "cargo check --workspace --all-targets --locked --jobs 8"
 timeout_secs = 600
 
 [stages."cargo clippy"]
-cmd = "cargo clippy --workspace --all-targets -- -D warnings"
+cmd = "cargo clippy --workspace --all-targets --locked --jobs 8 -- -D warnings"
 timeout_secs = 600
 
 [stages."cargo test"]
-cmd = "cargo test --workspace"
+cmd = "cargo test --workspace --locked --jobs 8 -- --test-threads 8"
 timeout_secs = 600
 
 [stages."xtask check"]
-cmd = "cargo run -p xtask -- check"
+cmd = "cargo run -p xtask --locked --jobs 8 -- check"
 timeout_secs = 300
 
 [stages."xtask derive"]
-cmd = "cargo run -p xtask -- derive && git diff --exit-code"
+cmd = "cargo run -p xtask --locked --jobs 8 -- derive && git diff --exit-code"
 timeout_secs = 300
