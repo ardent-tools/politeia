@@ -17,3 +17,6 @@ async-trait.workspace = true
 politeia-core = { path = "../politeia-core" }
 politeia-policy = { path = "../politeia-policy" }
 politeia-evidence = { path = "../politeia-evidence" }
+
+[dev-dependencies]
+tokio.workspace = true
