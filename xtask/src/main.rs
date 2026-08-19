@@ -27,15 +27,16 @@ fn derive() -> anyhow::Result<()> {
         (
             "spec/semantic-operation.schema.json",
             "urn:politeia:semantic-operation:v1",
-            serde_json::to_value(schemars::schema_for!(
-                politeia_runtime::OperationIntent
-            ))?,
+            serde_json::to_value(schemars::schema_for!(politeia_runtime::OperationIntent))?,
         ),
     ];
     for (path, urn, mut value) in specs {
         let obj = value.as_object_mut().context("schema root is an object")?;
         // The published URN stays stable regardless of schemars' own titling.
-        obj.insert("$id".to_string(), serde_json::Value::String(urn.to_string()));
+        obj.insert(
+            "$id".to_string(),
+            serde_json::Value::String(urn.to_string()),
+        );
         obj.insert(
             "$comment".to_string(),
             serde_json::Value::String(
@@ -59,7 +60,10 @@ fn check() -> anyhow::Result<()> {
         "docs/04-KERNEL_CONTRACT.md",
         "docs/18-FIRST_VERTICAL_SLICE.md",
     ] {
-        anyhow::ensure!(std::path::Path::new(required).exists(), "missing {required}");
+        anyhow::ensure!(
+            std::path::Path::new(required).exists(),
+            "missing {required}"
+        );
     }
     println!("starter structural checks passed");
     Ok(())

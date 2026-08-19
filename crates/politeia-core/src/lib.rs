@@ -33,7 +33,10 @@ macro_rules! typed_id {
     };
 }
 
-typed_id!(PrincipalId, "Identity of an actor capable of requesting work.");
+typed_id!(
+    PrincipalId,
+    "Identity of an actor capable of requesting work."
+);
 typed_id!(
     DelegationId,
     "Identity of a delegation from one authority context to another."
@@ -43,10 +46,7 @@ typed_id!(
     "Identity of a content-addressable subject of work or evidence."
 );
 typed_id!(OperationId, "Identity of a typed operation contract.");
-typed_id!(
-    PolicyBundleId,
-    "Identity of an immutable policy bundle."
-);
+typed_id!(PolicyBundleId, "Identity of an immutable policy bundle.");
 typed_id!(
     RuntimeGenerationId,
     "Identity of an immutable runtime generation (executable + policy + schema + trusted packs/adapters)."
