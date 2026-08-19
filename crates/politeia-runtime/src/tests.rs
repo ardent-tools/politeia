@@ -58,10 +58,10 @@ impl PolicyDecisionPoint for AllowAll {
             Some(DecisionFault::Principal) => decision.principal = PrincipalId::new(),
             Some(DecisionFault::Bundle) => decision.bundle = PolicyBundleId::new(),
             Some(DecisionFault::PolicyDigest) => {
-                decision.policy_digest = Digest::blake3(b"wrong policy")
+                decision.policy_digest = Digest::blake3(b"wrong policy");
             }
             Some(DecisionFault::IntentDigest) => {
-                decision.intent_digest = Digest::blake3(b"wrong intent")
+                decision.intent_digest = Digest::blake3(b"wrong intent");
             }
             Some(DecisionFault::Deny) => decision.allowed = false,
             None => {}
