@@ -26,7 +26,7 @@ pub struct SemanticResponse {
 }
 
 pub fn negotiate(peer: &ProtocolVersion) -> Option<ProtocolVersion> {
-    (peer.major == SEMANTIC_PROTOCOL_MAJOR).then(|| ProtocolVersion {
+    (peer.major == SEMANTIC_PROTOCOL_MAJOR).then_some(ProtocolVersion {
         major: SEMANTIC_PROTOCOL_MAJOR,
         minor: peer.minor,
     })
