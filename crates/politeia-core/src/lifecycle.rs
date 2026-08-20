@@ -43,12 +43,12 @@ impl LifecycleProfile {
         matches!(
             (self, target),
             (Self::Bootstrap, Self::Commissioning)
-                | (Self::Commissioning, Self::Operational)
-                | (Self::Operational, Self::Maintenance)
-                | (Self::Maintenance, Self::Operational)
-                | (Self::Operational, Self::Recommissioning)
+                | (
+                    Self::Commissioning | Self::Maintenance | Self::Recommissioning,
+                    Self::Operational,
+                )
+                | (Self::Operational, Self::Maintenance | Self::Recommissioning)
                 | (Self::Maintenance, Self::Recommissioning)
-                | (Self::Recommissioning, Self::Operational)
         )
     }
 }
