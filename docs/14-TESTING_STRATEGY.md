@@ -45,3 +45,46 @@ The first proof must implement the `POL-A` through `POL-L` claims registered in 
 - `POL-L`: disconnect vendor endpoints and prove policy, execution, evidence, verification, the current generation, and an authorized local update path remain available.
 
 Each claim needs a positive case, a negative/adversarial case, and an explicit falsifier. Receipts bind the exact source, workspace, generation, policy, lifecycle, execution-resource, adapter, and harness identities. Unit tests may prove typed invariants; physical custody, network disconnection, account replacement, and clean-machine operation require deployment evidence and may not be claimed from an in-memory fixture.
+
+## Follow-on proof packages
+
+`POL-O` closes Phase 0 for the first enforced control. The phase-owned `POL-M`, `POL-N`, `POL-P`,
+and `POL-Q` claims refine later acceptance and do not expand the smaller `POL-A` through `POL-L`
+commissioning slice. Each public contract requires its proof package before implementation credit:
+
+- `POL-M`: vary delivery state, execution outcome, epistemic resolution, and replay disposition
+  independently. Issue an immutable envelope, withhold outcome evidence, and prove an overlapping
+  at-most-once effect has no invented outcome, remains epistemically unresolved, and stays blocked.
+
+  - Prove alternate encodings and fresh local IDs cannot evade canonical overlap. Prove a repeat
+    only when an exact target idempotency contract covers the same effect subject, request body, key
+    scope, and retention window.
+  - Expire a bound precondition before use and require target-side revalidation. Reject wrong
+    audience, resource, or adapter identities and a revoked authority at the target.
+  - Prove an effect port cannot consume an envelope directly. The target dispatcher creates and
+    consumes the single-use admission, derives the intent exclusively from the exact envelope,
+    reauthorizes current state, and atomically binds admission/envelope/effect-subject to the local
+    lease reservation before releasing the lease or invoking the port. Consume the same admission
+    twice and require the second attempt to fail with an unchanged port call count.
+  - Validate one envelope and attempt to mint for a substituted request, authority, policy/runtime,
+    audience, resource, adapter, or effect subject; require rejection with port call count zero.
+    Drift revocation or policy/runtime state between issue and target authorization and require the
+    same failure.
+  - Bind a later receipt to the admission and local execution evidence.
+- `POL-N`: present an eligible source object that a faulty recognizer would omit and require the
+  membership proof to fail before projection. Present an included member without its required
+  contract and require an attributable derivation failure. Then use equal-sized but differently
+  identified source/output populations and require the identity-set comparison to fail.
+- `POL-O`: send known-good and planted-bad inputs through the actual mediation path and bind the
+  observed clean/refusal result to the exact control, path, subject, and population. Submit a
+  forged `clean` without activation or coverage evidence and require assurance aggregation to
+  reject it. Exercise `violation`, `not_run`, `unavailable`, `unevaluable`, `unexpectedly_empty`,
+  `not_applicable`, and `unresolved` independently; preserve each distinction and prove none can
+  aggregate as clean.
+- `POL-P`: deliver or attest artifact `A`, append a correction and a superseding `B`, and prove
+  `A`'s bytes/digest remain unchanged while the current interpretation is reproducible from the
+  admitted records. Add two competing live successors and a supersession cycle; both project to an
+  explicit unresolved current assessment. Arbitrary timestamp precedence is invalid.
+- `POL-Q`: offer a highly relevant unauthorized source and a weaker authorized source; the former
+  never enters the ranking set. For a current-state task, canonical current state outranks stronger
+  archival text unless the intent explicitly requests history.

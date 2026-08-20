@@ -11,6 +11,14 @@ Treat this repository as a specification-first greenfield system.
 - Define canonical serialization/digest rules.
 - Define the first migration format.
 - Define the first transport-neutral operation envelope.
+- Define orthogonal delivery, execution-outcome, epistemic-resolution, and replay-disposition state
+  machines plus stable effect-subject overlap before implementing disconnected execution.
+- Define the authoritative membership selector/manifest, type-or-fail boundary, and selected-source
+  versus output identity proof for every first-phase governed derivation.
+- Define activation evidence and the exact `ControlResult` states from `03-ONTOLOGY.md` before
+  promoting a control to enforced.
+- Define correction, supersession, and current-assessment projection semantics without rewriting
+  delivered or attested subjects.
 - Define the exact authority of bootstrap reconnaissance.
 - Establish an explicit threat model for the first vertical slice.
 - Define the lifecycle-profile state machine separately from deployment topology.
@@ -18,6 +26,8 @@ Treat this repository as a specification-first greenfield system.
 - Define the generation manifest, canonical specialization inputs, and reproducibility contract.
 - Define execution-resource requirements, routing decisions, escalation, and their binding into authorization.
 - Assign every `POL-A` through `POL-L` assurance claim a mechanism, evidence owner, adversarial test, residual risk, and falsifier.
+- Assign `POL-M` through `POL-Q` to their named owning phase; do not claim them from prose or pull
+  them into the first commissioning proof merely because their contracts are documented.
 
 ## Do not do yet
 
