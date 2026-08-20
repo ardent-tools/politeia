@@ -366,7 +366,7 @@ mod tests {
     fn fixture() -> Fixture {
         let institution = InstitutionId::new();
         let workspace_id = InstitutionWorkspaceId::new();
-        let trust_domain = "client-a:production"
+        let trust_domain: TrustDomainId = "client-a:production"
             .parse()
             .expect("fixture trust domain is canonical");
         let policy_bundle = PolicyBundleId::new();

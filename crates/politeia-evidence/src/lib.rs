@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 
-use jiff::Timestamp;
 use politeia_core::{
     AdapterId, CommissioningRecordId, DelegationId, Digest, EvidenceId, InstitutionId,
     InstitutionWorkspaceId, PolicyBundleId, PrincipalId, RuntimeGenerationId,

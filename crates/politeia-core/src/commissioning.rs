@@ -1178,12 +1178,12 @@ mod tests {
         reason = "explicit empty-obligation approval must remain constructible"
     )]
     fn obligations_cannot_change_or_disappear_after_approval() {
-        let fixture = fixture(BTreeSet::from(["retain audit log".to_string()]));
+        let populated = fixture(BTreeSet::from(["retain audit log".to_string()]));
         assert!(matches!(
             record(
-                &fixture,
-                [fixture.grant.clone()],
-                fixture_evidence(&fixture),
+                &populated,
+                [populated.grant.clone()],
+                fixture_evidence(&populated),
                 BTreeSet::new(),
             ),
             Err(CommissioningError::UnexpectedApproval)

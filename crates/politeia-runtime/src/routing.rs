@@ -1082,7 +1082,7 @@ mod tests {
         reason = "self-verification fixture uses canonical control-domain identities"
     )]
     fn self_verified_or_stale_capability_evidence_is_ineligible() {
-        let resource = resource(
+        let tool = resource(
             ExecutionLocality::ClientLocal,
             ExecutionResourceDescriptor::DeterministicTool {
                 artifact_digest: Digest::blake3(b"tool"),
@@ -1091,18 +1091,17 @@ mod tests {
             1,
         );
         let now = Timestamp::now();
-        let self_verifier = (PrincipalId::new(), resource.control_domain.clone());
-        let (self_profile, self_verification) =
-            profile(&resource, "read_source", &self_verifier, now);
+        let self_verifier = (PrincipalId::new(), tool.control_domain.clone());
+        let (self_profile, self_verification) = profile(&tool, "read_source", &self_verifier, now);
         let mut no_result_verification =
             requirement(BTreeSet::from([ExecutionLocality::ClientLocal]));
         no_result_verification.require_independent_result_verification = false;
         let decision = Router::route(
             &no_result_verification,
-            [resource.clone()],
+            [tool.clone()],
             [self_profile],
             [self_verification],
-            &snapshot(&[&resource], now),
+            &snapshot(&[&tool], now),
             now,
         )
         .expect("routing inputs are structurally valid");
@@ -1113,29 +1112,29 @@ mod tests {
         assert!(
             decision
                 .rejected_resources
-                .get(&resource.id)
+                .get(&tool.id)
                 .is_some_and(|reasons| reasons.contains(&RoutingRejection::SelfVerifiedCapability)),
             "a resource cannot certify its own independent capability evidence"
         );
 
         let verifier = verifier();
         let (mut stale_profile, mut stale_verification) =
-            profile(&resource, "read_source", &verifier, now);
+            profile(&tool, "read_source", &verifier, now);
         stale_verification.expires_at = now;
         stale_profile.verification_digest = stale_verification
             .digest()
             .expect("stale verification still encodes");
         let stale_decision = Router::route(
             &requirement(BTreeSet::from([ExecutionLocality::ClientLocal])),
-            [resource.clone()],
+            [tool.clone()],
             [stale_profile],
             [stale_verification],
-            &snapshot(&[&resource], now),
+            &snapshot(&[&tool], now),
             now,
         )
         .expect("stale evidence is a typed rejection, not malformed input");
         assert!(
-            stale_decision.rejected_resources.get(&resource.id).is_some_and(
+            stale_decision.rejected_resources.get(&tool.id).is_some_and(
                 |reasons| reasons.contains(&RoutingRejection::StaleCapabilityEvidence)
             )
         );
@@ -1165,24 +1164,23 @@ mod tests {
             "a human resource cannot verify itself under a relabeled control domain"
         );
 
-        let (profile, mut mismatched_verification) =
-            profile(&resource, "read_source", &verifier, now);
+        let (profile, mut mismatched_verification) = profile(&tool, "read_source", &verifier, now);
         mismatched_verification
             .capabilities
             .insert("caller_asserted_capability".to_string());
         let mismatch_decision = Router::route(
             &requirement(BTreeSet::from([ExecutionLocality::ClientLocal])),
-            [resource.clone()],
+            [tool.clone()],
             [profile],
             [mismatched_verification],
-            &snapshot(&[&resource], now),
+            &snapshot(&[&tool], now),
             now,
         )
         .expect("mismatched trusted receipt is a typed rejection");
         assert!(
             mismatch_decision
                 .rejected_resources
-                .get(&resource.id)
+                .get(&tool.id)
                 .is_some_and(|reasons| reasons.contains(&RoutingRejection::VerifierNotAdmitted)),
             "a profile cannot rewrite the exact trusted verification claim"
         );
