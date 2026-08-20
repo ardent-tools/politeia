@@ -2,6 +2,9 @@ use std::cmp::Ordering;
 
 use super::{ExecutionLocality, ExecutionResource, SoftPreference};
 
+/// Compare eligible resources by ordered preferences and stable identity.
+///
+/// Time: O(p). Space: O(1), where p is the preference count.
 pub(super) fn compare_resources(
     left: &ExecutionResource,
     right: &ExecutionResource,

@@ -98,6 +98,9 @@ impl TrustedCommissionerGrantRegistry {
         })
     }
 
+    /// Iterate grants active for one exact institution workspace at snapshot time.
+    ///
+    /// Time: O(g). Space: O(1), where g is the admitted grant count.
     pub(super) fn active_for<'a>(
         &'a self,
         institution: &'a InstitutionId,
