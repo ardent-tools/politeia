@@ -4,9 +4,10 @@ use jiff::SignedDuration;
 
 use super::*;
 use crate::{
-    AdapterId, DataClass, Effect, ResourceBudget,
+    AdapterId, DataClass, Effect, EvidenceId, PrincipalId, ResourceBudget,
+    evidence::{IndependenceClass, TrustedEvidenceRegistry},
     generation::{CommissioningCapability, ReproducibilityContract},
-    institution::TrustDomainId,
+    institution::{InstitutionWorkspace, TrustDomainId},
     lifecycle::{DeploymentTopology, LifecycleProfile},
 };
 
