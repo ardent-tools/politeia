@@ -11,6 +11,18 @@ Use a normalized authoritative state model plus immutable journals.
 
 Do not require reconstruction of all operational state solely through event replay.
 
+Delivered, published, or attested artifact bytes are immutable by digest. A later `Correction`
+amends interpretation and a `Supersession` selects a newer subject for future use; neither rewrites
+the historical object. Current views derive the applicable interpretation while retaining what a
+recipient or decision actually observed.
+
+Use assessment events where changing interpretation and its provenance matter, then derive a
+`CurrentAssessment` from admitted observations, assessments, corrections, supersessions, verdict
+changes, and the criterion version. Supersession is a directed relation over exact subjects, not a
+newest-timestamp shortcut. Multiple live successors, cycles, or unresolved conflicting corrections
+produce an explicit unresolved view until authorized evidence selects a valid path. Keep ordinary
+normalized state where replaying history adds no value.
+
 ## Production authority
 
 Initial production persistence target: PostgreSQL.

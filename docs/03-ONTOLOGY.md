@@ -57,6 +57,35 @@ A role describes a relationship. It never creates ambient authority; a protected
 - `CapabilityProfile`: evidence-backed description of what an exact execution resource has demonstrated under named conditions.
 - `ExecutionRequirement`: hard constraints and ordered soft preferences for selecting a worker.
 - `RoutingDecision`: provenance-bearing selection or escalation that explains hard eligibility, soft comparison, and verification obligations. It is not an authorization.
+- `EffectSubject`: canonical identity derived from the target, resolved operation, resource set, and
+  effect-defining parameters. Equivalent or uncertainly overlapping effects must not evade replay
+  checks through fresh local identifiers or alternate encodings.
+- `ExecutionEnvelope`: immutable cross-context request/authorization carrier binding the exact
+  request-body and resolved `OperationSpec` digests, intent, effect subject, authority,
+  policy/runtime identities, intended target audience and resource/adapter identities,
+  operation-specific precondition contract and evaluation, replay contract, expiry, and evidence
+  obligations. It is neither an effect lease nor evidence that execution occurred.
+- `EnvelopeAdmission`: opaque, single-use target-side record binding the validated envelope digest
+  and effect subject to the exclusively derived local intent, current authorization/replay
+  evaluation, and local lease reservation. It cannot widen or replace envelope authority.
+- `ExecutionReceipt`: evidence about target-side execution bound to the exact envelope admission,
+  local lease/reservation, executor/resource, environment, results, and evidence. It cannot
+  retroactively create missing authority.
+- `DeliveryState`: observed progress of issuing, transferring, acknowledging, and returning an envelope or receipt.
+- `ExecutionOutcome`: target-side semantic result value such as `succeeded`, `failed`,
+  `partially_applied`, or `not_executed`. It carries no confidence or finality; those belong to
+  epistemic resolution. The absence of an outcome is not itself an outcome.
+- `EpistemicResolution`: what admitted evidence establishes about whether the effect executed and
+  the confidence/finality of any outcome. Unresolved knowledge is not a failed or not-executed
+  outcome.
+- `ReplayPolicy`: conditions under which an overlapping effect subject may repeat, must deduplicate at a proven target boundary, requires compensation, or must remain blocked.
+- `ReplayDisposition`: current typed decision for an overlapping effect subject, kept separate from both the static replay policy and the execution outcome.
+- `ExecutionAssessment`: evidence-bearing record that binds, without collapsing, the applicable
+  delivery state, optional execution outcome, epistemic resolution, replay disposition, and
+  supporting evidence.
+- `SemanticClosure`: non-authorizing, transport-independent resolution path attached to a surfaced
+  gap. It references existing semantic operations and preflight requirements; it does not create a
+  second intent model.
 
 ## Commissioning and specialization
 
@@ -74,6 +103,14 @@ Lifecycle and topology are independent axes. A runtime generation binds both; ne
 - `Verification`: independent or designated evaluation of evidence/subject.
 - `Attestation`: durable statement binding subject, evaluator, policy, runtime, and evidence.
 - `EvidenceObligation`: required evidence class for a transition or binding.
+- `ControlResult`: evidence-bearing result with the exact states `clean`, `violation`, `not_run`, `unavailable`, `unevaluable`, `unexpectedly_empty`, `not_applicable`, and `unresolved`.
+- `ActivationProof`: real-path evidence that an exact control version can observe and produce its promised refusal or finding for a known violation while admitting a clean control.
+- `Correction`: append-only evidence that amends the interpretation of an immutable delivered or attested subject.
+- `Supersession`: relation selecting a newer artifact or assessment for future use while preserving the prior subject.
+- `AssessmentEvent`: provenance-bearing observation, assessment, correction, supersession, or verdict change used where historical interpretation matters.
+- `CurrentAssessment`: reproducible projection over the admitted assessment events, criterion
+  version, and deterministic correction/supersession conflict rules. Competing live successors
+  remain unresolved.
 
 ## Learning
 

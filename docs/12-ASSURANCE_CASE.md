@@ -40,4 +40,20 @@ The bounded first proof owns these stable claims. Their detailed tests live in `
 | `POL-K` | Client commissioning and operation have no required dependency on commissioner-controlled or otherwise institution-external infrastructure. | `01-ANTI_SCOPE.md`, `15-SUPPLY_CHAIN.md` |
 | `POL-L` | Disconnecting a vendor-hosted control plane does not disable the current generation or authorized local update path. | `09-PERSISTENCE.md`, `15-SUPPLY_CHAIN.md`, `20-ENGINEERING_HANDOFF.md` |
 
-An assurance record for any claim binds the exact source commit, institution-workspace digest, generation manifest and digest, policy and lifecycle profile, resource/adapter identities, evidence, and test-harness version. A document, a test name, a green CI run, or an actor's self-certification is not itself proof of the claim.
+## Follow-on semantic claims
+
+These claims refine later phase acceptance. Registering them does not expand or prove the bounded
+`POL-A` through `POL-L` first slice.
+
+| ID | Claim | Normative owner |
+|---|---|---|
+| `POL-M` | Disconnected execution binds an immutable request to target-side evidence; an unresolved overlapping effect cannot be treated as not-executed or replayed unsafely. | `04-KERNEL_CONTRACT.md`, `05-SEMANTIC_PROTOCOL.md`, `11-FAILURE_SEMANTICS.md`, `17-OBSERVABILITY_AND_EVIDENCE.md` |
+| `POL-N` | Every source object receives an attributable membership decision under the authoritative selector/manifest; every included member types or fails, and selected-source versus output identity sets prove projection completeness. | `06-POLICY_COMPILER.md` |
+| `POL-O` | Only `clean` with artifact-bound activation and coverage evidence may satisfy an enforced/clean claim; every other canonical `ControlResult` state remains non-clean. | `06-POLICY_COMPILER.md`, `14-TESTING_STRATEGY.md` |
+| `POL-P` | Correcting or superseding a delivered/attested artifact preserves the original bytes and records a provenance-bearing relation from which the current interpretation is reproducible. | `09-PERSISTENCE.md`, `17-OBSERVABILITY_AND_EVIDENCE.md` |
+| `POL-Q` | Context authorization and data eligibility are decided before relevance ranking; stale or archival material cannot silently displace canonical current state for a current-state task. | `16-DATA_GOVERNANCE.md`, `21-CONTEXT_COMPILATION.md` |
+
+An assurance record binds the exact identities applicable to its claim: source commit, institution
+workspace, subject/artifact, policy, generation/lifecycle, resource/adapter, evidence producers,
+and test-harness version. A document, a test name, a green CI run, or an actor's self-certification
+is not itself proof of the claim.

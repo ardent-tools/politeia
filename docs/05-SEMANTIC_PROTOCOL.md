@@ -24,6 +24,37 @@ Commissioning, specialization, routing, and handoff use these semantic contracts
 
 Discovery and preflight may expose execution requirements and eligible resources. Authorization binds the exact routing decision and selected resource before execution; transport framing may not replace either.
 
+## Disconnected execution
+
+When authorized work must cross a trust-domain or connectivity boundary, the protocol may project
+an immutable `ExecutionEnvelope` and accept a bound `ExecutionReceipt`. File bundles, removable
+media, queues, HTTP, and human carriage are transports for the same semantics; none becomes a
+parallel packet subsystem.
+
+The envelope binds the exact request-body and resolved `OperationSpec` digests, intent,
+effect-subject, authority, policy/runtime, operation-specific precondition contract and evaluation,
+intended target audience and resource/adapter identities, replay, expiry, and evidence obligations.
+Preconditions bind their version, subject, observation time, freshness window, and use-time
+revalidation rule. The receipt binds the envelope digest and target-side execution evidence.
+Issuance is not proof of execution, receipt absence is not proof of non-execution, and receipt
+submission does not retroactively authorize an invalid request.
+Delivery state, execution outcome, epistemic resolution, and replay disposition remain independent
+typed axes; an execution assessment records them without collapsing one into another.
+
+An envelope is not an `EffectLease`, and no effect port accepts one. The target validates the
+envelope's exact bindings plus current revocation, policy/runtime, expiry, precondition, and replay
+state, then creates an opaque, single-use `EnvelopeAdmission`. The admission binds the envelope
+digest and effect subject to an `OperationIntent` derived exclusively from that envelope, the
+current authorization/replay evaluation, and the intended target audience/resource/adapter.
+
+The target dispatcher consumes that admission and atomically records the admission, envelope,
+effect-subject, derived-intent, and local lease/reservation identities before invoking an effect
+port. Any request, authority, policy/runtime, audience, resource, adapter, or effect-subject
+substitution fails closed. Only then may it mint the local audience-bound lease and enter the
+protected operation path; minting means the opaque lease is released only after the bound
+authorization/reservation state commits. The receipt binds the admission and target-side local
+execution evidence; carriage never bypasses complete mediation.
+
 ## Protocol rule
 
 Transport adapters may add framing, streaming, authentication carriage, or transport error mapping. They may not reinterpret semantic operation meaning.

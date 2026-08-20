@@ -10,8 +10,11 @@ Agents working in this repository must optimize for semantic correctness, not ap
 - Prefer deriving views from canonical typed representations.
 - Do not make transport protocols (MCP, A2A, HTTP, CLI) own product semantics.
 - Do not bypass the authorized dispatcher for protected effects.
+- Do not treat a missing receipt or ambiguous execution outcome as proof that an effect did not run or is safe to replay.
 - Do not widen delegation or policy through defaults.
 - Do not make a heuristic blocking without explicit detector assurance and calibration.
+- Do not call a control enforced or clean unless evidence proves it ran against the intended subject and can reach its real mediation path.
+- Do not silently omit a source object from a governed population. Derive membership from its authoritative selector/manifest, record every included/excluded decision, and fail an included member with an attributable error when required semantic data is missing.
 - Do not allow the actor being judged to satisfy an independence requirement by self-certification.
 - Do not turn inferred institutional claims into approved truth.
 - Do not add production breadth before the first vertical slice is complete.
@@ -19,6 +22,7 @@ Agents working in this repository must optimize for semantic correctness, not ap
 - Keep institution-specific data, secrets, durable state, inference authority, and production effects in the institution's trust domain by default.
 - Do not hard-code a model/vendor hierarchy. Route typed execution resources only after hard policy, data, capability, and assurance requirements are satisfied.
 - Treat accepted refinement packets as migration inputs. Fold their decisions into the canonical ontology, contracts, ADRs, types, and derived projections instead of preserving a second normative source.
+- Preserve delivered or attested artifact bytes. Corrections and supersessions append with provenance; they do not rewrite historical evidence.
 - When a new abstraction is proposed, state which ambiguity or impossible state it removes.
 - If two concepts become semantically identical, collapse them.
 - Prefer small trusted kernels and narrow effect interfaces.

@@ -19,6 +19,7 @@ This product turns the institution itself into an explicit, typed, evidence-bear
 - Separate normative clauses, detectors, bindings, evidence, decisions, and attestations.
 - Move enforcement to the hardest *semantically faithful* surface.
 - Complete mediation for protected effects.
+- Explicit effect uncertainty: missing outcome evidence is not proof that an issued effect did not run, and unsafe replay fails closed.
 - Monotonic authority: delegated authority can only narrow.
 - Self-maintenance without self-authorization.
 - Exact binding of evidence and attestations to artifact, policy, runtime, adapter, and delegation identities.
@@ -31,6 +32,8 @@ This product turns the institution itself into an explicit, typed, evidence-bear
 - Reproducible specialization into a narrower immutable runtime generation instead of destructive source mutation.
 - Execution-resource neutrality: explicit requirements and evidence select models, deterministic tools, services, and people. Vendor rank never does.
 - Closed-loop learning from observed friction and corrections.
+- Authoritative population membership plus type-or-fail derivation for every included member.
+- Assurance results distinguish a control that proved clean from one that did not run, could not observe its subject, or examined an empty population.
 - Invalid states should be unrepresentable where practical.
 - Product anti-scope is first-class.
 
