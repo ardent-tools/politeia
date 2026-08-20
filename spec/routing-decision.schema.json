@@ -1,0 +1,322 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "AdapterId": {
+      "description": "Identity of an adapter bridging the semantic protocol to an external system.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "CapabilityProfileId": {
+      "description": "Identity of an evidence-backed execution-resource capability profile.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Digest": {
+      "description": "A content digest (blake3, lowercase hex).",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ExecutionLocality": {
+      "description": "Where an execution resource operates relative to the client trust domain.",
+      "oneOf": [
+        {
+          "const": "client_local",
+          "description": "Runs inside the client-controlled local environment.",
+          "type": "string"
+        },
+        {
+          "const": "client_remote",
+          "description": "Runs in a remote environment controlled by the client.",
+          "type": "string"
+        },
+        {
+          "const": "provider_remote",
+          "description": "Runs in a remote provider-controlled environment.",
+          "type": "string"
+        },
+        {
+          "const": "commissioner_local",
+          "description": "Runs on commissioner-controlled infrastructure.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "Other explicitly modeled locality.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionResourceId": {
+      "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "RoutingDecisionId": {
+      "description": "Identity of one evidence-bearing execution-resource selection or escalation.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "RoutingOutcome": {
+      "description": "Result of requirement-first routing.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "One exact resource/profile pair satisfied every hard constraint.",
+          "properties": {
+            "adapter": {
+              "$ref": "#/$defs/AdapterId",
+              "description": "Adapter/effect boundary registered for the resource."
+            },
+            "capability_profile": {
+              "$ref": "#/$defs/CapabilityProfileId",
+              "description": "Selected capability-profile identity."
+            },
+            "capability_profile_digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Digest of the exact selected capability profile."
+            },
+            "control_domain": {
+              "$ref": "#/$defs/TrustDomainId",
+              "description": "Control domain used for verifier-independence judgments."
+            },
+            "locality": {
+              "$ref": "#/$defs/ExecutionLocality",
+              "description": "Locality established by the registered resource definition."
+            },
+            "resource": {
+              "$ref": "#/$defs/ExecutionResourceId",
+              "description": "Selected resource identity."
+            },
+            "resource_digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Digest of the exact immutable resource definition."
+            },
+            "status": {
+              "const": "selected",
+              "type": "string"
+            },
+            "trust_domain": {
+              "$ref": "#/$defs/TrustDomainId",
+              "description": "Trust domain controlling data and execution."
+            }
+          },
+          "required": [
+            "status",
+            "resource",
+            "resource_digest",
+            "adapter",
+            "trust_domain",
+            "control_domain",
+            "locality",
+            "capability_profile",
+            "capability_profile_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "No resource satisfied every hard constraint; explicit escalation is required.",
+          "properties": {
+            "status": {
+              "const": "escalate",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RoutingRejection": {
+      "description": "One hard reason a resource was ineligible.",
+      "oneOf": [
+        {
+          "const": "missing_capability_profile",
+          "description": "No capability profile exists for the resource.",
+          "type": "string"
+        },
+        {
+          "const": "resource_digest_mismatch",
+          "description": "The profile describes different resource bytes.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The resource was not available in the snapshot.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_task_class",
+          "description": "The task class was not independently demonstrated.",
+          "type": "string"
+        },
+        {
+          "const": "missing_capability",
+          "description": "One or more required capabilities are absent.",
+          "type": "string"
+        },
+        {
+          "const": "missing_effect",
+          "description": "The resource boundary lacks a required effect.",
+          "type": "string"
+        },
+        {
+          "const": "data_class_forbidden",
+          "description": "A data class may not cross into this resource.",
+          "type": "string"
+        },
+        {
+          "const": "locality_forbidden",
+          "description": "The resource locality is not allowed.",
+          "type": "string"
+        },
+        {
+          "const": "trust_domain_forbidden",
+          "description": "The resource trust domain is not allowed.",
+          "type": "string"
+        },
+        {
+          "const": "insufficient_context",
+          "description": "The resource context capacity is too small.",
+          "type": "string"
+        },
+        {
+          "const": "cost_exceeded",
+          "description": "The hard maximum cost would be exceeded.",
+          "type": "string"
+        },
+        {
+          "const": "latency_exceeded",
+          "description": "The hard latency deadline would be exceeded.",
+          "type": "string"
+        },
+        {
+          "const": "independent_evidence_missing",
+          "description": "Required independent capability evidence is absent.",
+          "type": "string"
+        },
+        {
+          "const": "verifier_not_admitted",
+          "description": "The named capability verifier is absent from trusted bootstrap or mismatched.",
+          "type": "string"
+        },
+        {
+          "const": "stale_capability_evidence",
+          "description": "Capability evidence is future-dated, empty-lived, or expired.",
+          "type": "string"
+        },
+        {
+          "const": "self_verified_capability",
+          "description": "Resource and verifier share a control domain where independence is required.",
+          "type": "string"
+        },
+        {
+          "const": "deterministic_tool_required",
+          "description": "The task requires a verified deterministic tool.",
+          "type": "string"
+        }
+      ]
+    },
+    "SoftPreference": {
+      "description": "Ordered optimization applied only after every hard requirement succeeds.",
+      "oneOf": [
+        {
+          "const": "prefer_local",
+          "description": "Prefer work closer to the client-controlled environment.",
+          "type": "string"
+        },
+        {
+          "const": "minimize_cost",
+          "description": "Prefer lower estimated monetary cost.",
+          "type": "string"
+        },
+        {
+          "const": "minimize_latency",
+          "description": "Prefer lower estimated latency.",
+          "type": "string"
+        }
+      ]
+    },
+    "TrustDomainId": {
+      "description": "Stable identifier for a client-controlled trust boundary.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:politeia:routing-decision:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Provenance-bearing resource selection or escalation.\n\nA routing decision contains no delegation or effect grant and therefore\ncannot authorize the selected resource by itself.",
+  "properties": {
+    "availability_snapshot_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the exact availability snapshot."
+    },
+    "eligible_resources": {
+      "description": "Every resource that satisfied all hard constraints before ranking.",
+      "items": {
+        "$ref": "#/$defs/ExecutionResourceId"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "expires_at": {
+      "description": "Snapshot expiry, also bounding any selected assignment.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "id": {
+      "$ref": "#/$defs/RoutingDecisionId",
+      "description": "Decision identity."
+    },
+    "independent_verification_required": {
+      "description": "Whether subsequent work requires an independent verifier.",
+      "type": "boolean"
+    },
+    "outcome": {
+      "$ref": "#/$defs/RoutingOutcome",
+      "description": "Selected resource/profile or typed escalation."
+    },
+    "preference_order": {
+      "description": "Exact soft-preference order used to compare eligible resources.",
+      "items": {
+        "$ref": "#/$defs/SoftPreference"
+      },
+      "type": "array"
+    },
+    "rejected_resources": {
+      "additionalProperties": {
+        "items": {
+          "$ref": "#/$defs/RoutingRejection"
+        },
+        "type": "array",
+        "uniqueItems": true
+      },
+      "description": "Hard rejection reasons for each ineligible resource.",
+      "type": "object"
+    },
+    "requirement_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the exact execution requirement."
+    }
+  },
+  "required": [
+    "id",
+    "requirement_digest",
+    "availability_snapshot_digest",
+    "expires_at",
+    "outcome",
+    "eligible_resources",
+    "rejected_resources",
+    "preference_order",
+    "independent_verification_required"
+  ],
+  "title": "RoutingDecision",
+  "type": "object"
+}

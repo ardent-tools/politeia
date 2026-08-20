@@ -1,0 +1,324 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "ApprovedGenerationInputs": {
+      "additionalProperties": false,
+      "description": "Exact institution-approved inputs from which specialization may derive a generation.\n\nKeeping these axes in one canonical value prevents a commissioner from preserving\nthe approved model and policy while substituting an adapter, pack, schema, topology,\ntoolchain, or weaker reproducibility posture during derivation.",
+      "properties": {
+        "adapter_digests": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          },
+          "description": "Trusted adapters included in the generation.",
+          "type": "object"
+        },
+        "component_digests": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          },
+          "description": "Other exact executable, migration, projection, or update components.",
+          "type": "object"
+        },
+        "excluded_commissioning_capabilities": {
+          "description": "Broad commissioning capabilities explicitly absent from this generation.",
+          "items": {
+            "$ref": "#/$defs/CommissioningCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleProfile",
+          "description": "Lifecycle authority/capability posture."
+        },
+        "pack_digests": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          },
+          "description": "Declarative domain packs included in the generation.",
+          "type": "object"
+        },
+        "reproducibility": {
+          "$ref": "#/$defs/ReproducibilityContract",
+          "description": "Exact reproducibility or allowed-nondeterminism contract."
+        },
+        "schema_digests": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          },
+          "description": "Public schemas included in the generation.",
+          "type": "object"
+        },
+        "source_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Exact public source revision/content digest."
+        },
+        "specializer_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the specialization compiler and its configuration."
+        },
+        "toolchain_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact build toolchain and compatibility inputs."
+        },
+        "topology": {
+          "$ref": "#/$defs/DeploymentTopology",
+          "description": "Placement/isolation and assurance posture."
+        }
+      },
+      "required": [
+        "source_digest",
+        "lifecycle",
+        "topology",
+        "schema_digests",
+        "adapter_digests",
+        "pack_digests",
+        "component_digests",
+        "excluded_commissioning_capabilities",
+        "specializer_digest",
+        "toolchain_digest",
+        "reproducibility"
+      ],
+      "type": "object"
+    },
+    "CommissioningCapability": {
+      "description": "Broad engineering capabilities that an operational generation excludes.",
+      "oneOf": [
+        {
+          "const": "generic_reconnaissance",
+          "description": "Open-ended institution reconnaissance.",
+          "type": "string"
+        },
+        {
+          "const": "institution_authoring",
+          "description": "Editing the institution's approved semantic model.",
+          "type": "string"
+        },
+        {
+          "const": "adapter_development",
+          "description": "Developing or changing external-system adapters.",
+          "type": "string"
+        },
+        {
+          "const": "policy_authoring",
+          "description": "Authoring or changing policy semantics.",
+          "type": "string"
+        },
+        {
+          "const": "generation_derivation",
+          "description": "Deriving a replacement runtime generation.",
+          "type": "string"
+        }
+      ]
+    },
+    "CommissioningRecordId": {
+      "description": "Identity of one append-only commissioning provenance record.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DeploymentTopology": {
+      "description": "Placement and assurance posture for a deployment.",
+      "oneOf": [
+        {
+          "const": "local_development",
+          "description": "Single-operator development with local or in-memory state.",
+          "type": "string"
+        },
+        {
+          "const": "client_controlled_single_tenant",
+          "description": "Dedicated client-controlled deployment with durable state.",
+          "type": "string"
+        },
+        {
+          "const": "enterprise_high_assurance",
+          "description": "Isolated deployment with stronger separation of duties and assurance.",
+          "type": "string"
+        }
+      ]
+    },
+    "Digest": {
+      "description": "A content digest (blake3, lowercase hex).",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "InstitutionId": {
+      "description": "Identity of one institution authority domain.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "InstitutionWorkspaceId": {
+      "description": "Identity of one institution-owned commissioning workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LifecycleProfile": {
+      "description": "Authority and capability posture during an institution's lifecycle.",
+      "oneOf": [
+        {
+          "const": "bootstrap",
+          "description": "Bounded read-heavy reconnaissance and candidate-model construction.",
+          "type": "string"
+        },
+        {
+          "const": "commissioning",
+          "description": "Institution-specific engineering and generation derivation.",
+          "type": "string"
+        },
+        {
+          "const": "operational",
+          "description": "Narrow ordinary production operation.",
+          "type": "string"
+        },
+        {
+          "const": "maintenance",
+          "description": "Bounded reconciliation and approved maintenance.",
+          "type": "string"
+        },
+        {
+          "const": "recommissioning",
+          "description": "Explicitly authorized return to broader engineering.",
+          "type": "string"
+        }
+      ]
+    },
+    "PolicyBundleId": {
+      "description": "Identity of an immutable policy bundle.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ReproducibilityContract": {
+      "description": "Reproducibility posture for a runtime generation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Exact inputs must reproduce bit-for-bit identical generation bytes.",
+          "properties": {
+            "kind": {
+              "const": "deterministic",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Named fields may differ under an exact machine-readable contract.",
+          "properties": {
+            "contract_digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Digest of the contract explaining and constraining those fields."
+            },
+            "fields": {
+              "description": "Canonical field paths allowed to vary.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "kind": {
+              "const": "declared_nondeterminism",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "fields",
+            "contract_digest"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuntimeGenerationId": {
+      "$ref": "#/$defs/Digest",
+      "description": "Content-derived identity of an immutable runtime generation.\n\nUnlike actor and record identifiers, a generation identity is never random:\nthe same canonical specialization inputs produce the same identity."
+    },
+    "RuntimeGenerationInputs": {
+      "additionalProperties": false,
+      "description": "Canonical inputs from which one immutable runtime generation is derived.",
+      "properties": {
+        "approved": {
+          "$ref": "#/$defs/ApprovedGenerationInputs",
+          "description": "Exact owner-approved specialization and build plan."
+        },
+        "commissioning_record": {
+          "$ref": "#/$defs/CommissioningRecordId",
+          "description": "Exact commissioning provenance record."
+        },
+        "commissioning_record_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact commissioning record."
+        },
+        "institution": {
+          "$ref": "#/$defs/InstitutionId",
+          "description": "Institution whose operational generation is being derived."
+        },
+        "policy_bundle": {
+          "$ref": "#/$defs/PolicyBundleId",
+          "description": "Approved policy bundle identity."
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact approved policy bundle."
+        },
+        "trust_domain": {
+          "$ref": "#/$defs/TrustDomainId",
+          "description": "Client-controlled trust domain for the generation."
+        },
+        "workspace": {
+          "$ref": "#/$defs/InstitutionWorkspaceId",
+          "description": "Client-owned commissioning workspace identity."
+        },
+        "workspace_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact workspace snapshot."
+        }
+      },
+      "required": [
+        "institution",
+        "workspace",
+        "workspace_digest",
+        "trust_domain",
+        "policy_bundle",
+        "policy_digest",
+        "commissioning_record",
+        "commissioning_record_digest",
+        "approved"
+      ],
+      "type": "object"
+    },
+    "TrustDomainId": {
+      "description": "Stable identifier for a client-controlled trust boundary.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:politeia:runtime-generation:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An immutable, content-addressed specialization of Politeia.",
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/RuntimeGenerationId",
+      "description": "Digest-derived generation identity."
+    },
+    "inputs": {
+      "$ref": "#/$defs/RuntimeGenerationInputs",
+      "description": "Canonical specialization inputs whose bytes derive `id`."
+    }
+  },
+  "required": [
+    "id",
+    "inputs"
+  ],
+  "title": "RuntimeGeneration",
+  "type": "object"
+}

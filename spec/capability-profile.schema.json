@@ -1,0 +1,80 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "CapabilityProfileId": {
+      "description": "Identity of an evidence-backed execution-resource capability profile.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "CapabilityVerificationId": {
+      "description": "Identity of one trusted, time-bounded verification of an exact capability profile.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Digest": {
+      "description": "A content digest (blake3, lowercase hex).",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "ExecutionResourceId": {
+      "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$id": "urn:politeia:capability-profile:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Evidence-backed capability claim for an exact resource under named conditions.",
+  "properties": {
+    "capabilities": {
+      "description": "Named capabilities demonstrated under the profile's conditions.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "id": {
+      "$ref": "#/$defs/CapabilityProfileId",
+      "description": "Profile identity."
+    },
+    "resource": {
+      "$ref": "#/$defs/ExecutionResourceId",
+      "description": "Resource whose behavior was evaluated."
+    },
+    "resource_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the exact immutable resource definition evaluated."
+    },
+    "task_classes": {
+      "description": "Bounded task classes independently observed.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "verification": {
+      "$ref": "#/$defs/CapabilityVerificationId",
+      "description": "Trusted verification record that must be resolved before routing."
+    },
+    "verification_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of that exact trusted verification record."
+    }
+  },
+  "required": [
+    "id",
+    "resource",
+    "resource_digest",
+    "task_classes",
+    "capabilities",
+    "verification",
+    "verification_digest"
+  ],
+  "title": "CapabilityProfile",
+  "type": "object"
+}

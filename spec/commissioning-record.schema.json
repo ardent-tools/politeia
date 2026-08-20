@@ -1,0 +1,821 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "ApprovedCommissioningSubject": {
+      "description": "Typed owner-approved subjects required to complete commissioning.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Exact institution model selected for specialization.",
+          "properties": {
+            "digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Digest of the approved model."
+            },
+            "kind": {
+              "const": "institutional_model",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Exact policy identity and bytes.",
+          "properties": {
+            "digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Digest of the approved policy bytes."
+            },
+            "id": {
+              "$ref": "#/$defs/PolicyBundleId",
+              "description": "Policy bundle identity."
+            },
+            "kind": {
+              "const": "policy_bundle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Complete owner-approved specialization/build input set.",
+          "properties": {
+            "digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Digest of [`ApprovedGenerationInputs`]."
+            },
+            "kind": {
+              "const": "generation_inputs",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Exact unresolved-obligation set, including an explicitly empty set.",
+          "properties": {
+            "digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Domain-separated digest of the institution, workspace, and set."
+            },
+            "kind": {
+              "const": "unresolved_obligations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "digest"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ApprovedGenerationInputs": {
+      "additionalProperties": false,
+      "description": "Exact institution-approved inputs from which specialization may derive a generation.\n\nKeeping these axes in one canonical value prevents a commissioner from preserving\nthe approved model and policy while substituting an adapter, pack, schema, topology,\ntoolchain, or weaker reproducibility posture during derivation.",
+      "properties": {
+        "adapter_digests": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          },
+          "description": "Trusted adapters included in the generation.",
+          "type": "object"
+        },
+        "component_digests": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          },
+          "description": "Other exact executable, migration, projection, or update components.",
+          "type": "object"
+        },
+        "excluded_commissioning_capabilities": {
+          "description": "Broad commissioning capabilities explicitly absent from this generation.",
+          "items": {
+            "$ref": "#/$defs/CommissioningCapability"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleProfile",
+          "description": "Lifecycle authority/capability posture."
+        },
+        "pack_digests": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          },
+          "description": "Declarative domain packs included in the generation.",
+          "type": "object"
+        },
+        "reproducibility": {
+          "$ref": "#/$defs/ReproducibilityContract",
+          "description": "Exact reproducibility or allowed-nondeterminism contract."
+        },
+        "schema_digests": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          },
+          "description": "Public schemas included in the generation.",
+          "type": "object"
+        },
+        "source_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Exact public source revision/content digest."
+        },
+        "specializer_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the specialization compiler and its configuration."
+        },
+        "toolchain_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact build toolchain and compatibility inputs."
+        },
+        "topology": {
+          "$ref": "#/$defs/DeploymentTopology",
+          "description": "Placement/isolation and assurance posture."
+        }
+      },
+      "required": [
+        "source_digest",
+        "lifecycle",
+        "topology",
+        "schema_digests",
+        "adapter_digests",
+        "pack_digests",
+        "component_digests",
+        "excluded_commissioning_capabilities",
+        "specializer_digest",
+        "toolchain_digest",
+        "reproducibility"
+      ],
+      "type": "object"
+    },
+    "CommissionerGrantRecord": {
+      "additionalProperties": false,
+      "description": "One persisted, workspace-scoped commissioner delegation offered to trusted bootstrap.\n\nThe record is inert input until [`TrustedCommissionerGrantRegistry`] admits\nits identity and time interval. Its full delegation binds every authority,\nresource, effect, data, audience, expiry, and budget axis.",
+      "properties": {
+        "delegation": {
+          "$ref": "#/$defs/Delegation",
+          "description": "Complete delegated authority."
+        },
+        "institution": {
+          "$ref": "#/$defs/InstitutionId",
+          "description": "Institution in which the grant applies."
+        },
+        "revoked_at": {
+          "description": "Trusted revocation time, when already revoked.",
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_from": {
+          "description": "Beginning of the trusted grant interval.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "workspace": {
+          "$ref": "#/$defs/InstitutionWorkspaceId",
+          "description": "Exact client workspace covered by the grant."
+        }
+      },
+      "required": [
+        "institution",
+        "workspace",
+        "valid_from",
+        "delegation"
+      ],
+      "type": "object"
+    },
+    "CommissioningApproval": {
+      "additionalProperties": false,
+      "description": "One trusted institution-owner approval of an exact typed subject.\n\nThis output-only value is constructed by [`CommissioningRecord::new`] after\nexact evidence resolution; raw wire input cannot instantiate it directly.",
+      "properties": {
+        "approved": {
+          "$ref": "#/$defs/ApprovedCommissioningSubject"
+        },
+        "evidence": {
+          "$ref": "#/$defs/EvidenceRecord"
+        }
+      },
+      "required": [
+        "approved",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "CommissioningCapability": {
+      "description": "Broad engineering capabilities that an operational generation excludes.",
+      "oneOf": [
+        {
+          "const": "generic_reconnaissance",
+          "description": "Open-ended institution reconnaissance.",
+          "type": "string"
+        },
+        {
+          "const": "institution_authoring",
+          "description": "Editing the institution's approved semantic model.",
+          "type": "string"
+        },
+        {
+          "const": "adapter_development",
+          "description": "Developing or changing external-system adapters.",
+          "type": "string"
+        },
+        {
+          "const": "policy_authoring",
+          "description": "Authoring or changing policy semantics.",
+          "type": "string"
+        },
+        {
+          "const": "generation_derivation",
+          "description": "Deriving a replacement runtime generation.",
+          "type": "string"
+        }
+      ]
+    },
+    "CommissioningRecordId": {
+      "description": "Identity of one append-only commissioning provenance record.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DataClass": {
+      "description": "A data classification governing sources, transforms, retention, locality, and sinks.",
+      "oneOf": [
+        {
+          "const": "public",
+          "description": "Public information.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Internal information.",
+          "type": "string"
+        },
+        {
+          "const": "confidential",
+          "description": "Confidential information.",
+          "type": "string"
+        },
+        {
+          "const": "secret",
+          "description": "Secrets.",
+          "type": "string"
+        },
+        {
+          "const": "regulated",
+          "description": "Regulated data.",
+          "type": "string"
+        },
+        {
+          "const": "personal",
+          "description": "Personal data.",
+          "type": "string"
+        },
+        {
+          "const": "health",
+          "description": "Health data.",
+          "type": "string"
+        },
+        {
+          "const": "financial",
+          "description": "Financial data.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A client-restricted class named by the client.",
+          "properties": {
+            "client_restricted": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_restricted"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Delegation": {
+      "additionalProperties": false,
+      "description": "An attenuation from one authority context to another. A child delegation\nmust narrow its parent on every axis; it may never exceed it.",
+      "properties": {
+        "actions": {
+          "description": "Permitted semantic actions.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "audience": {
+          "description": "Audiences the delegation may act for.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "budget": {
+          "$ref": "#/$defs/ResourceBudget",
+          "description": "Consumption bounds."
+        },
+        "data_classes": {
+          "description": "Data classes the delegation may touch.",
+          "items": {
+            "$ref": "#/$defs/DataClass"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "effects": {
+          "description": "Effects the delegation may produce.",
+          "items": {
+            "$ref": "#/$defs/Effect"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "expires_at": {
+          "description": "Expiry instant (fail-closed at and after this time).",
+          "format": "date-time",
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/DelegationId",
+          "description": "This delegation's identity."
+        },
+        "issuer": {
+          "$ref": "#/$defs/PrincipalId",
+          "description": "The principal issuing the delegation."
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DelegationId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The parent delegation this one attenuates, if any."
+        },
+        "resources": {
+          "description": "Resources the delegation reaches.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "subject": {
+          "$ref": "#/$defs/PrincipalId",
+          "description": "The principal receiving the delegation."
+        }
+      },
+      "required": [
+        "id",
+        "issuer",
+        "subject",
+        "actions",
+        "resources",
+        "effects",
+        "data_classes",
+        "audience",
+        "expires_at",
+        "budget"
+      ],
+      "type": "object"
+    },
+    "DelegationId": {
+      "description": "Identity of a delegation from one authority context to another.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DeploymentTopology": {
+      "description": "Placement and assurance posture for a deployment.",
+      "oneOf": [
+        {
+          "const": "local_development",
+          "description": "Single-operator development with local or in-memory state.",
+          "type": "string"
+        },
+        {
+          "const": "client_controlled_single_tenant",
+          "description": "Dedicated client-controlled deployment with durable state.",
+          "type": "string"
+        },
+        {
+          "const": "enterprise_high_assurance",
+          "description": "Isolated deployment with stronger separation of duties and assurance.",
+          "type": "string"
+        }
+      ]
+    },
+    "Digest": {
+      "description": "A content digest (blake3, lowercase hex).",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Effect": {
+      "description": "An externally visible effect a protected operation may produce.",
+      "oneOf": [
+        {
+          "const": "read_filesystem",
+          "description": "Read from a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "write_filesystem",
+          "description": "Write to a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "spawn_process",
+          "description": "Spawn a process.",
+          "type": "string"
+        },
+        {
+          "const": "network_egress",
+          "description": "Egress to a network.",
+          "type": "string"
+        },
+        {
+          "const": "read_secret",
+          "description": "Read a secret.",
+          "type": "string"
+        },
+        {
+          "const": "write_secret",
+          "description": "Write a secret.",
+          "type": "string"
+        },
+        {
+          "const": "read_external_system",
+          "description": "Read from an external system.",
+          "type": "string"
+        },
+        {
+          "const": "write_external_system",
+          "description": "Write to an external system.",
+          "type": "string"
+        },
+        {
+          "const": "create_artifact",
+          "description": "Create an artifact.",
+          "type": "string"
+        },
+        {
+          "const": "change_authorization",
+          "description": "Change an authorization.",
+          "type": "string"
+        }
+      ]
+    },
+    "EvidenceId": {
+      "description": "Identity of a provenance-bearing evidence record admitted for a claim.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "EvidenceRecord": {
+      "additionalProperties": false,
+      "description": "A provenance-bearing evidence record admitted for an exact subject.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/EvidenceId",
+          "description": "This record's identity."
+        },
+        "independence": {
+          "$ref": "#/$defs/IndependenceClass",
+          "description": "The producer's independence from the actor being judged."
+        },
+        "method": {
+          "description": "The collection method (how the evidence was produced).",
+          "type": "string"
+        },
+        "observed_at": {
+          "description": "Trusted observation time assigned by the admitting evidence store.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "payload_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the evidence payload."
+        },
+        "producer": {
+          "$ref": "#/$defs/PrincipalId",
+          "description": "The principal that produced the evidence."
+        },
+        "producer_delegation": {
+          "$ref": "#/$defs/DelegationId",
+          "description": "Exact delegation under which the producer emitted the record."
+        },
+        "subject": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact subject the evidence is about."
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "producer",
+        "producer_delegation",
+        "method",
+        "payload_digest",
+        "observed_at",
+        "independence"
+      ],
+      "type": "object"
+    },
+    "IndependenceClass": {
+      "description": "How independent the evidence producer is from the actor being judged.",
+      "oneOf": [
+        {
+          "const": "self_reported",
+          "description": "The actor reports on itself (weakest; never satisfies an\nindependent-verification obligation).",
+          "type": "string"
+        },
+        {
+          "const": "same_actor_different_process",
+          "description": "Same actor, separate process.",
+          "type": "string"
+        },
+        {
+          "const": "independent_agent",
+          "description": "A different agent produced the evidence.",
+          "type": "string"
+        },
+        {
+          "const": "independent_service",
+          "description": "A separate service produced the evidence.",
+          "type": "string"
+        },
+        {
+          "const": "human_authority",
+          "description": "A human authority produced or approved the evidence.",
+          "type": "string"
+        }
+      ]
+    },
+    "InstitutionId": {
+      "description": "Identity of one institution authority domain.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "InstitutionWorkspaceId": {
+      "description": "Identity of one institution-owned commissioning workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LifecycleProfile": {
+      "description": "Authority and capability posture during an institution's lifecycle.",
+      "oneOf": [
+        {
+          "const": "bootstrap",
+          "description": "Bounded read-heavy reconnaissance and candidate-model construction.",
+          "type": "string"
+        },
+        {
+          "const": "commissioning",
+          "description": "Institution-specific engineering and generation derivation.",
+          "type": "string"
+        },
+        {
+          "const": "operational",
+          "description": "Narrow ordinary production operation.",
+          "type": "string"
+        },
+        {
+          "const": "maintenance",
+          "description": "Bounded reconciliation and approved maintenance.",
+          "type": "string"
+        },
+        {
+          "const": "recommissioning",
+          "description": "Explicitly authorized return to broader engineering.",
+          "type": "string"
+        }
+      ]
+    },
+    "PolicyBundleId": {
+      "description": "Identity of an immutable policy bundle.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "PrincipalId": {
+      "description": "Identity of an actor capable of requesting work.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "ReproducibilityContract": {
+      "description": "Reproducibility posture for a runtime generation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Exact inputs must reproduce bit-for-bit identical generation bytes.",
+          "properties": {
+            "kind": {
+              "const": "deterministic",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Named fields may differ under an exact machine-readable contract.",
+          "properties": {
+            "contract_digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Digest of the contract explaining and constraining those fields."
+            },
+            "fields": {
+              "description": "Canonical field paths allowed to vary.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "kind": {
+              "const": "declared_nondeterminism",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "fields",
+            "contract_digest"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ResourceBudget": {
+      "additionalProperties": false,
+      "description": "Bounded consumption limits on a delegation or operation.",
+      "properties": {
+        "cpu_ms": {
+          "description": "CPU-time limit in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "external_cost_microunits": {
+          "description": "External spend limit in microunits.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "io_bytes": {
+          "description": "I/O limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "memory_bytes": {
+          "description": "Memory limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_bytes": {
+          "description": "Network transfer limit in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wall_ms": {
+          "description": "Wall-clock limit in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "urn:politeia:commissioning-record:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Append-only provenance from bounded reconnaissance to approved generation inputs.\n\nThe record stores the complete admitted grant and evidence records, never\nclient payloads, secret values, or commissioner-controlled paths. It is\nserializable for evidence storage but cannot be deserialized around the\ntrusted authority and evidence checks in [`Self::new`].",
+  "properties": {
+    "approvals": {
+      "items": {
+        "$ref": "#/$defs/CommissioningApproval"
+      },
+      "type": "array"
+    },
+    "approved_generation": {
+      "$ref": "#/$defs/ApprovedGenerationInputs"
+    },
+    "captured_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "commissioner_grant": {
+      "$ref": "#/$defs/CommissionerGrantRecord"
+    },
+    "commissioner_grant_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "id": {
+      "$ref": "#/$defs/CommissioningRecordId"
+    },
+    "institution": {
+      "$ref": "#/$defs/InstitutionId"
+    },
+    "observation_set_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "observations": {
+      "items": {
+        "$ref": "#/$defs/EvidenceRecord"
+      },
+      "type": "array"
+    },
+    "policy_bundle": {
+      "$ref": "#/$defs/PolicyBundleId"
+    },
+    "policy_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "unresolved_obligations": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "unresolved_obligations_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "workspace": {
+      "$ref": "#/$defs/InstitutionWorkspaceId"
+    },
+    "workspace_digest": {
+      "$ref": "#/$defs/Digest"
+    }
+  },
+  "required": [
+    "id",
+    "institution",
+    "workspace",
+    "workspace_digest",
+    "captured_at",
+    "commissioner_grant",
+    "commissioner_grant_digest",
+    "observations",
+    "observation_set_digest",
+    "approvals",
+    "policy_bundle",
+    "policy_digest",
+    "approved_generation",
+    "unresolved_obligations",
+    "unresolved_obligations_digest"
+  ],
+  "title": "CommissioningRecord",
+  "type": "object"
+}

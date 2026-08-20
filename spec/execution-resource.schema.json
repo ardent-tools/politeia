@@ -1,0 +1,357 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "AdapterId": {
+      "description": "Identity of an adapter bridging the semantic protocol to an external system.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DataClass": {
+      "description": "A data classification governing sources, transforms, retention, locality, and sinks.",
+      "oneOf": [
+        {
+          "const": "public",
+          "description": "Public information.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Internal information.",
+          "type": "string"
+        },
+        {
+          "const": "confidential",
+          "description": "Confidential information.",
+          "type": "string"
+        },
+        {
+          "const": "secret",
+          "description": "Secrets.",
+          "type": "string"
+        },
+        {
+          "const": "regulated",
+          "description": "Regulated data.",
+          "type": "string"
+        },
+        {
+          "const": "personal",
+          "description": "Personal data.",
+          "type": "string"
+        },
+        {
+          "const": "health",
+          "description": "Health data.",
+          "type": "string"
+        },
+        {
+          "const": "financial",
+          "description": "Financial data.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A client-restricted class named by the client.",
+          "properties": {
+            "client_restricted": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_restricted"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Digest": {
+      "description": "A content digest (blake3, lowercase hex).",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "Effect": {
+      "description": "An externally visible effect a protected operation may produce.",
+      "oneOf": [
+        {
+          "const": "read_filesystem",
+          "description": "Read from a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "write_filesystem",
+          "description": "Write to a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "spawn_process",
+          "description": "Spawn a process.",
+          "type": "string"
+        },
+        {
+          "const": "network_egress",
+          "description": "Egress to a network.",
+          "type": "string"
+        },
+        {
+          "const": "read_secret",
+          "description": "Read a secret.",
+          "type": "string"
+        },
+        {
+          "const": "write_secret",
+          "description": "Write a secret.",
+          "type": "string"
+        },
+        {
+          "const": "read_external_system",
+          "description": "Read from an external system.",
+          "type": "string"
+        },
+        {
+          "const": "write_external_system",
+          "description": "Write to an external system.",
+          "type": "string"
+        },
+        {
+          "const": "create_artifact",
+          "description": "Create an artifact.",
+          "type": "string"
+        },
+        {
+          "const": "change_authorization",
+          "description": "Change an authorization.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionLocality": {
+      "description": "Where an execution resource operates relative to the client trust domain.",
+      "oneOf": [
+        {
+          "const": "client_local",
+          "description": "Runs inside the client-controlled local environment.",
+          "type": "string"
+        },
+        {
+          "const": "client_remote",
+          "description": "Runs in a remote environment controlled by the client.",
+          "type": "string"
+        },
+        {
+          "const": "provider_remote",
+          "description": "Runs in a remote provider-controlled environment.",
+          "type": "string"
+        },
+        {
+          "const": "commissioner_local",
+          "description": "Runs on commissioner-controlled infrastructure.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "Other explicitly modeled locality.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionResourceDescriptor": {
+      "description": "Exact identity and provenance shape of something that can execute work.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A model reached through a named runtime and harness.",
+          "properties": {
+            "harness": {
+              "description": "Harness mediating the model session.",
+              "type": "string"
+            },
+            "kind": {
+              "const": "model",
+              "type": "string"
+            },
+            "model": {
+              "description": "Exact model/version identity.",
+              "type": "string"
+            },
+            "provider": {
+              "description": "Provider or operator of the exact model endpoint.",
+              "type": "string"
+            },
+            "runtime": {
+              "description": "Runtime serving the model.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "provider",
+            "model",
+            "runtime",
+            "harness"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A deterministic executable reached through an adapter.",
+          "properties": {
+            "artifact_digest": {
+              "$ref": "#/$defs/Digest",
+              "description": "Digest of the exact executable/tool artifact."
+            },
+            "kind": {
+              "const": "deterministic_tool",
+              "type": "string"
+            },
+            "version": {
+              "description": "Tool version label carried as provenance, not capability evidence.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "artifact_digest",
+            "version"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A human principal accepting bounded work.",
+          "properties": {
+            "kind": {
+              "const": "human",
+              "type": "string"
+            },
+            "principal": {
+              "$ref": "#/$defs/PrincipalId",
+              "description": "Exact human principal identity."
+            }
+          },
+          "required": [
+            "kind",
+            "principal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A specialized service reached through an adapter.",
+          "properties": {
+            "kind": {
+              "const": "service",
+              "type": "string"
+            },
+            "service": {
+              "description": "Exact service/version identity.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "service"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExecutionResourceId": {
+      "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "PrincipalId": {
+      "description": "Identity of an actor capable of requesting work.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "TrustDomainId": {
+      "description": "Stable identifier for a client-controlled trust boundary.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:politeia:execution-resource:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Immutable identity, boundaries, and cost envelope of one execution resource.\n\nLive availability is deliberately absent and belongs to a time-bounded\n[`AvailabilitySnapshot`].",
+  "properties": {
+    "adapter": {
+      "$ref": "#/$defs/AdapterId",
+      "description": "Adapter/effect boundary through which the selected resource is invoked."
+    },
+    "allowed_data_classes": {
+      "description": "Data classes the resource may receive.",
+      "items": {
+        "$ref": "#/$defs/DataClass"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "allowed_effects": {
+      "description": "Effects available to work assigned to the resource.",
+      "items": {
+        "$ref": "#/$defs/Effect"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "control_domain": {
+      "$ref": "#/$defs/TrustDomainId",
+      "description": "Control domain used when judging verifier independence."
+    },
+    "descriptor": {
+      "$ref": "#/$defs/ExecutionResourceDescriptor",
+      "description": "Exact kind-specific identity and provenance."
+    },
+    "estimated_cost_microunits": {
+      "description": "Estimated cost for the bounded task class, in integer microunits.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "estimated_latency_ms": {
+      "description": "Estimated latency for the bounded task class, in milliseconds.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "id": {
+      "$ref": "#/$defs/ExecutionResourceId",
+      "description": "Stable resource identity."
+    },
+    "locality": {
+      "$ref": "#/$defs/ExecutionLocality",
+      "description": "Execution locality."
+    },
+    "max_context_tokens": {
+      "description": "Maximum supported context size in tokens.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "trust_domain": {
+      "$ref": "#/$defs/TrustDomainId",
+      "description": "Trust domain controlling data and execution."
+    }
+  },
+  "required": [
+    "id",
+    "descriptor",
+    "adapter",
+    "trust_domain",
+    "control_domain",
+    "locality",
+    "allowed_data_classes",
+    "allowed_effects",
+    "max_context_tokens",
+    "estimated_cost_microunits",
+    "estimated_latency_ms"
+  ],
+  "title": "ExecutionResource",
+  "type": "object"
+}
