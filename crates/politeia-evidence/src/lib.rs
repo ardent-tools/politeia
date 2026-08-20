@@ -85,6 +85,7 @@ pub fn operational_continuity_subject_digest(
 
 /// An independent or designated evaluation of evidence against a subject.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Verification {
     /// Digest of the verified subject.
     pub subject: Digest,
@@ -102,6 +103,7 @@ pub struct Verification {
 /// runtime, adapter, delegation, and evidence identities it was verified
 /// under. An attestation is not portable to another subject.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Attestation {
     /// Digest of the attested subject.
     pub subject: Digest,
