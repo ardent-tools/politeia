@@ -1,6 +1,25 @@
 //! Validated commissioning approval and provenance assembly.
 
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+use jiff::Timestamp;
+
+use crate::{
+    CommissioningRecordId, DelegationId, Digest, EvidenceId, InstitutionId, InstitutionWorkspaceId,
+    PolicyBundleId, PrincipalId,
+    evidence::{IndependenceClass, TrustedEvidenceRegistry},
+    generation::ApprovedGenerationInputs,
+    institution::InstitutionWorkspace,
+};
+
+use super::{
+    ApprovedCommissioningSubject, COMMISSION_ACTION, CommissionerGrantRecord,
+    CommissioningApproval, CommissioningError, CommissioningRecord,
+    TrustedCommissionerGrantRegistry, commissioning_approval_subject_digest,
+    commissioning_institution_audience, commissioning_observation_set_digest,
+    commissioning_observation_subject_digest, commissioning_workspace_resource,
+    unresolved_obligations_digest,
+};
 
 impl CommissioningApproval {
     /// Exact typed subject approved by the institution owner.
