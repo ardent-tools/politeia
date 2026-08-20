@@ -1,24 +1,37 @@
-# Roadmap
+# Implementation dependency order
+
+This document records timeless architectural prerequisites, not project status or scheduling. The external planning registry owns live work state.
 
 ## Phase 0 — constitutional kernel
-Finalize ontology, identity, delegation, operation/effect model, policy/evidence separation, and migration/versioning rules.
 
-## Phase 1 — first vertical slice
-Implement the complete path in `18-FIRST_VERTICAL_SLICE.md`.
+Finalize constitution, ontology, identity, delegation, operation/effect model, lifecycle state machine, policy/evidence separation, threat model, assurance claims, and migration/versioning rules.
 
-## Phase 2 — bootstrap
-Add reconnaissance orchestration, confidence/conflict modeling, approval workflow, and initial Git/issue/document probes.
+## Phase 1 — client-owned commissioning substrate
 
-## Phase 3 — projections
-Derive agent context, human standards, schemas, policy bundles, and verification obligations.
+Implement one institution workspace, bounded reconnaissance, owner approval, private extension/policy inputs, and handoff/revocation records.
 
-## Phase 4 — adapters
-Add first-class MCP and HTTP transports plus selected external-system adapters.
+## Phase 2 — specialization
 
-## Phase 5 — learning loop
-Observations → findings → lessons → proposals → approved changes → projections.
+Derive a content-bound immutable runtime generation from exact public source, institution workspace, approved policy, lifecycle/topology, and component inputs. Prove reproducibility and atomic activation/rollback.
 
-## Phase 6 — hardening
-Sandbox executable extensions, supply-chain generations, remote policy/runtime activation, disaster recovery, high-assurance deployment profile.
+## Phase 3 — execution-resource routing
+
+Implement one registry/router proof: hard constraints, one or two ordered locality/cost preferences, explicit escalation, resource binding, and independent-verification evidence.
+
+## Phase 4 — first vertical slice
+
+Implement the complete bounded path and `POL-A` through `POL-L` acceptance contracts in `18-FIRST_VERTICAL_SLICE.md`.
+
+## Phase 5 — projections and learning loop
+
+Derive agent context, human standards, schemas, policy bundles, and verification obligations; then close observations → findings → lessons → proposals → approved changes → projections.
+
+## Phase 6 — transports and selected adapters
+
+Add first-class MCP and HTTP transports plus only the external-system adapters required by proven deployments.
+
+## Phase 7 — hardening
+
+Sandbox executable extensions, supply-chain generations, remote policy/runtime activation, disaster recovery, and high-assurance deployment topology.
 
 Feature breadth is subordinate to semantic closure.

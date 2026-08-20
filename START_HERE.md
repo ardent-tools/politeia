@@ -11,19 +11,22 @@ Read in this order:
 7. `docs/06-POLICY_COMPILER.md`
 8. `docs/07-BOOTSTRAP.md`
 9. `docs/08-SELF_MANAGEMENT.md`
-10. `docs/18-FIRST_VERTICAL_SLICE.md`
-11. `docs/20-ENGINEERING_HANDOFF.md`
+10. `docs/22-DEPLOYMENT_PROFILES.md`
+11. `docs/18-FIRST_VERTICAL_SLICE.md`
+12. `docs/20-ENGINEERING_HANDOFF.md`
 
 ## First implementation objective
 
-Do **not** port features from reference systems first.
+Do **not** broaden the product before this slice proves its own contracts.
 
 Build one complete, adversarially tested vertical slice:
 
-bounded reconnaissance grant → discovery adapter → sourced observations → candidate model → explicit conflict/uncertainty → constitutional approval → semantic read operation → policy decision → authorized dispatcher → effect lease → effect port → evidence journal → independent verification → attestation bound to exact identities.
+client-owned workspace → bounded reconnaissance grant → discovery adapter → sourced observations → candidate model → explicit conflict/uncertainty → constitutional approval → derived operational generation → execution-resource selection → semantic read operation → policy decision → authorized dispatcher → effect lease → effect port → evidence journal → independent verification → attestation bound to exact identities → handoff and commissioner revocation.
 
 Feature breadth waits until that path is structurally honest.
 
-## Working codename
+The entire proof runs in a client-controlled environment from the public source distribution. The active operational generation must remain functional after the temporary commissioner authority is revoked.
 
-`Politeia` is a replaceable working codename. Do not let naming influence the ontology or public API.
+## Product identity
+
+`Politeia` is the settled product identity. Names still do not own semantics: use the canonical ontology rather than deriving types or authority from branding.

@@ -4,8 +4,6 @@
 
 Treat this repository as a specification-first greenfield system.
 
-The reference repositories are mines for proven ideas, failure modes, tests, and implementation techniques. They are not APIs to preserve.
-
 ## Before implementation
 
 - Agree on ontology names and semantic boundaries.
@@ -15,6 +13,11 @@ The reference repositories are mines for proven ideas, failure modes, tests, and
 - Define the first transport-neutral operation envelope.
 - Define the exact authority of bootstrap reconnaissance.
 - Establish an explicit threat model for the first vertical slice.
+- Define the lifecycle-profile state machine separately from deployment topology.
+- Define the client trust boundary and data-flow model.
+- Define the generation manifest, canonical specialization inputs, and reproducibility contract.
+- Define execution-resource requirements, routing decisions, escalation, and their binding into authorization.
+- Assign every `POL-A` through `POL-L` assurance claim a mechanism, evidence owner, adversarial test, residual risk, and falsifier.
 
 ## Do not do yet
 
@@ -30,4 +33,6 @@ The reference repositories are mines for proven ideas, failure modes, tests, and
 
 ## Exit criteria for starter phase
 
-The team can demonstrate the first vertical slice under adversarial tests and explain every trusted component required to make the demonstration valid.
+Politeia is sufficient to commission Politeia: the team can demonstrate the bounded first vertical slice under adversarial tests, produce artifact-bound receipts for `POL-A` through `POL-L`, and explain every trusted component required to make the demonstration valid.
+
+A replacement maintainer can use only the public source, preserved client-owned workspace, and newly delegated client authority to derive and release the next generation. Revoking the original commissioner does not interrupt the current operational generation, and no commissioner- or vendor-owned control plane is required for continued operation or an authorized local update.

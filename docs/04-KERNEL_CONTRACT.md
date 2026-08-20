@@ -19,7 +19,9 @@ The semantic kernel is the trusted computing base for institutional work.
 
 ## Kernel non-responsibilities
 
-The kernel does not own model sessions, provider routing, Git, ticketing, warehouses, messaging, user interfaces, generic workflow DSLs, or client-specific domain models.
+The kernel does not own model sessions, execution-resource ranking, provider invocation, Git, ticketing, warehouses, messaging, user interfaces, generic workflow DSLs, or client-specific domain models.
+
+Execution routing consumes kernel identities and policy contracts but remains outside the trusted semantic kernel. A routing decision must bind the selected resource and capability evidence into the operation authorization path; it cannot grant effects, widen delegation, or substitute a different resource after authorization.
 
 ## Protected operation path
 

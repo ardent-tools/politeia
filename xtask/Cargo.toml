@@ -9,6 +9,8 @@ rust-version.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
+politeia-core.workspace = true
+politeia-evidence.workspace = true
 politeia-runtime.workspace = true
 politeia-sdk.workspace = true
 
@@ -18,4 +20,4 @@ workspace = true
 [package.metadata.kanon]
 maturity = "scaffold"
 since = "2026-08-19"
-exit-criteria = "CI derives ExtensionManifest and OperationIntent schemas from their Rust owners to a byte-for-byte fixed point and rejects stale checked-in projections"
+exit-criteria = "CI derives every registered public schema from its Rust owner to a byte-for-byte fixed point and rejects stale checked-in projections"

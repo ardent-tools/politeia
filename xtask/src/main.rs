@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Context;
 use schemars::JsonSchema;
 
-const GENERATED_COMMENT: &str = "First authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. The earlier starter schema was non-authoritative. Do not hand-edit.";
+const GENERATED_COMMENT: &str = "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.";
 
 struct DerivedSpec {
     path: &'static str,
@@ -44,8 +44,8 @@ fn render_schema<T: JsonSchema>(
     Ok(DerivedSpec { path, urn, bytes })
 }
 
-fn generated_specs() -> anyhow::Result<[DerivedSpec; 2]> {
-    Ok([
+fn generated_specs() -> anyhow::Result<Vec<DerivedSpec>> {
+    Ok(vec![
         render_schema::<politeia_sdk::ExtensionManifest>(
             "spec/extension-manifest.schema.json",
             "urn:politeia:extension-manifest:v1",
@@ -53,6 +53,50 @@ fn generated_specs() -> anyhow::Result<[DerivedSpec; 2]> {
         render_schema::<politeia_runtime::OperationIntent>(
             "spec/semantic-operation.schema.json",
             "urn:politeia:semantic-operation:v1",
+        )?,
+        render_schema::<politeia_core::institution::InstitutionWorkspace>(
+            "spec/institution-workspace.schema.json",
+            "urn:politeia:institution-workspace:v1",
+        )?,
+        render_schema::<politeia_evidence::CommissioningRecord>(
+            "spec/commissioning-record.schema.json",
+            "urn:politeia:commissioning-record:v1",
+        )?,
+        render_schema::<politeia_core::generation::RuntimeGeneration>(
+            "spec/runtime-generation.schema.json",
+            "urn:politeia:runtime-generation:v1",
+        )?,
+        render_schema::<politeia_runtime::routing::ExecutionResource>(
+            "spec/execution-resource.schema.json",
+            "urn:politeia:execution-resource:v1",
+        )?,
+        render_schema::<politeia_runtime::routing::ExecutionRequirement>(
+            "spec/execution-requirement.schema.json",
+            "urn:politeia:execution-requirement:v1",
+        )?,
+        render_schema::<politeia_runtime::routing::CapabilityProfile>(
+            "spec/capability-profile.schema.json",
+            "urn:politeia:capability-profile:v1",
+        )?,
+        render_schema::<politeia_runtime::routing::CapabilityVerificationRecord>(
+            "spec/capability-verification.schema.json",
+            "urn:politeia:capability-verification:v1",
+        )?,
+        render_schema::<politeia_runtime::routing::AvailabilitySnapshot>(
+            "spec/availability-snapshot.schema.json",
+            "urn:politeia:availability-snapshot:v1",
+        )?,
+        render_schema::<politeia_runtime::routing::RoutingDecision>(
+            "spec/routing-decision.schema.json",
+            "urn:politeia:routing-decision:v1",
+        )?,
+        render_schema::<politeia_core::lifecycle::LifecycleTransition>(
+            "spec/lifecycle-transition.schema.json",
+            "urn:politeia:lifecycle-transition:v1",
+        )?,
+        render_schema::<politeia_evidence::HandoffReceipt>(
+            "spec/handoff-receipt.schema.json",
+            "urn:politeia:handoff-receipt:v1",
         )?,
     ])
 }

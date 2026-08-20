@@ -22,6 +22,7 @@ anyhow = "1"
 blake3 = "1"
 jiff = { version = "0.2", features = ["serde"] }
 politeia-core = { version = "0.1.0", path = "crates/politeia-core" }
+politeia-evidence = { version = "0.1.0", path = "crates/politeia-evidence" }
 politeia-policy = { version = "0.1.0", path = "crates/politeia-policy" }
 politeia-protocol = { version = "0.1.0", path = "crates/politeia-protocol" }
 politeia-runtime = { version = "0.1.0", path = "crates/politeia-runtime" }
