@@ -35,6 +35,7 @@ pub enum ClauseKind {
 
 /// A proposition about what must, may, or must not be true.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormativeClause {
     /// Clause identity.
     pub id: String,
@@ -63,6 +64,7 @@ pub enum EvidenceClass {
 /// detector is not the normative claim and carries no blocking authority of
 /// its own.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DetectorSpec {
     /// Detector identity.
     pub id: String,
@@ -90,6 +92,7 @@ pub enum Consequence {
 /// Where a clause applies, which detectors produce admissible evidence, and
 /// what consequence follows.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyBinding {
     /// Binding identity.
     pub id: String,
@@ -125,6 +128,7 @@ pub struct PolicyDecision {
 
 /// An authorized, scoped, expiring exception to a binding.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Waiver {
     /// Waiver identity.
     pub id: String,
