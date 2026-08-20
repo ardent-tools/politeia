@@ -624,9 +624,7 @@ impl Router {
                                 && verification.resource_digest == profile.resource_digest
                                 && verification.task_classes == profile.task_classes
                                 && verification.capabilities == profile.capabilities;
-                            if !exact_claim {
-                                reasons.insert(RoutingRejection::VerifierNotAdmitted);
-                            } else {
+                            if exact_claim {
                                 verification_expires_at = Some(verification.expires_at);
                                 if verification.evidence.is_empty()
                                     || verification.observed_at > now
@@ -648,6 +646,8 @@ impl Router {
                                 } else {
                                     independently_verified = true;
                                 }
+                            } else {
+                                reasons.insert(RoutingRejection::VerifierNotAdmitted);
                             }
                         }
                     }
