@@ -341,7 +341,35 @@ pub enum RoutingOutcome {
         capability_profile_digest: Digest,
     },
     /// No resource satisfied every hard constraint; explicit escalation is required.
+    #[serde(deserialize_with = "deserialize_routing_outcome_unit")]
     Escalate,
+}
+
+fn deserialize_routing_outcome_unit<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct NoFieldsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for NoFieldsVisitor {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object with no fields")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            if let Some(field) = map.next_key::<String>()? {
+                return Err(serde::de::Error::unknown_field(&field, &[]));
+            }
+            Ok(())
+        }
+    }
+
+    deserializer.deserialize_map(NoFieldsVisitor)
 }
 
 /// Provenance-bearing resource selection or escalation.
@@ -1187,7 +1215,8 @@ mod tests {
     }
 
     #[test]
-    fn tagged_resource_descriptor_rejects_unknown_variant_fields() {
+    fn tagged_variants_reject_unknown_fields() {
+        const ESCALATE: &str = r#"{"status":"escalate"}"#;
         let json = r#"{
             "kind":"deterministic_tool",
             "artifact_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1195,12 +1224,36 @@ mod tests {
             "ambient_authority":true
         }"#;
         assert!(serde_json::from_str::<ExecutionResourceDescriptor>(json).is_err());
+        assert!(matches!(
+            serde_json::from_str::<RoutingOutcome>(ESCALATE),
+            Ok(RoutingOutcome::Escalate)
+        ));
+        assert!(matches!(
+            serde_json::to_string(&RoutingOutcome::Escalate).as_deref(),
+            Ok(ESCALATE)
+        ));
         assert!(
             serde_json::from_str::<RoutingOutcome>(
                 r#"{"status":"escalate","ambient_authority":true}"#
             )
             .is_err(),
             "tagged routing outcomes must reject variant-local unknown fields"
+        );
+        assert!(
+            serde_json::from_str::<RoutingOutcome>(r#"["escalate"]"#).is_err(),
+            "schema-invalid sequence representations must fail closed"
+        );
+        assert!(
+            serde_json::from_str::<RoutingOutcome>(
+                r#"{"status":"escalate","resource":"substitution"}"#
+            )
+            .is_err(),
+            "fields from the selected variant must fail on escalation"
+        );
+        assert!(
+            serde_json::from_str::<RoutingOutcome>(r#"{"status":"escalate","status":"escalate"}"#)
+                .is_err(),
+            "duplicate variant tags must fail closed"
         );
     }
 

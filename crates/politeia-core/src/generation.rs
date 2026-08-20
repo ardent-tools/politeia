@@ -48,6 +48,7 @@ impl CommissioningCapability {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReproducibilityContract {
     /// Exact inputs must reproduce bit-for-bit identical generation bytes.
+    #[serde(deserialize_with = "deserialize_reproducibility_unit")]
     Deterministic,
     /// Named fields may differ under an exact machine-readable contract.
     DeclaredNondeterminism {
@@ -56,6 +57,33 @@ pub enum ReproducibilityContract {
         /// Digest of the contract explaining and constraining those fields.
         contract_digest: Digest,
     },
+}
+
+fn deserialize_reproducibility_unit<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct NoFieldsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for NoFieldsVisitor {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object with no fields")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            if let Some(field) = map.next_key::<String>()? {
+                return Err(serde::de::Error::unknown_field(&field, &[]));
+            }
+            Ok(())
+        }
+    }
+
+    deserializer.deserialize_map(NoFieldsVisitor)
 }
 
 /// Exact institution-approved inputs from which specialization may derive a generation.
@@ -600,13 +628,40 @@ mod tests {
     }
 
     #[test]
-    fn reproducibility_contract_rejects_unknown_variant_fields() {
+    fn reproducibility_contract_unit_variant_is_strict_and_canonical() {
+        const CANONICAL: &str = r#"{"kind":"deterministic"}"#;
+        assert!(matches!(
+            serde_json::from_str::<ReproducibilityContract>(CANONICAL),
+            Ok(ReproducibilityContract::Deterministic)
+        ));
+        assert!(matches!(
+            serde_json::to_string(&ReproducibilityContract::Deterministic).as_deref(),
+            Ok(CANONICAL)
+        ));
         assert!(
             serde_json::from_str::<ReproducibilityContract>(
                 r#"{"kind":"deterministic","ambient_input":"clock"}"#
             )
             .is_err(),
             "digest-critical tagged variants must reject unknown fields"
+        );
+        assert!(
+            serde_json::from_str::<ReproducibilityContract>(
+                r#"{"kind":"deterministic","fields":[]}"#
+            )
+            .is_err(),
+            "fields from another variant must not be erased during deserialization"
+        );
+        assert!(
+            serde_json::from_str::<ReproducibilityContract>(r#"["deterministic"]"#).is_err(),
+            "schema-invalid sequence representations must fail closed"
+        );
+        assert!(
+            serde_json::from_str::<ReproducibilityContract>(
+                r#"{"kind":"deterministic","kind":"deterministic"}"#
+            )
+            .is_err(),
+            "duplicate variant tags must fail closed"
         );
     }
 }
