@@ -1,6 +1,16 @@
 {
-  "$comment": "First authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. The earlier starter schema was non-authoritative. Do not hand-edit.",
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
   "$defs": {
+    "AdapterId": {
+      "description": "Identity of an adapter bridging the semantic protocol to an external system.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "CapabilityProfileId": {
+      "description": "Identity of an evidence-backed execution-resource capability profile.",
+      "format": "uuid",
+      "type": "string"
+    },
     "DataClass": {
       "description": "A data classification governing sources, transforms, retention, locality, and sinks.",
       "oneOf": [
@@ -155,6 +165,13 @@
       "format": "uuid",
       "type": "string"
     },
+    "Digest": {
+      "description": "A content digest (blake3, lowercase hex).",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
     "Effect": {
       "description": "An externally visible effect a protected operation may produce.",
       "oneOf": [
@@ -210,6 +227,116 @@
         }
       ]
     },
+    "ExecutionAssignment": {
+      "additionalProperties": false,
+      "description": "Exact routing result bound into an operation intent before policy evaluation.",
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/AdapterId",
+          "description": "Adapter/effect boundary through which it must be invoked."
+        },
+        "availability_snapshot_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Availability observation on which routing relied."
+        },
+        "capability_profile": {
+          "$ref": "#/$defs/CapabilityProfileId",
+          "description": "Capability profile used to establish eligibility."
+        },
+        "capability_profile_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of that exact capability profile."
+        },
+        "control_domain": {
+          "$ref": "#/$defs/TrustDomainId",
+          "description": "Control domain used for verifier-independence judgments."
+        },
+        "expires_at": {
+          "description": "Assignment expiry; authorization may narrow but never extend it.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "locality": {
+          "$ref": "#/$defs/ExecutionLocality",
+          "description": "Selected resource locality."
+        },
+        "requirement_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Exact requirement the selected resource satisfied."
+        },
+        "resource": {
+          "$ref": "#/$defs/ExecutionResourceId",
+          "description": "Selected execution resource."
+        },
+        "resource_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact selected resource definition."
+        },
+        "routing_decision": {
+          "$ref": "#/$defs/RoutingDecisionId",
+          "description": "Routing-decision identity."
+        },
+        "routing_decision_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the full routing receipt."
+        },
+        "trust_domain": {
+          "$ref": "#/$defs/TrustDomainId",
+          "description": "Trust domain controlling data and execution."
+        }
+      },
+      "required": [
+        "resource",
+        "resource_digest",
+        "adapter",
+        "trust_domain",
+        "control_domain",
+        "locality",
+        "capability_profile",
+        "capability_profile_digest",
+        "routing_decision",
+        "requirement_digest",
+        "routing_decision_digest",
+        "availability_snapshot_digest",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "ExecutionLocality": {
+      "description": "Where an execution resource operates relative to the client trust domain.",
+      "oneOf": [
+        {
+          "const": "client_local",
+          "description": "Runs inside the client-controlled local environment.",
+          "type": "string"
+        },
+        {
+          "const": "client_remote",
+          "description": "Runs in a remote environment controlled by the client.",
+          "type": "string"
+        },
+        {
+          "const": "provider_remote",
+          "description": "Runs in a remote provider-controlled environment.",
+          "type": "string"
+        },
+        {
+          "const": "commissioner_local",
+          "description": "Runs on commissioner-controlled infrastructure.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "Other explicitly modeled locality.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionResourceId": {
+      "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
+      "format": "uuid",
+      "type": "string"
+    },
     "OperationId": {
       "description": "Identity of a typed operation contract.",
       "format": "uuid",
@@ -249,6 +376,17 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "execution_requirement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact routing requirement that must produce an admitted execution\nassignment before this operation may be authorized."
         },
         "id": {
           "$ref": "#/$defs/OperationId",
@@ -344,6 +482,18 @@
         }
       },
       "type": "object"
+    },
+    "RoutingDecisionId": {
+      "description": "Identity of one evidence-bearing execution-resource selection or escalation.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "TrustDomainId": {
+      "description": "Stable identifier for a client-controlled trust boundary.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "type": "string"
     }
   },
   "$id": "urn:politeia:semantic-operation:v1",
@@ -361,6 +511,17 @@
         "$ref": "#/$defs/Delegation"
       },
       "type": "array"
+    },
+    "execution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionAssignment"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Exact resource selection bound before policy evaluation, when the work\nrequires an external execution resource."
     },
     "idempotency_key": {
       "description": "Stable operation key required when the operation declares idempotency.",

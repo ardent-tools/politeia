@@ -1,0 +1,41 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "ExecutionResourceId": {
+      "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$id": "urn:politeia:availability-snapshot:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Time-bounded observation of which registered resources are available.",
+  "properties": {
+    "available_resources": {
+      "description": "Resource identities observed as available.",
+      "items": {
+        "$ref": "#/$defs/ExecutionResourceId"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "expires_at": {
+      "description": "Time at and after which the snapshot is stale.",
+      "format": "date-time",
+      "type": "string"
+    },
+    "observed_at": {
+      "description": "Time at which availability was observed.",
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "observed_at",
+    "expires_at",
+    "available_resources"
+  ],
+  "title": "AvailabilitySnapshot",
+  "type": "object"
+}

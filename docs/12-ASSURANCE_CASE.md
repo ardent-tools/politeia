@@ -20,3 +20,24 @@ Each claim must identify:
 4. adversarial test;
 5. residual risk;
 6. falsifier.
+
+## Commissioning acceptance claims
+
+The bounded first proof owns these stable claims. Their detailed tests live in `14-TESTING_STRATEGY.md`; the cited documents are the normative owners.
+
+| ID | Claim | Normative owner |
+|---|---|---|
+| `POL-A` | The public distribution can commission and hand off one client deployment without private commissioner infrastructure. | `07-BOOTSTRAP.md`, `18-FIRST_VERTICAL_SLICE.md`, `20-ENGINEERING_HANDOFF.md` |
+| `POL-B` | Institution data, secrets, inference authority, evidence, and operational state remain in its trust domain by default. | `09-PERSISTENCE.md`, `16-DATA_GOVERNANCE.md`, `22-DEPLOYMENT_PROFILES.md` |
+| `POL-C` | Handoff narrows active capability and revokes the commissioner without breaking the operational generation. | `11-FAILURE_SEMANTICS.md`, `18-FIRST_VERTICAL_SLICE.md`, `22-DEPLOYMENT_PROFILES.md` |
+| `POL-D` | Exact source and institution inputs reproduce the same generation, or declared nondeterminism explains the difference. | `15-SUPPLY_CHAIN.md` |
+| `POL-E` | Resource selection satisfies all hard constraints before optimizing an ordered soft preference and records why. | `03-ONTOLOGY.md`, `18-FIRST_VERTICAL_SLICE.md` |
+| `POL-F` | A hard data-locality policy prevents assignment across the forbidden inference boundary. | `16-DATA_GOVERNANCE.md` |
+| `POL-G` | A verified deterministic tool is selected for work declared fully deterministic; model availability does not displace it. | `14-TESTING_STRATEGY.md`, `18-FIRST_VERTICAL_SLICE.md` |
+| `POL-H` | Calibration can affect eligibility but cannot create authority, waive policy, or satisfy its own independence obligation. | `08-SELF_MANAGEMENT.md` |
+| `POL-I` | One institution's private workspace is neither an input to the public core nor another institution's generation. | `09-PERSISTENCE.md`, `15-SUPPLY_CHAIN.md`, `16-DATA_GOVERNANCE.md` |
+| `POL-J` | A replacement authorized maintainer can recommission without the original commissioner's accounts or systems. | `20-ENGINEERING_HANDOFF.md`, `22-DEPLOYMENT_PROFILES.md` |
+| `POL-K` | Client commissioning and operation have no required dependency on commissioner-controlled or otherwise institution-external infrastructure. | `01-ANTI_SCOPE.md`, `15-SUPPLY_CHAIN.md` |
+| `POL-L` | Disconnecting a vendor-hosted control plane does not disable the current generation or authorized local update path. | `09-PERSISTENCE.md`, `15-SUPPLY_CHAIN.md`, `20-ENGINEERING_HANDOFF.md` |
+
+An assurance record for any claim binds the exact source commit, institution-workspace digest, generation manifest and digest, policy and lifecycle profile, resource/adapter identities, evidence, and test-harness version. A document, a test name, a green CI run, or an actor's self-certification is not itself proof of the claim.

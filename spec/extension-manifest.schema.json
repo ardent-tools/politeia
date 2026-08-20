@@ -1,5 +1,5 @@
 {
-  "$comment": "First authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. The earlier starter schema was non-authoritative. Do not hand-edit.",
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
   "$defs": {
     "DataClass": {
       "description": "A data classification governing sources, transforms, retention, locality, and sinks.",

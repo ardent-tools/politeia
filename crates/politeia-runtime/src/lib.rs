@@ -24,6 +24,7 @@ use politeia_core::{
 use politeia_policy::PolicyDecision;
 
 mod ledger;
+pub mod routing;
 
 pub use ledger::{
     AuthorizationLedger, BudgetScope, InMemoryAuthorizationLedger, ReservationRequest,
@@ -55,6 +56,15 @@ pub enum RuntimeError {
         /// The configuration invariant that was violated.
         reason: &'static str,
         /// Source location where invalid configuration was detected.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    /// The selected execution resource or routing receipt is stale or invalid.
+    #[snafu(display("invalid execution assignment: {reason}"))]
+    InvalidExecutionAssignment {
+        /// The routing/assignment invariant that was violated.
+        reason: &'static str,
+        /// Source location where the invalid assignment was detected.
         #[snafu(implicit)]
         location: snafu::Location,
     },
@@ -166,6 +176,10 @@ pub struct OperationIntent {
     pub budget: ResourceBudget,
     /// Stable operation key required when the operation declares idempotency.
     pub idempotency_key: Option<String>,
+    /// Exact resource selection bound before policy evaluation, when the work
+    /// requires an external execution resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<routing::ExecutionAssignment>,
 }
 
 impl OperationIntent {
@@ -195,6 +209,7 @@ struct LeaseClaims {
     resources: BTreeSet<String>,
     budget: ResourceBudget,
     idempotency_key: Option<String>,
+    execution: Option<routing::ExecutionAssignment>,
     decision: PolicyDecision,
     runtime: RuntimeGenerationId,
     adapter: AdapterId,
@@ -252,6 +267,10 @@ impl EffectLease {
     /// Stable operation key bound to the lease, when idempotency is required.
     pub fn idempotency_key(&self) -> Option<&str> {
         self.claims.idempotency_key.as_deref()
+    }
+    /// Exact resource selection and routing receipt bound to the lease.
+    pub fn execution(&self) -> Option<&routing::ExecutionAssignment> {
+        self.claims.execution.as_ref()
     }
     /// The normalized policy decision receipt that authorized the lease.
     pub fn decision(&self) -> &PolicyDecision {
@@ -442,6 +461,8 @@ pub struct DispatcherConfig {
     max_lease_ttl: SignedDuration,
     trusted_delegations: BTreeMap<DelegationId, Delegation>,
     trusted_operations: BTreeMap<OperationId, OperationSpec>,
+    trusted_execution_assignments:
+        BTreeMap<politeia_core::RoutingDecisionId, routing::ExecutionAssignment>,
 }
 
 impl DispatcherConfig {
@@ -568,7 +589,53 @@ impl DispatcherConfig {
             max_lease_ttl,
             trusted_delegations: delegations,
             trusted_operations: operations,
+            trusted_execution_assignments: BTreeMap::new(),
         })
+    }
+
+    /// Admit exact selected routing receipts into trusted bootstrap.
+    ///
+    /// A caller-provided assignment never becomes authority merely because it
+    /// is well-shaped: authorization requires byte-for-byte equality with one
+    /// of the selected decisions admitted here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::InvalidConfiguration`] for an escalation,
+    /// duplicate decision identity, or decision that cannot be digest-bound.
+    ///
+    /// Time: O(n log n). Space: O(n), where n is admitted decisions.
+    pub fn with_trusted_routing_decisions(
+        mut self,
+        decisions: impl IntoIterator<Item = routing::RoutingDecision>,
+    ) -> Result<Self, RuntimeError> {
+        for decision in decisions {
+            let assignment = decision
+                .assignment()
+                .map_err(|_| {
+                    InvalidConfigurationSnafu {
+                        reason: "trusted routing decision cannot be digest-bound",
+                    }
+                    .build()
+                })?
+                .ok_or_else(|| {
+                    InvalidConfigurationSnafu {
+                        reason: "trusted routing decision is an escalation",
+                    }
+                    .build()
+                })?;
+            let duplicate = self
+                .trusted_execution_assignments
+                .insert(assignment.routing_decision.clone(), assignment)
+                .is_some();
+            ensure!(
+                !duplicate,
+                InvalidConfigurationSnafu {
+                    reason: "trusted routing-decision ID is duplicated"
+                }
+            );
+        }
+        Ok(self)
     }
 }
 
@@ -641,6 +708,10 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
         );
         ensure!(decision.allowed, DeniedSnafu);
         let max_expiry = now + self.config.max_lease_ttl;
+        let assignment_expiry = intent
+            .execution
+            .as_ref()
+            .map_or(max_expiry, |assignment| assignment.expires_at);
         let claims = LeaseClaims {
             id: EffectLeaseId::new(),
             reservation_id: BudgetReservationId::new(),
@@ -650,11 +721,12 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             resources: intent.resources.clone(),
             budget: intent.budget.clone(),
             idempotency_key: intent.idempotency_key.clone(),
+            execution: intent.execution.clone(),
             decision,
             runtime: self.config.runtime.clone(),
             adapter: self.adapter.clone(),
             audience: delegation.audience.clone(),
-            expires_at: delegation.expires_at.min(max_expiry),
+            expires_at: delegation.expires_at.min(max_expiry).min(assignment_expiry),
             replay_domain: self.config.replay_domain.clone(),
         };
         let claims_digest = EffectLease::claims_digest(&claims)?;
@@ -790,6 +862,53 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
                 reason: "operation idempotency key is missing or invalid"
             }
         );
+        match (
+            intent.operation.execution_requirement.as_ref(),
+            intent.execution.as_ref(),
+        ) {
+            (None, None) => {}
+            (Some(required), Some(assignment)) => {
+                ensure!(
+                    &assignment.requirement_digest == required,
+                    InvalidExecutionAssignmentSnafu {
+                        reason: "routing assignment satisfies a different requirement"
+                    }
+                );
+                ensure!(
+                    self.config
+                        .trusted_execution_assignments
+                        .get(&assignment.routing_decision)
+                        == Some(assignment),
+                    InvalidExecutionAssignmentSnafu {
+                        reason: "routing assignment is absent from trusted bootstrap or substituted"
+                    }
+                );
+                ensure!(
+                    now < assignment.expires_at,
+                    InvalidExecutionAssignmentSnafu {
+                        reason: "routing assignment is expired"
+                    }
+                );
+                ensure!(
+                    assignment.adapter == self.adapter,
+                    InvalidExecutionAssignmentSnafu {
+                        reason: "selected execution resource belongs to a different adapter"
+                    }
+                );
+            }
+            (Some(_), None) => {
+                return InvalidExecutionAssignmentSnafu {
+                    reason: "operation requires an admitted routing assignment",
+                }
+                .fail();
+            }
+            (None, Some(_)) => {
+                return InvalidExecutionAssignmentSnafu {
+                    reason: "operation contract does not admit an execution resource",
+                }
+                .fail();
+            }
+        }
         Ok(leaf)
     }
 

@@ -43,3 +43,5 @@ Generate, where possible:
 - documentation indexes.
 
 Generated projections never become semantic peers of their source.
+
+For execution routing, policy produces hard eligibility constraints before any optimization occurs. A preference for cost, locality, or latency cannot override a data-boundary, capability, authority, or independent-assurance requirement.

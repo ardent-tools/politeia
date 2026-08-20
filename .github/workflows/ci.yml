@@ -61,7 +61,21 @@ jobs:
         shell: bash
         run: |
           cargo run -p xtask --locked -- derive
-          if git diff --quiet -- spec/extension-manifest.schema.json spec/semantic-operation.schema.json; then
+          schema_status="$(git status --porcelain=v1 --untracked-files=all -- \
+            spec/extension-manifest.schema.json \
+            spec/semantic-operation.schema.json \
+            spec/institution-workspace.schema.json \
+            spec/commissioning-record.schema.json \
+            spec/runtime-generation.schema.json \
+            spec/execution-resource.schema.json \
+            spec/execution-requirement.schema.json \
+            spec/capability-profile.schema.json \
+            spec/capability-verification.schema.json \
+            spec/availability-snapshot.schema.json \
+            spec/routing-decision.schema.json \
+            spec/lifecycle-transition.schema.json \
+            spec/handoff-receipt.schema.json)"
+          if [[ -z "$schema_status" ]]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -74,7 +88,23 @@ jobs:
           path: |
             spec/extension-manifest.schema.json
             spec/semantic-operation.schema.json
+            spec/institution-workspace.schema.json
+            spec/commissioning-record.schema.json
+            spec/runtime-generation.schema.json
+            spec/execution-resource.schema.json
+            spec/execution-requirement.schema.json
+            spec/capability-profile.schema.json
+            spec/capability-verification.schema.json
+            spec/availability-snapshot.schema.json
+            spec/routing-decision.schema.json
+            spec/lifecycle-transition.schema.json
+            spec/handoff-receipt.schema.json
           if-no-files-found: error
           retention-days: 7
       - run: cargo run -p xtask --locked -- check
-      - run: git diff --exit-code
+      - name: Require a clean derived tree
+        shell: bash
+        run: |
+          git diff --exit-code
+          spec_status="$(git status --porcelain=v1 --untracked-files=all -- spec)"
+          test -z "$spec_status"

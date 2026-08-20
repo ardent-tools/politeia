@@ -1,0 +1,278 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "DataClass": {
+      "description": "A data classification governing sources, transforms, retention, locality, and sinks.",
+      "oneOf": [
+        {
+          "const": "public",
+          "description": "Public information.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "Internal information.",
+          "type": "string"
+        },
+        {
+          "const": "confidential",
+          "description": "Confidential information.",
+          "type": "string"
+        },
+        {
+          "const": "secret",
+          "description": "Secrets.",
+          "type": "string"
+        },
+        {
+          "const": "regulated",
+          "description": "Regulated data.",
+          "type": "string"
+        },
+        {
+          "const": "personal",
+          "description": "Personal data.",
+          "type": "string"
+        },
+        {
+          "const": "health",
+          "description": "Health data.",
+          "type": "string"
+        },
+        {
+          "const": "financial",
+          "description": "Financial data.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A client-restricted class named by the client.",
+          "properties": {
+            "client_restricted": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_restricted"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Effect": {
+      "description": "An externally visible effect a protected operation may produce.",
+      "oneOf": [
+        {
+          "const": "read_filesystem",
+          "description": "Read from a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "write_filesystem",
+          "description": "Write to a filesystem.",
+          "type": "string"
+        },
+        {
+          "const": "spawn_process",
+          "description": "Spawn a process.",
+          "type": "string"
+        },
+        {
+          "const": "network_egress",
+          "description": "Egress to a network.",
+          "type": "string"
+        },
+        {
+          "const": "read_secret",
+          "description": "Read a secret.",
+          "type": "string"
+        },
+        {
+          "const": "write_secret",
+          "description": "Write a secret.",
+          "type": "string"
+        },
+        {
+          "const": "read_external_system",
+          "description": "Read from an external system.",
+          "type": "string"
+        },
+        {
+          "const": "write_external_system",
+          "description": "Write to an external system.",
+          "type": "string"
+        },
+        {
+          "const": "create_artifact",
+          "description": "Create an artifact.",
+          "type": "string"
+        },
+        {
+          "const": "change_authorization",
+          "description": "Change an authorization.",
+          "type": "string"
+        }
+      ]
+    },
+    "ExecutionLocality": {
+      "description": "Where an execution resource operates relative to the client trust domain.",
+      "oneOf": [
+        {
+          "const": "client_local",
+          "description": "Runs inside the client-controlled local environment.",
+          "type": "string"
+        },
+        {
+          "const": "client_remote",
+          "description": "Runs in a remote environment controlled by the client.",
+          "type": "string"
+        },
+        {
+          "const": "provider_remote",
+          "description": "Runs in a remote provider-controlled environment.",
+          "type": "string"
+        },
+        {
+          "const": "commissioner_local",
+          "description": "Runs on commissioner-controlled infrastructure.",
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "Other explicitly modeled locality.",
+          "type": "string"
+        }
+      ]
+    },
+    "SoftPreference": {
+      "description": "Ordered optimization applied only after every hard requirement succeeds.",
+      "oneOf": [
+        {
+          "const": "prefer_local",
+          "description": "Prefer work closer to the client-controlled environment.",
+          "type": "string"
+        },
+        {
+          "const": "minimize_cost",
+          "description": "Prefer lower estimated monetary cost.",
+          "type": "string"
+        },
+        {
+          "const": "minimize_latency",
+          "description": "Prefer lower estimated latency.",
+          "type": "string"
+        }
+      ]
+    },
+    "TrustDomainId": {
+      "description": "Stable identifier for a client-controlled trust boundary.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:politeia:execution-requirement:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Hard constraints and ordered soft preferences for one bounded unit of work.",
+  "properties": {
+    "allowed_localities": {
+      "description": "Hard-allowed localities. Empty means no resource is eligible.",
+      "items": {
+        "$ref": "#/$defs/ExecutionLocality"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "allowed_trust_domains": {
+      "description": "Hard-allowed trust domains. Empty means no resource is eligible.",
+      "items": {
+        "$ref": "#/$defs/TrustDomainId"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "data_classes": {
+      "description": "Data classes the resource will receive.",
+      "items": {
+        "$ref": "#/$defs/DataClass"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "deterministic_only": {
+      "description": "Require a verified deterministic tool; models and humans are ineligible.",
+      "type": "boolean"
+    },
+    "maximum_cost_microunits": {
+      "description": "Hard maximum cost in microunits.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "maximum_latency_ms": {
+      "description": "Hard maximum latency in milliseconds.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "minimum_context_tokens": {
+      "description": "Minimum context capacity in tokens.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "preferences": {
+      "description": "Ordered preferences compared lexicographically after hard filtering.",
+      "items": {
+        "$ref": "#/$defs/SoftPreference"
+      },
+      "type": "array"
+    },
+    "require_independent_result_verification": {
+      "description": "Require independent verification of the selected work result.\n\nCapability profiles always require independently admitted evidence;\nthis separate obligation applies after execution.",
+      "type": "boolean"
+    },
+    "required_capabilities": {
+      "description": "Capabilities the profile must demonstrate.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "required_effects": {
+      "description": "Effects the resource boundary must support.",
+      "items": {
+        "$ref": "#/$defs/Effect"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "task_class": {
+      "description": "Exact bounded task class.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_class",
+    "required_capabilities",
+    "required_effects",
+    "data_classes",
+    "allowed_localities",
+    "allowed_trust_domains",
+    "minimum_context_tokens",
+    "require_independent_result_verification",
+    "deterministic_only",
+    "preferences"
+  ],
+  "title": "ExecutionRequirement",
+  "type": "object"
+}

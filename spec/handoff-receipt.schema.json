@@ -1,0 +1,218 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "CommissioningRecordId": {
+      "description": "Identity of one append-only commissioning provenance record.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "DelegationId": {
+      "description": "Identity of a delegation from one authority context to another.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "Digest": {
+      "description": "A content digest (blake3, lowercase hex).",
+      "maxLength": 64,
+      "minLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "EvidenceId": {
+      "description": "Identity of a provenance-bearing evidence record admitted for a claim.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "EvidenceRecord": {
+      "additionalProperties": false,
+      "description": "A provenance-bearing evidence record admitted for an exact subject.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/EvidenceId",
+          "description": "This record's identity."
+        },
+        "independence": {
+          "$ref": "#/$defs/IndependenceClass",
+          "description": "The producer's independence from the actor being judged."
+        },
+        "method": {
+          "description": "The collection method (how the evidence was produced).",
+          "type": "string"
+        },
+        "observed_at": {
+          "description": "Trusted observation time assigned by the admitting evidence store.",
+          "format": "date-time",
+          "type": "string"
+        },
+        "payload_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the evidence payload."
+        },
+        "producer": {
+          "$ref": "#/$defs/PrincipalId",
+          "description": "The principal that produced the evidence."
+        },
+        "producer_delegation": {
+          "$ref": "#/$defs/DelegationId",
+          "description": "Exact delegation under which the producer emitted the record."
+        },
+        "subject": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact subject the evidence is about."
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "producer",
+        "producer_delegation",
+        "method",
+        "payload_digest",
+        "observed_at",
+        "independence"
+      ],
+      "type": "object"
+    },
+    "IndependenceClass": {
+      "description": "How independent the evidence producer is from the actor being judged.",
+      "oneOf": [
+        {
+          "const": "self_reported",
+          "description": "The actor reports on itself (weakest; never satisfies an\nindependent-verification obligation).",
+          "type": "string"
+        },
+        {
+          "const": "same_actor_different_process",
+          "description": "Same actor, separate process.",
+          "type": "string"
+        },
+        {
+          "const": "independent_agent",
+          "description": "A different agent produced the evidence.",
+          "type": "string"
+        },
+        {
+          "const": "independent_service",
+          "description": "A separate service produced the evidence.",
+          "type": "string"
+        },
+        {
+          "const": "human_authority",
+          "description": "A human authority produced or approved the evidence.",
+          "type": "string"
+        }
+      ]
+    },
+    "InstitutionId": {
+      "description": "Identity of one institution authority domain.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "InstitutionWorkspaceId": {
+      "description": "Identity of one institution-owned commissioning workspace.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "PrincipalId": {
+      "description": "Identity of an actor capable of requesting work.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "RuntimeGenerationId": {
+      "$ref": "#/$defs/Digest",
+      "description": "Content-derived identity of an immutable runtime generation.\n\nUnlike actor and record identifiers, a generation identity is never random:\nthe same canonical specialization inputs produce the same identity."
+    }
+  },
+  "$id": "urn:politeia:handoff-receipt:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Evidence-bearing completion of operational handoff and commissioner revocation.",
+  "properties": {
+    "acceptance_delegation": {
+      "$ref": "#/$defs/DelegationId",
+      "description": "Exact delegation carrying the accepting client's handoff authority."
+    },
+    "accepted_by": {
+      "$ref": "#/$defs/PrincipalId",
+      "description": "Client principal accepting custody and continuity responsibility."
+    },
+    "commissioner": {
+      "$ref": "#/$defs/PrincipalId",
+      "description": "Commissioner whose temporary authority was revoked or expired."
+    },
+    "commissioning_record": {
+      "$ref": "#/$defs/CommissioningRecordId",
+      "description": "Commissioning record incorporated into the generation."
+    },
+    "commissioning_record_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of that exact commissioning record."
+    },
+    "continuity_evidence": {
+      "description": "Evidence that the operational generation remained functional afterward.",
+      "items": {
+        "$ref": "#/$defs/EvidenceRecord"
+      },
+      "type": "array"
+    },
+    "generation": {
+      "$ref": "#/$defs/RuntimeGenerationId",
+      "description": "Activated operational runtime generation."
+    },
+    "institution": {
+      "$ref": "#/$defs/InstitutionId",
+      "description": "Institution whose operation was handed off."
+    },
+    "revocation_evidence": {
+      "$ref": "#/$defs/EvidenceRecord",
+      "description": "Evidence proving that commissioner authority was revoked or expired."
+    },
+    "revoked_delegation": {
+      "$ref": "#/$defs/DelegationId",
+      "description": "Revoked/expired commissioner delegation."
+    },
+    "revoked_grant_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the complete revoked commissioner grant."
+    },
+    "unresolved_obligations": {
+      "description": "Known unresolved obligations retained rather than narrated away.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "unresolved_obligations_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the exact owner-approved obligation set."
+    },
+    "workspace": {
+      "$ref": "#/$defs/InstitutionWorkspaceId",
+      "description": "Preserved client-owned workspace."
+    },
+    "workspace_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the preserved workspace snapshot."
+    }
+  },
+  "required": [
+    "institution",
+    "workspace",
+    "workspace_digest",
+    "commissioning_record",
+    "commissioning_record_digest",
+    "generation",
+    "commissioner",
+    "revoked_delegation",
+    "revoked_grant_digest",
+    "revocation_evidence",
+    "accepted_by",
+    "acceptance_delegation",
+    "continuity_evidence",
+    "unresolved_obligations",
+    "unresolved_obligations_digest"
+  ],
+  "title": "HandoffReceipt",
+  "type": "object"
+}

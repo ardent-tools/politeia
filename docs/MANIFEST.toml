@@ -70,61 +70,61 @@ description = "Typed extension classes, manifests, and isolation boundaries."
 path = "docs/11-FAILURE_SEMANTICS.md"
 type = "spec"
 evergreen = true
-description = "Required failure, retry, and partial-effect semantics."
+description = "Required failure, retry, routing, specialization, and handoff semantics."
 
 [[doc]]
 path = "docs/12-ASSURANCE_CASE.md"
 type = "authored"
 evergreen = true
-description = "Assurance claims and the evidence each claim requires."
+description = "Stable acceptance-claim register and requirements for completed assurance records."
 
 [[doc]]
 path = "docs/13-THREAT_MODEL.md"
 type = "authored"
 evergreen = true
-description = "Threat actors, failure classes, and security assumptions."
+description = "Threat actors, client trust boundaries, routing risks, and security assumptions."
 
 [[doc]]
 path = "docs/14-TESTING_STRATEGY.md"
 type = "authored"
 evergreen = true
-description = "Claim-oriented verification and adversarial test strategy."
+description = "Claim-oriented verification and bounded commissioning acceptance suite."
 
 [[doc]]
 path = "docs/15-SUPPLY_CHAIN.md"
 type = "authored"
 evergreen = true
-description = "Build, dependency, provenance, and update integrity policy."
+description = "Runtime-specialization inputs, reproducibility, provenance, and update integrity."
 
 [[doc]]
 path = "docs/16-DATA_GOVERNANCE.md"
 type = "spec"
 evergreen = true
-description = "Data classification, retention, locality, and sink contract."
+description = "Client-owned data classification, retention, locality, and sink contract."
 
 [[doc]]
 path = "docs/17-OBSERVABILITY_AND_EVIDENCE.md"
 type = "spec"
 evergreen = true
-description = "Separation of telemetry from admissible institutional evidence."
+description = "Typed commissioning/routing evidence and separation from operational telemetry."
 
 [[doc]]
 path = "docs/18-FIRST_VERTICAL_SLICE.md"
 type = "authored"
 evergreen = true
-description = "First end-to-end protected-operation scenario and acceptance."
+description = "Contract for the bounded commissioning, specialization, routing, protected-operation, and handoff proof."
 
 [[doc]]
 path = "docs/19-ROADMAP.md"
 type = "authored"
-evergreen = false
-description = "Ordered implementation phases and their exit conditions."
+evergreen = true
+description = "Timeless architectural dependency order; external planning owns live status."
 
 [[doc]]
 path = "docs/20-ENGINEERING_HANDOFF.md"
 type = "authored"
-evergreen = false
-description = "Engineering start order and handoff constraints."
+evergreen = true
+description = "Timeless implementation prerequisites and starter exit contract."
 
 [[doc]]
 path = "docs/21-CONTEXT_COMPILATION.md"
@@ -136,7 +136,7 @@ description = "Derived agent-context inputs, outputs, and provenance contract."
 path = "docs/22-DEPLOYMENT_PROFILES.md"
 type = "spec"
 evergreen = true
-description = "Deployment topology and assurance profile boundaries."
+description = "Orthogonal deployment-topology and lifecycle-profile boundaries."
 
 [[doc]]
 path = "docs/adr/0001-semantic-kernel.md"
@@ -234,4 +234,46 @@ path = "docs/adr/0014-postgres-first.md"
 type = "decision-record"
 evergreen = true
 description = "ADR: use PostgreSQL as the first durable authority."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0015-self-sufficient-commissioning.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: make the public distribution sufficient for client commissioning."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0016-derived-specialization.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: derive immutable operational specializations without destructive narrowing."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0017-client-owned-trust-domain.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: keep client data and operational authority client-controlled by default."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0018-execution-resource-routing.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: route typed execution resources by hard requirements before preferences."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0019-mpl-2.0.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: license the public product under Mozilla Public License 2.0."
+decided = "2026-08-19"
+
+[[doc]]
+path = "docs/adr/0020-commissioner-tooling-independence.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: keep private commissioner tooling optional and non-authoritative."
 decided = "2026-08-19"

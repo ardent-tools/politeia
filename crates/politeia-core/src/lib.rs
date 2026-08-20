@@ -13,6 +13,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
+pub mod commissioning;
+pub mod evidence;
+pub mod generation;
+pub mod institution;
+pub mod lifecycle;
+
 macro_rules! typed_id {
     ($name:ident, $doc:expr) => {
         #[doc = $doc]
@@ -50,10 +56,6 @@ typed_id!(
 typed_id!(OperationId, "Identity of a typed operation contract.");
 typed_id!(PolicyBundleId, "Identity of an immutable policy bundle.");
 typed_id!(
-    RuntimeGenerationId,
-    "Identity of an immutable runtime generation (executable + policy + schema + trusted packs/adapters)."
-);
-typed_id!(
     AdapterId,
     "Identity of an adapter bridging the semantic protocol to an external system."
 );
@@ -69,10 +71,61 @@ typed_id!(
     BudgetReservationId,
     "Identity of one atomically reserved operation budget."
 );
+typed_id!(
+    InstitutionId,
+    "Identity of one institution authority domain."
+);
+typed_id!(
+    InstitutionWorkspaceId,
+    "Identity of one institution-owned commissioning workspace."
+);
+typed_id!(
+    CommissioningRecordId,
+    "Identity of one append-only commissioning provenance record."
+);
+typed_id!(
+    ExecutionResourceId,
+    "Identity of a model, deterministic tool, human, or service available for bounded work."
+);
+typed_id!(
+    CapabilityProfileId,
+    "Identity of an evidence-backed execution-resource capability profile."
+);
+typed_id!(
+    CapabilityVerificationId,
+    "Identity of one trusted, time-bounded verification of an exact capability profile."
+);
+typed_id!(
+    RoutingDecisionId,
+    "Identity of one evidence-bearing execution-resource selection or escalation."
+);
 /// A content digest (blake3, lowercase hex).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
 pub struct Digest(#[schemars(length(equal = 64), regex(pattern = "^[0-9a-f]{64}$"))] String);
+
+/// Content-derived identity of an immutable runtime generation.
+///
+/// Unlike actor and record identifiers, a generation identity is never random:
+/// the same canonical specialization inputs produce the same identity.
+#[repr(transparent)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(transparent)]
+pub struct RuntimeGenerationId(Digest);
+
+impl RuntimeGenerationId {
+    /// Digest arbitrary canonical input bytes into a generation identity.
+    pub fn derive(bytes: &[u8]) -> Self {
+        Self(Digest::blake3(bytes))
+    }
+
+    /// The canonical digest that identifies the generation.
+    pub fn digest(&self) -> &Digest {
+        &self.0
+    }
+}
 
 /// A string was not a canonical lowercase 32-byte hexadecimal digest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,6 +392,10 @@ pub struct OperationSpec {
     pub data_classes: BTreeSet<DataClass>,
     /// Evidence obligations the operation owes on completion.
     pub evidence_obligations: Vec<String>,
+    /// Exact routing requirement that must produce an admitted execution
+    /// assignment before this operation may be authorized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_requirement: Option<Digest>,
     /// Whether the operation is safe to retry.
     pub retryable: bool,
     /// Whether the operation requires idempotency keys.

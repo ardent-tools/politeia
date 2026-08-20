@@ -15,6 +15,10 @@ Agents working in this repository must optimize for semantic correctness, not ap
 - Do not allow the actor being judged to satisfy an independence requirement by self-certification.
 - Do not turn inferred institutional claims into approved truth.
 - Do not add production breadth before the first vertical slice is complete.
+- Keep Politeia sufficient to commission, specialize, verify, and hand off Politeia from its public source distribution; private commissioner tooling may assist but may never be required.
+- Keep institution-specific data, secrets, durable state, inference authority, and production effects in the institution's trust domain by default.
+- Do not hard-code a model/vendor hierarchy. Route typed execution resources only after hard policy, data, capability, and assurance requirements are satisfied.
+- Treat accepted refinement packets as migration inputs. Fold their decisions into the canonical ontology, contracts, ADRs, types, and derived projections instead of preserving a second normative source.
 - When a new abstraction is proposed, state which ambiguity or impossible state it removes.
 - If two concepts become semantically identical, collapse them.
 - Prefer small trusted kernels and narrow effect interfaces.

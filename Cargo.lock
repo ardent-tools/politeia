@@ -277,9 +277,11 @@ dependencies = [
 name = "politeia-evidence"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "politeia-core",
  "schemars",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -650,6 +652,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "politeia-core",
+ "politeia-evidence",
  "politeia-runtime",
  "politeia-sdk",
  "schemars",

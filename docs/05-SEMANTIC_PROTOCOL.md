@@ -20,6 +20,10 @@ MCP, A2A, HTTP/gRPC, CLI, embedded Rust, and future transports adapt to the same
 - `propose_change(change)` — propose policy/knowledge/runbook/system improvement.
 - `request_waiver(binding, scope, reason)` — request explicit exception through proper authority.
 
+Commissioning, specialization, routing, and handoff use these semantic contracts when transported. Add a dedicated operation only for an institutionally meaningful state transition—for example, deriving a generation or recording handoff—not as a wrapper around a CLI command or provider API.
+
+Discovery and preflight may expose execution requirements and eligible resources. Authorization binds the exact routing decision and selected resource before execution; transport framing may not replace either.
+
 ## Protocol rule
 
 Transport adapters may add framing, streaming, authentication carriage, or transport error mapping. They may not reinterpret semantic operation meaning.

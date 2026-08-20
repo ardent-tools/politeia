@@ -1,0 +1,99 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "$defs": {
+    "DelegationId": {
+      "description": "Identity of a delegation from one authority context to another.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "EvidenceId": {
+      "description": "Identity of a provenance-bearing evidence record admitted for a claim.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "InstitutionId": {
+      "description": "Identity of one institution authority domain.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "LifecycleProfile": {
+      "description": "Authority and capability posture during an institution's lifecycle.",
+      "oneOf": [
+        {
+          "const": "bootstrap",
+          "description": "Bounded read-heavy reconnaissance and candidate-model construction.",
+          "type": "string"
+        },
+        {
+          "const": "commissioning",
+          "description": "Institution-specific engineering and generation derivation.",
+          "type": "string"
+        },
+        {
+          "const": "operational",
+          "description": "Narrow ordinary production operation.",
+          "type": "string"
+        },
+        {
+          "const": "maintenance",
+          "description": "Bounded reconciliation and approved maintenance.",
+          "type": "string"
+        },
+        {
+          "const": "recommissioning",
+          "description": "Explicitly authorized return to broader engineering.",
+          "type": "string"
+        }
+      ]
+    },
+    "PrincipalId": {
+      "description": "Identity of an actor capable of requesting work.",
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "$id": "urn:politeia:lifecycle-transition:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "An authorized, evidence-bearing lifecycle transition.",
+  "properties": {
+    "authorization_delegation": {
+      "$ref": "#/$defs/DelegationId",
+      "description": "Exact delegation carrying transition authority."
+    },
+    "authorized_by": {
+      "$ref": "#/$defs/PrincipalId",
+      "description": "Principal authorizing the transition."
+    },
+    "evidence": {
+      "description": "Evidence proving preconditions, approval, and completion.",
+      "items": {
+        "$ref": "#/$defs/EvidenceId"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "from": {
+      "$ref": "#/$defs/LifecycleProfile",
+      "description": "Profile before the transition."
+    },
+    "institution": {
+      "$ref": "#/$defs/InstitutionId",
+      "description": "Institution whose lifecycle changes."
+    },
+    "to": {
+      "$ref": "#/$defs/LifecycleProfile",
+      "description": "Profile after the transition."
+    }
+  },
+  "required": [
+    "institution",
+    "from",
+    "to",
+    "authorized_by",
+    "authorization_delegation",
+    "evidence"
+  ],
+  "title": "LifecycleTransition",
+  "type": "object"
+}

@@ -14,7 +14,8 @@ Autonomy is divided into explicit authority tiers.
 - propose semantic compression;
 - strengthen controls already implied by approved commitments when the strengthening is monotonic and reversible;
 - verify derivation freshness;
-- surface drift.
+- surface drift;
+- update evidence-backed execution-resource calibration within an already approved task taxonomy and verification contract.
 
 ## Autonomous maintenance may not
 
@@ -24,9 +25,12 @@ Autonomy is divided into explicit authority tiers.
 - approve its own waiver;
 - lower the approval threshold for protected changes;
 - broaden protected data sinks;
-- promote itself to a more privileged deployment profile;
-- satisfy an independent-verification requirement with self-certification.
+- transition itself to a broader `LifecycleProfile`;
+- satisfy an independent-verification requirement with self-certification;
+- convert self-reported or historical worker performance into authority, policy waiver, or proof of verifier independence.
 
 ## Governing invariant
 
 Autonomous evolution may improve implementation of approved intent. It may not redefine the authority from which that intent derives.
+
+Calibration may change which bounded tasks a resource is eligible to attempt. It cannot widen the worker's delegation, effects, data access, approval power, or ability to certify itself.
