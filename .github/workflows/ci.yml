@@ -132,16 +132,33 @@ jobs:
             --output tla2tools.jar \
             "https://github.com/tlaplus/tlaplus/releases/download/${TLA_VERSION}/tla2tools.jar"
           echo "${TLA_SHA256}  tla2tools.jar" | sha256sum --check --strict
+      # The module list is derived from the directory, not written out here. A
+      # hand-kept list is a second place to remember, and the failure when it is
+      # forgotten is silent: the new model sits checked in, never run, and every
+      # green run says nothing about it.
       - name: Check the models
         shell: bash
         working-directory: formal
         run: |
-          for module in Workflow Delegation; do
-            echo "::group::${module}"
+          shopt -s nullglob
+          status=0
+          for module in *.tla; do
+            name="${module%.tla}"
+            if [ ! -f "${name}.cfg" ]; then
+              echo "::error::${module} has no ${name}.cfg, so nothing checks it"
+              status=1
+              continue
+            fi
+            echo "::group::${name}"
+            # -metadir per run: TLC names its scratch directory after the
+            # current second, so two runs finishing inside one second collide
+            # and the second aborts before checking anything.
             java -XX:+UseParallelGC -cp ../tla2tools.jar tlc2.TLC \
-              -nowarning -config "${module}.cfg" "${module}.tla"
+              -metadir "${RUNNER_TEMP}/tlc/${name}" \
+              -nowarning -config "${name}.cfg" "${module}" || status=1
             echo "::endgroup::"
           done
+          exit "${status}"
       # The load-bearing step. A checker that has only run against specs which
       # satisfy their invariants has not shown it can report a violation: it
       # would pass with an invariant written as TRUE, with a cfg naming no
@@ -180,19 +197,66 @@ jobs:
             echo "::error::no planted defects found; the checker above has not been shown able to fail"
             exit 1
           fi
+          : > "${RUNNER_TEMP}/isolated-invariants.txt"
           for module in "${modules[@]}"; do
             name="${module%.tla}"
             echo "::group::${name} (must be rejected)"
             # -DTLA-Library=.. so a fixture may EXTEND the model it mirrors
             # instead of restating it; a restated fixture drifts, and a drifted
             # fixture tests something other than what it claims.
-            if java -XX:+UseParallelGC -DTLA-Library=.. -cp ../../tla2tools.jar tlc2.TLC \
-                 -nowarning -config "${name}.cfg" "${module}"
-            then
-              echo "::error::the planted defect in ${name} was accepted; the model \
-          checker is not reporting that violation and every green run above is worth less than it looks"
+            # -metadir per fixture: TLC names its scratch directory after the
+            # current second. These models check in well under a second, so
+            # runs collide, and a collision aborts TLC before it checks
+            # anything -- with a non-zero exit that is indistinguishable from a
+            # rejection.
+            java -XX:+UseParallelGC -DTLA-Library=.. -cp ../../tla2tools.jar tlc2.TLC \
+              -metadir "${RUNNER_TEMP}/tlc/${name}" \
+              -nowarning -config "${name}.cfg" "${module}" \
+              > "${RUNNER_TEMP}/${name}.log" 2>&1 || true
+            cat "${RUNNER_TEMP}/${name}.log"
+            # The pass condition is a reported violation, not a non-zero exit.
+            # TLC exits non-zero for a parse error, a missing module, a bad
+            # configuration and an aborted run, and every one of those would
+            # otherwise read as "the checker caught the planted defect" while
+            # the defect went unexamined.
+            #
+            # Two message forms, depending on whether the invariant failed in a
+            # reachable state or evaluated to FALSE outright.
+            violated="$(sed -nE 's/.*Invariant ([A-Za-z_]+) is violated.*/\1/p;
+                                 s/.*invariant of ([A-Za-z_]+) is equal to FALSE.*/\1/p' \
+              "${RUNNER_TEMP}/${name}.log" | head -1)"
+            if [ -z "${violated}" ]; then
+              echo "::error::${name} reported no invariant violation; either the \
+          planted defect was accepted, or the run never got as far as checking it. Both \
+          mean every green run above is worth less than it looks"
               exit 1
             fi
-            echo "rejected ${name}, as required"
+            echo "${violated}" >> "${RUNNER_TEMP}/isolated-invariants.txt"
+            echo "rejected ${name} on ${violated}, as required"
             echo "::endgroup::"
           done
+
+      # An invariant no fixture can make fire has not been shown to constrain
+      # anything. Two kinds end up here, and both look exactly like a working
+      # check: one that is implied by a stronger invariant beside it, and one
+      # the model maintains by construction so that no reachable state can
+      # negate it. Requiring a witness for each is what tells them apart.
+      #
+      # TypeOK is exempt. It is a well-formedness claim about the model rather
+      # than about the system, and every fixture is expected to leave the model
+      # well-formed -- a fixture that broke it would be reporting a bug in
+      # itself.
+      - name: Require every declared invariant to be falsifiable
+        shell: bash
+        working-directory: formal
+        run: |
+          declared="$(grep -hE '^[[:space:]]*INVARIANT[[:space:]]' *.cfg \
+            | awk '{print $2}' | grep -vx TypeOK | sort -u)"
+          isolated="$(sort -u "${RUNNER_TEMP}/isolated-invariants.txt")"
+          missing="$(comm -23 <(echo "${declared}") <(echo "${isolated}"))"
+          if [ -n "${missing}" ]; then
+            echo "::error::no planted defect makes these fire, so nothing shows \
+          they constrain the model: ${missing//$'\n'/ }"
+            exit 1
+          fi
+          echo "every declared invariant is witnessed by a fixture that violates it"

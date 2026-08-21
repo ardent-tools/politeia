@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::{
     AdapterId, CommissioningRecordId, DelegationId, Digest, EvidenceId, InstitutionId,
     InstitutionWorkspaceId, PolicyBundleId, PrincipalId, RuntimeGenerationId,
@@ -51,8 +52,8 @@ pub fn commissioner_revocation_subject_digest(
     workspace: &InstitutionWorkspaceId,
     commissioning_record: &CommissioningRecordId,
     commissioner_grant_digest: &Digest,
-) -> Result<Digest, serde_json::Error> {
-    serde_json::to_vec(&CommissionerRevocationSubject {
+) -> Result<Digest, CanonicalError> {
+    to_canonical_bytes(&CommissionerRevocationSubject {
         kind: "commissioner_revocation_v1",
         institution,
         workspace,
@@ -73,8 +74,8 @@ pub fn operational_continuity_subject_digest(
     institution: &InstitutionId,
     workspace: &InstitutionWorkspaceId,
     generation: &RuntimeGenerationId,
-) -> Result<Digest, serde_json::Error> {
-    serde_json::to_vec(&OperationalContinuitySubject {
+) -> Result<Digest, CanonicalError> {
+    to_canonical_bytes(&OperationalContinuitySubject {
         kind: "operational_continuity",
         institution,
         workspace,
@@ -183,8 +184,8 @@ pub enum HandoffError {
     EvidenceClassMismatch,
     /// Continuity was observed before commissioner revocation.
     ContinuityPrecedesRevocation,
-    /// Handoff subject encoding failed.
-    Encoding(serde_json::Error),
+    /// Handoff subject canonical encoding failed.
+    Encoding(CanonicalError),
     /// Handoff did not bind an operational generation.
     NonOperationalGeneration,
 }

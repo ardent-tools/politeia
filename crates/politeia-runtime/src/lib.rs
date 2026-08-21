@@ -16,6 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu, ensure};
 
+use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::{
     AdapterId, BudgetReservationId, DataClass, Delegation, DelegationId, Digest, DigestDomain,
     Effect, EffectLeaseId, OperationId, OperationSpec, PolicyBundleId, PrincipalId, ResourceBudget,
@@ -111,8 +112,8 @@ pub enum RuntimeError {
     /// The immutable lease claims could not be encoded for exact binding.
     #[snafu(display("failed to encode effect lease claims"))]
     LeaseEncoding {
-        /// JSON encoding failure for the typed lease claims.
-        source: serde_json::Error,
+        /// Canonical-encoding failure for the typed lease claims.
+        source: CanonicalError,
         /// Source location where encoding failed.
         #[snafu(implicit)]
         location: snafu::Location,
@@ -179,7 +180,11 @@ pub struct OperationIntent {
     pub idempotency_key: Option<String>,
     /// Exact resource selection bound before policy evaluation, when the work
     /// requires an external execution resource.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // See `OperationSpec::execution_requirement`: absence is encoded, not
+    // omitted, so that it is covered by the digest. This struct previously
+    // carried both conventions at once -- `idempotency_key` emitted null while
+    // this field vanished -- in the record whose digest binds policy.
+    #[serde(default)]
     pub execution: Option<routing::ExecutionAssignment>,
 }
 
@@ -339,11 +344,11 @@ impl EffectLease {
 
     fn reservation_request(&self) -> Result<ReservationRequest, RuntimeError> {
         let replay_key =
-            serde_json::to_vec(&(self.claims.replay_domain.as_str(), self.replay_key()))
+            to_canonical_bytes(&(self.claims.replay_domain.as_str(), self.replay_key()))
                 .context(LeaseEncodingSnafu)?;
         let mut budget_scopes = Vec::with_capacity(self.claims.delegation_chain.len());
         for delegation in &self.claims.delegation_chain {
-            let encoded = serde_json::to_vec(delegation).context(LeaseEncodingSnafu)?;
+            let encoded = to_canonical_bytes(delegation).context(LeaseEncodingSnafu)?;
             budget_scopes.push(BudgetScope::new(
                 delegation.id.clone(),
                 Digest::blake3(&encoded),

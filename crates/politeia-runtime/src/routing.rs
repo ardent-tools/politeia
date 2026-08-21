@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 mod ranking;
 
+use politeia_core::canonical::CanonicalError;
 use ranking::compare_resources;
 
 /// Exact identity and provenance shape of something that can execute work.
@@ -90,7 +91,7 @@ impl CapabilityVerificationRecord {
     /// Returns the JSON encoding failure if the record cannot be represented.
     ///
     /// Time: O(n). Space: O(n), where n is the encoded record size.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::CapabilityVerification, self)
     }
 }
@@ -155,7 +156,7 @@ impl ExecutionResource {
     /// represented canonically.
     ///
     /// Time: O(n). Space: O(n), where n is the encoded resource size.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::ExecutionResource, self)
     }
 }
@@ -189,7 +190,7 @@ impl CapabilityProfile {
     /// represented canonically.
     ///
     /// Time: O(n). Space: O(n), where n is the encoded profile size.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::CapabilityProfile, self)
     }
 }
@@ -215,7 +216,7 @@ impl AvailabilitySnapshot {
     /// represented canonically.
     ///
     /// Time: O(n). Space: O(n), where n is the encoded snapshot size.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::AvailabilitySnapshot, self)
     }
 }
@@ -278,7 +279,7 @@ impl ExecutionRequirement {
     /// represented canonically.
     ///
     /// Time: O(n). Space: O(n), where n is the encoded requirement size.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::ExecutionRequirement, self)
     }
 }
@@ -448,7 +449,7 @@ impl RoutingDecision {
     /// represented canonically.
     ///
     /// Time: O(n). Space: O(n), where n is the encoded decision size.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::ExecutionAssignment, self)
     }
 
@@ -458,9 +459,9 @@ impl RoutingDecision {
     ///
     /// # Errors
     ///
-    /// Returns the JSON encoding failure if the routing decision cannot be
-    /// digest-bound.
-    pub fn assignment(&self) -> Result<Option<ExecutionAssignment>, serde_json::Error> {
+    /// Returns the canonical-encoding failure if the routing decision cannot
+    /// be digest-bound.
+    pub fn assignment(&self) -> Result<Option<ExecutionAssignment>, CanonicalError> {
         let RoutingOutcome::Selected {
             resource,
             resource_digest,
@@ -509,7 +510,7 @@ pub enum RoutingError {
     /// The requirement omitted an explicit hard locality or trust-domain set.
     IncompleteHardRequirement,
     /// Canonical digest encoding failed.
-    Encoding(serde_json::Error),
+    Encoding(CanonicalError),
 }
 
 impl std::fmt::Display for RoutingError {

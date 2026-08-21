@@ -6,6 +6,7 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::canonical::CanonicalError;
 use crate::{DelegationId, Digest, DigestDomain, EvidenceId, PrincipalId};
 
 /// How independent the evidence producer is from the actor being judged.
@@ -54,7 +55,7 @@ impl EvidenceRecord {
     /// # Errors
     ///
     /// Returns the JSON encoding failure if the record cannot be represented.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::EvidenceRecord, self)
     }
 }
