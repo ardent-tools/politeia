@@ -61,8 +61,72 @@ fn constrain_date_time(schema: &mut schemars::Schema) {
 struct DerivedSpec {
     path: &'static str,
     urn: String,
+    type_name: &'static str,
     bytes: Vec<u8>,
 }
+
+/// A schema-bearing type deliberately absent from the published population.
+struct WithheldSchema {
+    type_name: &'static str,
+    reason: &'static str,
+}
+
+/// Types that derive `JsonSchema` and are deliberately not projected.
+///
+/// WHY this list exists at all: a type that is simply missing from
+/// `generated_specs()` and a type that was considered and held back look
+/// identical from outside — both are absent — so absence alone records no
+/// decision and a reader cannot tell an intention from an oversight.
+///
+/// Several of these are hardened and wire-tested exactly as the published roots
+/// are, which is what makes their absence read as an oversight rather than a
+/// choice. The choice is `AGENTS.md`'s: *do not add production breadth before
+/// the first vertical slice is complete*. Publishing a projection is public
+/// surface, and this scaffold has not earned more of it yet.
+///
+/// LIMIT, stated because the list looks more complete than it is: nothing here
+/// proves the list is total. Rust offers no way to enumerate every `JsonSchema`
+/// implementor, so a type added tomorrow appears in neither population and
+/// nothing fails. Deriving membership mechanically is #9's authoritative-selector
+/// work, and it is Phase 5.
+const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
+    WithheldSchema {
+        type_name: "politeia_policy::NormativeClause",
+        reason: "policy authoring surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_policy::DetectorSpec",
+        reason: "policy authoring surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_policy::PolicyBinding",
+        reason: "policy authoring surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_policy::Waiver",
+        reason: "policy authoring surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_policy::PolicyDecision",
+        reason: "produced per authorization; no consumer reads it off the wire yet",
+    },
+    WithheldSchema {
+        type_name: "politeia_evidence::Verification",
+        reason: "independent-verification record; published with the assurance path, not before",
+    },
+    WithheldSchema {
+        type_name: "politeia_evidence::Attestation",
+        reason: "attestation record; published with the assurance path, not before",
+    },
+    WithheldSchema {
+        type_name: "politeia_protocol::SemanticRequest",
+        reason: "transport envelope; the payload is published, the envelope follows a transport",
+    },
+    WithheldSchema {
+        type_name: "politeia_protocol::SemanticResponse",
+        reason: "transport envelope; the payload is published, the envelope follows a transport",
+    },
+];
 
 /// The published identity a projection carries, derived from where it is published.
 ///
@@ -109,7 +173,12 @@ fn render_schema<T: JsonSchema>(path: &'static str) -> anyhow::Result<DerivedSpe
     );
     let mut bytes = serde_json::to_vec_pretty(&value)?;
     bytes.push(b'\n');
-    Ok(DerivedSpec { path, urn, bytes })
+    Ok(DerivedSpec {
+        path,
+        urn,
+        type_name: std::any::type_name::<T>(),
+        bytes,
+    })
 }
 
 fn generated_specs() -> anyhow::Result<Vec<DerivedSpec>> {
@@ -182,11 +251,63 @@ fn check() -> anyhow::Result<()> {
         );
     }
     reject_unowned_schemas(&specs, Path::new(SPEC_DIR))?;
+    reject_contradictory_population(&specs)?;
 
     println!(
-        "starter structural checks passed; {} published schemas, none unowned",
-        specs.len()
+        "starter structural checks passed; {} published schemas, none unowned; \
+         {} schema-bearing types recorded as withheld",
+        specs.len(),
+        WITHHELD_SCHEMAS.len()
     );
+    Ok(())
+}
+
+/// The bare type name, without its module path.
+///
+/// WHY compare on this rather than the full path: `std::any::type_name` reports
+/// where a type is *defined*, while a withheld entry is written where the type is
+/// *used from*, and re-exports make those differ. Matching on the last segment
+/// keeps the check honest about the case it exists for — one type claimed by both
+/// populations — at the cost of a false positive if two crates ever define types
+/// of the same name and one is published. That direction fails loudly and is the
+/// safe one.
+fn bare_type_name(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
+}
+
+/// Fail when a type is both published and recorded as withheld.
+///
+/// The two lists are the whole of the recorded decision, so a type appearing in
+/// both means the record contradicts itself and neither entry can be trusted.
+/// This is the case that actually arises: publishing a withheld type is a normal
+/// step, and forgetting to strike it from the withheld list leaves a reason
+/// standing that argues against something already done.
+fn reject_contradictory_population(specs: &[DerivedSpec]) -> anyhow::Result<()> {
+    let published: BTreeSet<&str> = specs
+        .iter()
+        .map(|spec| bare_type_name(spec.type_name))
+        .collect();
+
+    let mut seen = BTreeSet::new();
+    for withheld in WITHHELD_SCHEMAS {
+        let bare = bare_type_name(withheld.type_name);
+        anyhow::ensure!(
+            !withheld.reason.trim().is_empty(),
+            "{} is withheld with no reason; an unexplained exclusion records nothing",
+            withheld.type_name
+        );
+        anyhow::ensure!(
+            seen.insert(bare),
+            "{} is recorded as withheld twice",
+            withheld.type_name
+        );
+        anyhow::ensure!(
+            !published.contains(bare),
+            "{} is published and also recorded as withheld; \
+             strike it from WITHHELD_SCHEMAS",
+            withheld.type_name
+        );
+    }
     Ok(())
 }
 
@@ -326,6 +447,59 @@ mod tests {
             error.to_string().contains(orphaned.path),
             "the refusal must name the unowned file, got: {error}"
         );
+    }
+
+    #[test]
+    fn every_withheld_type_carries_a_reason() {
+        for withheld in WITHHELD_SCHEMAS {
+            assert!(
+                !withheld.reason.trim().is_empty(),
+                "{} is withheld with no reason",
+                withheld.type_name
+            );
+        }
+        assert!(
+            !WITHHELD_SCHEMAS.is_empty(),
+            "an empty withheld list would make the contradiction check vacuous"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the mutation needs a real withheld entry to contradict"
+    )]
+    fn a_type_claimed_by_both_populations_is_rejected() {
+        // The guard only ever sees two lists that already agree, so it passes
+        // trivially until shown the disagreement it exists for: a type published
+        // while its withholding reason still stands.
+        let withheld = WITHHELD_SCHEMAS
+            .first()
+            .expect("the withheld population is not empty");
+        let contradiction = DerivedSpec {
+            path: "spec/contradiction.schema.json",
+            urn: "urn:politeia:contradiction:v1".to_string(),
+            type_name: withheld.type_name,
+            bytes: Vec::new(),
+        };
+
+        let error = reject_contradictory_population(&[contradiction])
+            .expect_err("a type in both populations must be rejected");
+        assert!(
+            error.to_string().contains(withheld.type_name),
+            "the refusal must name the contradicted type, got: {error}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the positive control fails the fixture, not the assertion, if rendering breaks"
+    )]
+    fn the_recorded_population_does_not_contradict_itself() {
+        let specs = generated_specs().expect("the authoritative schemas must render");
+        reject_contradictory_population(&specs)
+            .expect("no published type may also be recorded as withheld");
     }
 
     #[test]
