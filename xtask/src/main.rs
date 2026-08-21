@@ -149,6 +149,14 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "produced per authorization; no consumer reads it off the wire yet",
     },
     WithheldSchema {
+        type_name: "politeia_evidence::assessment::AssessmentRelation",
+        reason: "correction/supersession authoring surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_evidence::assessment::RelationKind",
+        reason: "projected as part of AssessmentRelation; no standalone consumer reads it off the wire",
+    },
+    WithheldSchema {
         type_name: "politeia_evidence::Verification",
         reason: "independent-verification record; published with the assurance path, not before",
     },
