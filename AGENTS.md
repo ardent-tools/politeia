@@ -23,6 +23,9 @@ Agents working in this repository must optimize for semantic correctness, not ap
 - Do not hard-code a model/vendor hierarchy. Route typed execution resources only after hard policy, data, capability, and assurance requirements are satisfied.
 - Treat accepted refinement packets as migration inputs. Fold their decisions into the canonical ontology, contracts, ADRs, types, and derived projections instead of preserving a second normative source.
 - Preserve delivered or attested artifact bytes. Corrections and supersessions append with provenance; they do not rewrite historical evidence.
+- Do not add a check without showing it can fail. An invariant implied by a stronger one beside it, a guard over a state its subject cannot reach, a comparison between a value and a recomputation of itself, and an assertion whose fixture satisfies it either way all pass identically to a working check. Reach the failure once, deliberately, before trusting the pass.
+- Do not read a tool's exit status as evidence about its subject. A checker exits non-zero for a parse error, a missing input, a bad configuration and an aborted run as readily as for the defect it was pointed at, and the caller cannot tell those apart. Require the specific finding the check exists to produce.
+- When a rule holds only because of where something happens to live, say so or move it. An exhaustive match is exhaustive until its type moves to another crate; a private field is unreachable until a descendant module reaches it. A guarantee that depends on an arrangement nobody stated is a guarantee that ends without warning.
 - When a new abstraction is proposed, state which ambiguity or impossible state it removes.
 - If two concepts become semantically identical, collapse them.
 - Prefer small trusted kernels and narrow effect interfaces.
