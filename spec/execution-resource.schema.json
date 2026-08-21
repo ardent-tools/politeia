@@ -4,6 +4,7 @@
     "AdapterId": {
       "description": "Identity of an adapter bridging the semantic protocol to an external system.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "DataClass": {
@@ -260,11 +261,13 @@
     "ExecutionResourceId": {
       "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "PrincipalId": {
       "description": "Identity of an actor capable of requesting work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "TrustDomainId": {
@@ -311,12 +314,14 @@
     "estimated_cost_microunits": {
       "description": "Estimated cost for the bounded task class, in integer microunits.",
       "format": "uint64",
+      "maximum": 18446744073709551615,
       "minimum": 0,
       "type": "integer"
     },
     "estimated_latency_ms": {
       "description": "Estimated latency for the bounded task class, in milliseconds.",
       "format": "uint64",
+      "maximum": 18446744073709551615,
       "minimum": 0,
       "type": "integer"
     },
@@ -331,6 +336,7 @@
     "max_context_tokens": {
       "description": "Maximum supported context size in tokens.",
       "format": "uint64",
+      "maximum": 18446744073709551615,
       "minimum": 0,
       "type": "integer"
     },

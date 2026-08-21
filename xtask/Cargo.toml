@@ -14,6 +14,21 @@ politeia-evidence.workspace = true
 politeia-runtime.workspace = true
 politeia-sdk.workspace = true
 
+[dev-dependencies]
+jiff.workspace = true
+uuid.workspace = true
+# WHY default-features = false: the defaults pull reqwest, rustls and aws-lc-rs
+# in to resolve external `$ref`s over HTTP. Every schema here is self-contained
+# -- its refs only ever point at local `#/$defs/...` -- so that whole tree is
+# dead weight, and aws-lc-rs adds a C toolchain requirement to a test-only path.
+#
+# WHY not the `arbitrary-precision` feature: the base build already compares
+# `maximum` as a native u64, so it is exact at the top of the range these bounds
+# describe. Enabling it flips `serde_json/arbitrary_precision` for the whole
+# workspace under cargo's feature unification, changing number handling well
+# outside these tests.
+jsonschema = { version = "0.50", default-features = false }
+
 [lints]
 workspace = true
 

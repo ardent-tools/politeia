@@ -208,6 +208,7 @@
     "maximum_cost_microunits": {
       "description": "Hard maximum cost in microunits.",
       "format": "uint64",
+      "maximum": 18446744073709551615,
       "minimum": 0,
       "type": [
         "integer",
@@ -217,6 +218,7 @@
     "maximum_latency_ms": {
       "description": "Hard maximum latency in milliseconds.",
       "format": "uint64",
+      "maximum": 18446744073709551615,
       "minimum": 0,
       "type": [
         "integer",
@@ -226,6 +228,7 @@
     "minimum_context_tokens": {
       "description": "Minimum context capacity in tokens.",
       "format": "uint64",
+      "maximum": 18446744073709551615,
       "minimum": 0,
       "type": "integer"
     },
