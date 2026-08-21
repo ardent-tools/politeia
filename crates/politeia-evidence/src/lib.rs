@@ -184,8 +184,8 @@ pub enum HandoffError {
     EvidenceClassMismatch,
     /// Continuity was observed before commissioner revocation.
     ContinuityPrecedesRevocation,
-    /// Handoff subject encoding failed.
-    Encoding(serde_json::Error),
+    /// Handoff subject canonical encoding failed.
+    Encoding(CanonicalError),
     /// Handoff did not bind an operational generation.
     NonOperationalGeneration,
 }

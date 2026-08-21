@@ -459,9 +459,9 @@ impl RoutingDecision {
     ///
     /// # Errors
     ///
-    /// Returns the JSON encoding failure if the routing decision cannot be
-    /// digest-bound.
-    pub fn assignment(&self) -> Result<Option<ExecutionAssignment>, serde_json::Error> {
+    /// Returns the canonical-encoding failure if the routing decision cannot
+    /// be digest-bound.
+    pub fn assignment(&self) -> Result<Option<ExecutionAssignment>, CanonicalError> {
         let RoutingOutcome::Selected {
             resource,
             resource_digest,
@@ -510,7 +510,7 @@ pub enum RoutingError {
     /// The requirement omitted an explicit hard locality or trust-domain set.
     IncompleteHardRequirement,
     /// Canonical digest encoding failed.
-    Encoding(serde_json::Error),
+    Encoding(CanonicalError),
 }
 
 impl std::fmt::Display for RoutingError {

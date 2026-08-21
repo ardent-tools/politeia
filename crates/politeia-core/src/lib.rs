@@ -8,7 +8,6 @@
 
 use std::collections::BTreeSet;
 
-use crate::canonical::{CanonicalError, to_canonical_bytes};
 use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};

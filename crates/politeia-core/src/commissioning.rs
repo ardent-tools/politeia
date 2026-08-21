@@ -172,6 +172,6 @@ pub enum CommissioningError {
     UnexpectedApproval,
     /// One or more required typed subjects lacked approval.
     MissingRequiredApproval,
-    /// A typed commissioning subject could not be encoded.
-    Encoding(serde_json::Error),
+    /// A typed commissioning subject could not be encoded canonically.
+    Encoding(crate::canonical::CanonicalError),
 }
