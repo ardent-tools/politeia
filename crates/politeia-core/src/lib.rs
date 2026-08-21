@@ -434,7 +434,7 @@ impl Effect {
     /// `ReadSecret` falls on the other side, and that is not an oversight:
     /// retrieving secret material is *separately authorized* per the same
     /// document, and a delegation naming the effect has done that naming.
-    pub const fn mutates(self) -> bool {
+    pub const fn mutates(&self) -> bool {
         match self {
             Effect::ReadFilesystem | Effect::ReadSecret | Effect::ReadExternalSystem => false,
             Effect::WriteFilesystem

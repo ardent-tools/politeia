@@ -22,9 +22,10 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::institution::InstitutionWorkspaceId;
 use crate::knowledge::Observation;
-use crate::{AdapterId, Delegation, DelegationId, Effect, InstitutionId, PrincipalId};
+use crate::{
+    AdapterId, Delegation, DelegationId, Effect, InstitutionId, InstitutionWorkspaceId, PrincipalId,
+};
 
 /// The semantic action a delegation must carry to reconnoitre.
 pub const RECONNOITRE_ACTION: &str = "reconnaissance.observe";
@@ -186,8 +187,8 @@ impl ReconnaissanceScope {
         let mutating: BTreeSet<Effect> = delegation
             .effects
             .iter()
-            .copied()
             .filter(|effect| effect.mutates())
+            .cloned()
             .collect();
         if !mutating.is_empty() {
             return Err(ReconnaissanceRefusal::NotReadOnly { effects: mutating });
@@ -364,7 +365,7 @@ mod tests {
             Effect::ChangeAuthorization,
         ] {
             let mut f = fixture();
-            f.delegation.effects = BTreeSet::from([effect]);
+            f.delegation.effects = BTreeSet::from([effect.clone()]);
             let admitted = f.scope.admit(&f.delegation, &f.observation, now()).is_ok();
             assert_eq!(
                 admitted,
