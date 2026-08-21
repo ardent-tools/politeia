@@ -6,6 +6,7 @@
 #![deny(missing_docs)]
 
 pub mod assessment;
+pub mod assurance;
 
 use std::collections::BTreeSet;
 
@@ -402,3 +403,7 @@ mod commissioning_tests;
 #[cfg(test)]
 #[path = "tests/assessment.rs"]
 mod assessment_tests;
+
+#[cfg(test)]
+#[path = "tests/assurance.rs"]
+mod assurance_tests;
