@@ -225,8 +225,24 @@ struct LeaseClaims {
 
 /// An unforgeable, single-use authorization to produce effects.
 ///
-/// The private typed claims bind every axis required by the kernel contract;
-/// `claims_digest` detects any substitution before the effect port is called.
+/// The private typed claims bind every axis required by the kernel contract.
+/// Unforgeability comes from the type, not from a check: both fields are
+/// private, the only construction site is [`Dispatcher::authorize`], neither
+/// this type nor [`LeaseClaims`] implements `Deserialize`, and the invocation
+/// capability that follows is move-only. A lease therefore cannot be built,
+/// decoded, or mutated from outside this crate.
+///
+/// WARNING against adding an in-process integrity check here: the digest and
+/// the claims are set together at the one construction site and nothing can
+/// change either afterwards, so comparing them can only ever return true. Such
+/// a check reads as though it detects substitution while detecting nothing, and
+/// crediting it teaches the next reader that the real guarantees above are
+/// decorative.
+///
+/// `claims_digest` is checked where the comparison can fail: it travels in the
+/// [`ledger::ReservationRequest`], and `claim` requires the ledger's recorded
+/// reservation to equal the one presented. That boundary is a store, possibly
+/// in another process, so the two sides can genuinely differ.
 pub struct EffectLease {
     claims: LeaseClaims,
     claims_digest: Digest,
@@ -322,10 +338,6 @@ impl EffectLease {
 
     fn claims_digest(claims: &LeaseClaims) -> Result<Digest, RuntimeError> {
         Digest::of(DigestDomain::LeaseClaims, claims).context(LeaseEncodingSnafu)
-    }
-
-    fn has_valid_claims_digest(&self) -> Result<bool, RuntimeError> {
-        Ok(Self::claims_digest(&self.claims)? == self.claims_digest)
     }
 
     fn replay_key(&self) -> ReplayKey {

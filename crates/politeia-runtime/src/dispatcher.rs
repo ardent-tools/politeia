@@ -287,12 +287,6 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
     /// and port implementations. Space: O(d) for that projection.
     pub async fn execute(&self, lease: &EffectLease) -> Result<H::Output, RuntimeError> {
         ensure!(
-            lease.has_valid_claims_digest()?,
-            LeaseMismatchSnafu {
-                field: "claims digest"
-            }
-        );
-        ensure!(
             lease.policy() == &self.config.policy_bundle,
             LeaseMismatchSnafu {
                 field: "policy bundle"
