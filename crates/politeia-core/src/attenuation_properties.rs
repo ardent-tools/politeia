@@ -349,12 +349,55 @@ proptest! {
 
     /// Widening exactly one axis, over generated parents, must be refused —
     /// whichever axis it is.
+    ///
+    /// The parent is fully capped on purpose. Raising a budget cap is only a
+    /// widening when the parent imposed one: under an uncapped parent every
+    /// value narrows, which the property below asserts in its own right.
     #[test]
-    fn widening_one_axis_breaks_attenuation(parent in arb_delegation(), axis in arb_axis()) {
+    fn widening_one_axis_breaks_attenuation(
+        parent in arb_delegation_with(arb_fully_capped_budget()),
+        axis in arb_axis(),
+    ) {
         let child = widen(&parent, axis);
         prop_assert!(
             !child.is_attenuation_of(&parent),
             "widening {axis:?} was accepted as an attenuation"
+        );
+    }
+
+    /// An uncapped parent is narrowed by any cap at all, on every budget axis.
+    ///
+    /// This asymmetry is the `(_, None) => true` arm of the narrowing rule, and
+    /// it is easy to read as a bug in the direction of permissiveness. It is
+    /// not: a parent that imposed no limit cannot be exceeded by a child that
+    /// imposes one. Asserting it keeps a later reader from "fixing" the arm and
+    /// making every capped child of an unbounded parent unusable.
+    #[test]
+    fn any_cap_narrows_an_uncapped_parent(
+        parent in arb_delegation_with(Just(ResourceBudget {
+            wall_ms: None,
+            cpu_ms: None,
+            memory_bytes: None,
+            io_bytes: None,
+            network_bytes: None,
+            external_cost_microunits: None,
+        })),
+        axis in arb_budget_axis(),
+        cap in 0u64..1_000_000,
+    ) {
+        let mut child = parent.clone();
+        match axis {
+            Axis::BudgetWallMs => child.budget.wall_ms = Some(cap),
+            Axis::BudgetCpuMs => child.budget.cpu_ms = Some(cap),
+            Axis::BudgetMemoryBytes => child.budget.memory_bytes = Some(cap),
+            Axis::BudgetIoBytes => child.budget.io_bytes = Some(cap),
+            Axis::BudgetNetworkBytes => child.budget.network_bytes = Some(cap),
+            Axis::BudgetExternalCost => child.budget.external_cost_microunits = Some(cap),
+            other => return Err(TestCaseError::fail(format!("not a budget axis: {other:?}"))),
+        }
+        prop_assert!(
+            child.is_attenuation_of(&parent),
+            "capping {axis:?} under an uncapped parent must narrow, not widen"
         );
     }
 
