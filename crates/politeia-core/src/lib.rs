@@ -19,6 +19,7 @@ pub mod evidence;
 pub mod generation;
 pub mod institution;
 pub mod lifecycle;
+pub mod records;
 
 #[cfg(test)]
 mod attenuation_properties;
@@ -227,6 +228,50 @@ pub enum DigestDomain {
 }
 
 impl DigestDomain {
+    /// Every domain, in a form that cannot go stale.
+    ///
+    /// WHY the exhaustive match: a hand-kept list silently omits a variant
+    /// added later, and the omission is invisible -- every consumer keeps
+    /// working while covering one domain less. Matching exhaustively means a
+    /// new variant stops the build until it is listed.
+    pub fn all() -> Vec<Self> {
+        let complete = |domain: Self| match domain {
+            Self::EvidenceRecord
+            | Self::CommissioningRecord
+            | Self::ApprovedGenerationInputs
+            | Self::RuntimeGenerationInputs
+            | Self::OperationIntent
+            | Self::LeaseClaims
+            | Self::ExecutionResource
+            | Self::CapabilityProfile
+            | Self::CapabilityVerification
+            | Self::AvailabilitySnapshot
+            | Self::ExecutionRequirement
+            | Self::RoutingDecision
+            | Self::ExecutionAssignment => (),
+        };
+
+        let domains = vec![
+            Self::EvidenceRecord,
+            Self::CommissioningRecord,
+            Self::ApprovedGenerationInputs,
+            Self::RuntimeGenerationInputs,
+            Self::OperationIntent,
+            Self::LeaseClaims,
+            Self::ExecutionResource,
+            Self::CapabilityProfile,
+            Self::CapabilityVerification,
+            Self::AvailabilitySnapshot,
+            Self::ExecutionRequirement,
+            Self::RoutingDecision,
+            Self::ExecutionAssignment,
+        ];
+        for domain in &domains {
+            complete(*domain);
+        }
+        domains
+    }
+
     /// The stable wire tag mixed into every digest of this domain.
     pub const fn tag(self) -> &'static str {
         match self {
