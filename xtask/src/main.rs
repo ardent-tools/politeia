@@ -152,6 +152,30 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "produced per authorization; no consumer reads it off the wire yet",
     },
     WithheldSchema {
+        type_name: "politeia_core::outbox::DeclaredBoundary",
+        reason: "institution boundary declaration; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::outbox::BoundaryCrossing",
+        reason: "institution boundary declaration; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::outbox::Adjudication",
+        reason: "produced per crossing; no consumer reads it off the wire yet",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::outbox::Sink",
+        reason: "projected as part of DeclaredBoundary; no standalone wire consumer",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::outbox::SinkKind",
+        reason: "projected as part of Sink; no standalone wire consumer",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::outbox::DenialReason",
+        reason: "projected as part of Adjudication; no standalone wire consumer",
+    },
+    WithheldSchema {
         type_name: "politeia_core::knowledge::Observation",
         reason: "commissioning knowledge surface; publication waits on the first vertical slice",
     },
