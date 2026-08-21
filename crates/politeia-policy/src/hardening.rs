@@ -435,6 +435,10 @@ mod tests {
         HardeningLadder::try_from(path)
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that cannot climb its own ladder is a broken test"
+    )]
     fn enforced() -> HardeningLadder {
         let mut ladder = HardeningLadder::new();
         for rung in [
@@ -576,6 +580,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that cannot be built is a broken test, not a finding"
+    )]
     fn a_consequence_beyond_the_rung_cannot_be_paired_with_it() {
         let shadow = climb(&[
             HardeningState::Observed,
@@ -594,6 +602,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that cannot be built is a broken test, not a finding"
+    )]
     fn retiring_an_enforcing_binding_must_drop_its_consequence() {
         let mut authority = BindingAuthority::new(enforced(), Consequence::Deny)
             .expect("an enforced binding may deny");
@@ -628,6 +640,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that cannot serialize is a broken test, not a finding"
+    )]
     fn a_legal_authority_round_trips() {
         let authority = BindingAuthority::new(enforced(), Consequence::Deny)
             .expect("an enforced binding may deny");
@@ -643,6 +659,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that cannot serialize is a broken test, not a finding"
+    )]
     fn the_projection_has_a_distinct_token_for_every_rung() {
         // The published table is keyed by serde token. The exhaustive match in
         // `all()` catches a rung added and never listed; it cannot catch a rung
