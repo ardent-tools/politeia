@@ -76,7 +76,12 @@ pub struct QuarantinedGeneration {
     /// Why it was refused.
     pub reason: Ineligibility,
     /// The candidate exactly as offered.
-    pub candidate: RuntimeGeneration,
+    ///
+    /// WHY boxed: a refusal carries a whole generation, and an unboxed error
+    /// that large makes every successful activation pay its size. The candidate
+    /// still travels with the reason -- quarantine and discard remain different
+    /// outcomes -- it simply travels behind one indirection.
+    pub candidate: Box<RuntimeGeneration>,
 }
 
 impl std::fmt::Display for QuarantinedGeneration {
@@ -141,7 +146,7 @@ impl ActiveGeneration {
                 reason: Ineligibility::ForeignInstitution {
                     workspace: candidate.workspace().clone(),
                 },
-                candidate,
+                candidate: Box::new(candidate),
             });
         }
 
@@ -154,7 +159,7 @@ impl ActiveGeneration {
         if !undeclared.is_empty() {
             return Err(QuarantinedGeneration {
                 reason: Ineligibility::UndeclaredNondeterminism { fields: undeclared },
-                candidate,
+                candidate: Box::new(candidate),
             });
         }
 
@@ -209,6 +214,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that does not refuse is a broken test, not a finding"
+    )]
     fn a_candidate_from_another_institution_is_quarantined_and_nothing_changes() {
         let running = fixture_generation();
         let b = boundary_for(&running);
@@ -228,7 +237,7 @@ mod tests {
             Ineligibility::ForeignInstitution { .. }
         ));
         assert_eq!(
-            refused.candidate, foreign,
+            *refused.candidate, foreign,
             "the candidate is quarantined, not discarded"
         );
         assert_eq!(
@@ -239,6 +248,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that does not refuse is a broken test, not a finding"
+    )]
     fn any_variance_at_all_is_undeclared_under_a_deterministic_contract() {
         // `Deterministic` means exact inputs reproduce identical bytes, so a
         // field that varied is by definition uncovered -- there is no
@@ -259,6 +272,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a fixture that does not refuse is a broken test, not a finding"
+    )]
     fn declared_fields_may_vary_and_others_may_not() {
         let mut declared_inputs = fixture().inputs;
         declared_inputs.approved.reproducibility =

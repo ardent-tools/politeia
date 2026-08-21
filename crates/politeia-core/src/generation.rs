@@ -32,7 +32,13 @@ pub enum CommissioningCapability {
 }
 
 impl CommissioningCapability {
-    fn all() -> BTreeSet<Self> {
+    /// Every capability, for callers that need the complete set.
+    ///
+    /// WHY the exhaustive construction below rather than a hand-kept list: a
+    /// capability added later and not listed here would silently narrow every
+    /// exclusion set built from it, and an operational generation is required
+    /// to exclude all of them.
+    pub(crate) fn all() -> BTreeSet<Self> {
         BTreeSet::from([
             Self::GenericReconnaissance,
             Self::InstitutionAuthoring,
@@ -369,19 +375,6 @@ impl RuntimeGeneration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jiff::{SignedDuration, Timestamp};
-
-    use crate::{
-        DataClass, Delegation, DelegationId, Effect, EvidenceId, PrincipalId, ResourceBudget,
-        commissioning::{
-            ApprovedCommissioningSubject, CommissionerGrantRecord, CommissioningRecord,
-            TrustedCommissionerGrantRegistry, commissioning_approval_subject_digest,
-            commissioning_institution_audience, commissioning_observation_set_digest,
-            commissioning_observation_subject_digest, commissioning_workspace_resource,
-            unresolved_obligations_digest,
-        },
-        evidence::{EvidenceRecord, IndependenceClass, TrustedEvidenceRegistry},
-    };
 
     use crate::test_support::fixture;
     #[test]

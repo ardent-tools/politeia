@@ -6,6 +6,8 @@
 //! in step with the validation it is built to satisfy. When they drift, the
 //! copy that drifted still passes its own tests.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use jiff::{SignedDuration, Timestamp};
 
 use crate::commissioning::{
@@ -23,14 +25,14 @@ use crate::generation::{
 use crate::institution::{InstitutionWorkspace, TrustDomainId};
 use crate::lifecycle::{DeploymentTopology, LifecycleProfile};
 use crate::{
-    AdapterId, CommissioningRecordId, DataClass, Delegation, DelegationId, Digest, Effect,
-    EvidenceId, InstitutionId, InstitutionWorkspaceId, PolicyBundleId, PrincipalId, ResourceBudget,
+    AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, EvidenceId, InstitutionId,
+    InstitutionWorkspaceId, PolicyBundleId, PrincipalId, ResourceBudget,
 };
 
 pub(crate) struct Fixture {
-    inputs: RuntimeGenerationInputs,
-    workspace: InstitutionWorkspace,
-    commissioning: CommissioningRecord,
+    pub(crate) inputs: RuntimeGenerationInputs,
+    pub(crate) workspace: InstitutionWorkspace,
+    pub(crate) commissioning: CommissioningRecord,
 }
 
 #[expect(
