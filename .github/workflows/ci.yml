@@ -147,15 +147,26 @@ jobs:
       # would pass with an invariant written as TRUE, with a cfg naming no
       # invariant, or with a jar that never executed. This module plants the
       # one transition the workflow invariant forbids and requires a rejection.
-      - name: Require the checker to reject a planted defect
+      - name: Require the checker to reject every planted defect
         shell: bash
         working-directory: formal/negative
         run: |
-          if java -XX:+UseParallelGC -cp ../../tla2tools.jar tlc2.TLC \
-               -nowarning -config UnauthorizedWorkflow.cfg UnauthorizedWorkflow.tla
-          then
-            echo "::error::the planted unauthorized-execution defect was accepted; \
-          the model checker is not reporting violations and every green run above is worthless"
+          shopt -s nullglob
+          modules=(*.tla)
+          if [ ${#modules[@]} -eq 0 ]; then
+            echo "::error::no planted defects found; the checker above has not been shown able to fail"
             exit 1
           fi
-          echo "the model checker rejected the planted defect, as required"
+          for module in "${modules[@]}"; do
+            name="${module%.tla}"
+            echo "::group::${name} (must be rejected)"
+            if java -XX:+UseParallelGC -cp ../../tla2tools.jar tlc2.TLC \
+                 -nowarning -config "${name}.cfg" "${module}"
+            then
+              echo "::error::the planted defect in ${name} was accepted; the model \
+          checker is not reporting that violation and every green run above is worth less than it looks"
+              exit 1
+            fi
+            echo "rejected ${name}, as required"
+            echo "::endgroup::"
+          done
