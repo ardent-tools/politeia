@@ -55,15 +55,27 @@ fn verification_rejects_unknown_fields() {
 }
 
 #[test]
+#[expect(
+    clippy::expect_used,
+    reason = "a fixture that cannot be attested is a broken test, not a finding"
+)]
 fn attestation_rejects_unknown_fields() {
-    assert_closed_record(&Attestation {
+    let verifier = PrincipalId::new();
+    let verification = Verification {
         subject: Digest::blake3(b"attested subject"),
-        verifier: PrincipalId::new(),
-        policy: PolicyBundleId::new(),
-        runtime: RuntimeGenerationId::derive(b"runtime generation"),
-        adapter: AdapterId::new(),
-        delegation: DelegationId::new(),
+        verifier,
         evidence: vec![EvidenceId::new()],
-        statement_digest: Digest::blake3(b"attestation statement"),
-    });
+        passed: true,
+        independence: IndependenceClass::IndependentService,
+    };
+    let attestation = Attestation::issue(
+        &verification,
+        &PrincipalId::new(),
+        PolicyBundleId::new(),
+        RuntimeGenerationId::derive(b"runtime generation"),
+        AdapterId::new(),
+        DelegationId::new(),
+    )
+    .expect("an independent passing verification may be attested");
+    assert_closed_record(&attestation);
 }

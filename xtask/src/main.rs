@@ -232,6 +232,10 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "independent-verification record; published with the assurance path, not before",
     },
     WithheldSchema {
+        type_name: "politeia_evidence::AttestationStatement",
+        reason: "attestation record; published with the assurance path, not before",
+    },
+    WithheldSchema {
         type_name: "politeia_evidence::Attestation",
         reason: "attestation record; published with the assurance path, not before",
     },

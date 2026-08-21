@@ -159,6 +159,10 @@ fn golden_vectors_pin_the_envelope_encoding() {
             "9401e7a0200dd896265e71af00db2b0c3cc12f28606936e815ef9f7bc3dd81fe",
         ),
         (
+            "attestation_statement_v1",
+            "9b0d5f56e09dc73a59ba9af1e4095ff1e662c604adc8fb9ad86e5bd471d4d41a",
+        ),
+        (
             "availability_snapshot_v1",
             "440dc7d52ef2ac4b24628ca41c23a8e8d7f03a838b07902eca680fcba9b493b1",
         ),

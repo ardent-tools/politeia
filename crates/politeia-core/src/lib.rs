@@ -244,6 +244,8 @@ pub enum DigestDomain {
     ExecutionAssignment,
     /// One accepted state transition, linked to the entry before it.
     TransitionJournalEntry,
+    /// The exact identities one attestation binds.
+    AttestationStatement,
 }
 
 impl DigestDomain {
@@ -268,7 +270,8 @@ impl DigestDomain {
             | Self::ExecutionRequirement
             | Self::RoutingDecision
             | Self::ExecutionAssignment
-            | Self::TransitionJournalEntry => (),
+            | Self::TransitionJournalEntry
+            | Self::AttestationStatement => (),
         };
 
         let domains = vec![
@@ -286,6 +289,7 @@ impl DigestDomain {
             Self::RoutingDecision,
             Self::ExecutionAssignment,
             Self::TransitionJournalEntry,
+            Self::AttestationStatement,
         ];
         for domain in &domains {
             complete(*domain);
@@ -310,6 +314,7 @@ impl DigestDomain {
             DigestDomain::RoutingDecision => "routing_decision_v1",
             DigestDomain::ExecutionAssignment => "execution_assignment_v1",
             DigestDomain::TransitionJournalEntry => "transition_journal_entry_v1",
+            DigestDomain::AttestationStatement => "attestation_statement_v1",
         }
     }
 }
