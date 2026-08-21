@@ -13,6 +13,10 @@ allow = [
   "BSD-3-Clause",
   "ISC",
   "MIT",
+  # MIT with the attribution clause removed, so it permits strictly more than
+  # MIT already allows above. Denying it while allowing MIT would refuse a
+  # licence on the grounds that it asks less of us.
+  "MIT-0",
   "MPL-2.0",
   "Unicode-3.0",
   "Zlib",

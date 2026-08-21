@@ -4,11 +4,13 @@
     "CommissioningRecordId": {
       "description": "Identity of one append-only commissioning provenance record.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "DelegationId": {
       "description": "Identity of a delegation from one authority context to another.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "Digest": {
@@ -21,6 +23,7 @@
     "EvidenceId": {
       "description": "Identity of a provenance-bearing evidence record admitted for a claim.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "EvidenceRecord": {
@@ -42,6 +45,7 @@
         "observed_at": {
           "description": "Trusted observation time assigned by the admitting evidence store.",
           "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
           "type": "string"
         },
         "payload_digest": {
@@ -106,16 +110,19 @@
     "InstitutionId": {
       "description": "Identity of one institution authority domain.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "InstitutionWorkspaceId": {
       "description": "Identity of one institution-owned commissioning workspace.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "PrincipalId": {
       "description": "Identity of an actor capable of requesting work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "RuntimeGenerationId": {

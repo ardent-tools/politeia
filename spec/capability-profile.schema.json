@@ -4,11 +4,13 @@
     "CapabilityProfileId": {
       "description": "Identity of an evidence-backed execution-resource capability profile.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "CapabilityVerificationId": {
       "description": "Identity of one trusted, time-bounded verification of an exact capability profile.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "Digest": {
@@ -21,6 +23,7 @@
     "ExecutionResourceId": {
       "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     }
   },

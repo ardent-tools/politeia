@@ -135,10 +135,13 @@ pub struct ExecutionResource {
     /// Effects available to work assigned to the resource.
     pub allowed_effects: BTreeSet<Effect>,
     /// Maximum supported context size in tokens.
+    #[schemars(range(max = u64::MAX))]
     pub max_context_tokens: u64,
     /// Estimated cost for the bounded task class, in integer microunits.
+    #[schemars(range(max = u64::MAX))]
     pub estimated_cost_microunits: u64,
     /// Estimated latency for the bounded task class, in milliseconds.
+    #[schemars(range(max = u64::MAX))]
     pub estimated_latency_ms: u64,
 }
 
@@ -246,10 +249,13 @@ pub struct ExecutionRequirement {
     /// Hard-allowed trust domains. Empty means no resource is eligible.
     pub allowed_trust_domains: BTreeSet<TrustDomainId>,
     /// Minimum context capacity in tokens.
+    #[schemars(range(max = u64::MAX))]
     pub minimum_context_tokens: u64,
     /// Hard maximum cost in microunits.
+    #[schemars(range(max = u64::MAX))]
     pub maximum_cost_microunits: Option<u64>,
     /// Hard maximum latency in milliseconds.
+    #[schemars(range(max = u64::MAX))]
     pub maximum_latency_ms: Option<u64>,
     /// Require independent verification of the selected work result.
     ///

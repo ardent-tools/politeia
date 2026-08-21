@@ -4,11 +4,13 @@
     "AdapterId": {
       "description": "Identity of an adapter bridging the semantic protocol to an external system.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "CapabilityProfileId": {
       "description": "Identity of an evidence-backed execution-resource capability profile.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "Digest": {
@@ -51,11 +53,13 @@
     "ExecutionResourceId": {
       "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "RoutingDecisionId": {
       "description": "Identity of one evidence-bearing execution-resource selection or escalation.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "RoutingOutcome": {
@@ -269,6 +273,7 @@
     "expires_at": {
       "description": "Snapshot expiry, also bounding any selected assignment.",
       "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
       "type": "string"
     },
     "id": {
@@ -291,14 +296,17 @@
       "type": "array"
     },
     "rejected_resources": {
-      "additionalProperties": {
-        "items": {
-          "$ref": "#/$defs/RoutingRejection"
-        },
-        "type": "array",
-        "uniqueItems": true
-      },
+      "additionalProperties": false,
       "description": "Hard rejection reasons for each ineligible resource.",
+      "patternProperties": {
+        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$": {
+          "items": {
+            "$ref": "#/$defs/RoutingRejection"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
       "type": "object"
     },
     "requirement_digest": {
