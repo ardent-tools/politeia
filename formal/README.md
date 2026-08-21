@@ -12,7 +12,7 @@ gets misread is by being quoted without its configuration.
 | Path | What it is |
 |---|---|
 | `Delegation.tla` / `.cfg` | Monotonic delegation: a grant may narrow its parent on every authority axis, never exceed it. |
-| `Workflow.tla` / `.cfg` | The operation lifecycle: nothing executes without having been authorized. |
+| `Workflow.tla` / `.cfg` | The protected-operation path: authorization, budget reservation, single-use lease, execution, the evidence states that follow it, and denial. |
 | `negative/*.tla` / `.cfg` | Specifications with a planted defect. **CI requires the checker to reject each one.** |
 
 ## Model-to-Rust correspondence
@@ -29,17 +29,18 @@ thing to weigh when reading a result.
 | `actions`, `resources`, `effects`, `dataClasses`, `audience` | the matching `BTreeSet` fields | Element identity. The model uses model values; the Rust types use strings and enums, one of which (`DataClass::ClientRestricted`) carries a payload that participates in equality. |
 | `expiresAt` in `0..MaxExpiry` | `expires_at: jiff::Timestamp` | Real time. The model needs only an order. |
 | `grants` as a set | the trusted delegation registry | Identity and issuer/subject linkage. `DispatcherConfig::new` enforces those separately, and they are not width axes. |
-| `Workflow`'s `state` | the authorize-then-execute path | Reservation, lease issuance, evidence and denial, all of which the lifecycle model does not yet represent. |
+| `Workflow`'s `state`, `authorized`, `reserved`, `leased`, `denied` | the dispatcher's authorize / reserve / lease / execute path | Identity. The model records *that* each step happened, not *which* delegation, budget or lease it happened against. Exactness of those bindings is tested in `politeia-runtime`, not modelled. |
 
 ## What the models do not cover
 
 Stated plainly, because the gaps are larger than the coverage and a reader who
 assumes otherwise will over-trust a green run.
 
-- **Reservation, lease issuance, evidence, and denial.** `Workflow` models
-  authorization and execution only. It cannot express "no effect without a
-  committed reservation", which is a distinct requirement from "no effect
-  without authorization".
+- **Exactness of binding.** `Workflow` records *that* an operation was
+  authorized, reserved and leased -- not *which* delegation, budget or lease it
+  was bound to. "No effect without a lease" is modelled; "no effect except under
+  the exact lease issued for this intent" is not, and that is the substance of
+  REQ-02. `crates/politeia-runtime/src/tests/replay.rs` tests it.
 - **Expiry and revocation as events.** Expiry is an ordered value compared at
   issuance. Nothing models a grant expiring *during* a run, or being revoked.
 - **Nested reauthorization, replay, idempotency, ambiguity, reconciliation, and
@@ -83,16 +84,30 @@ carrying `THEOREM`s.
 
 So each planted defect is checked in and CI requires a rejection:
 
-| Module | Defect | Caught by |
+| Module | Defect | The one invariant that fails |
 |---|---|---|
-| `UnauthorizedWorkflow` | an edge from `Proposed` straight to `Running` | `NeverExecutesUnauthorized` |
-| `UncheckedAxis` | `dataClasses` dropped from the narrowing rule | `EveryAxisIsChecked` — `Monotonic` passes |
-| `SlackCap` | one unit of cap slack against a positive parent cap | `NarrowsCapIsTransitive` — both others pass |
+| `UnauthorizedWorkflow` | runs with a reservation and lease but no authorization | `NeverExecutesUnauthorized` |
+| `SkippedReservation` | leases and runs without committing a budget | `NeverExecutesWithoutReservation` |
+| `SkippedLease` | runs on a reservation with no lease issued | `NeverExecutesWithoutLease` |
+| `ResurrectedDenial` | a retry carries a denied operation into execution | `DenialIsFinal` |
+| `UncheckedAxis` | `dataClasses` dropped from the narrowing rule | `EveryAxisIsChecked` |
+| `SlackCap` | one unit of cap slack against a positive parent cap | `NarrowsCapIsTransitive` |
 
-The last column is the point. Each defect is caught by exactly one invariant and
-passes the others, so each invariant is shown to be doing work no other one
-does. The negative step discovers these modules rather than naming them, and
-fails when it finds none.
+Each `.cfg` lists **every** invariant, not only the one expected to fail, so the
+others passing is part of the recorded result.
+
+The last column is the point. Each defect is caught by **exactly one** invariant
+and passes the rest, so each invariant is shown to do work no other one does. An
+invariant that no fixture isolates has not been shown to earn its place.
+
+The four workflow fixtures `EXTENDS Workflow` and add a single disjunct, so they
+cannot drift from the model they mirror -- CI passes `-DTLA-Library=..` to
+resolve it. That is only available because those defects are *additive*. A defect
+that removes or weakens a definition cannot be written as an extension, which is
+why `UncheckedAxis` and `SlackCap` are full copies and have to be read as such.
+
+The negative step discovers these modules rather than naming them, and fails when
+it finds none.
 
 ## Running them
 
