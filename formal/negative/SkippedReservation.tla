@@ -18,7 +18,7 @@ EXTENDS Workflow
 BrokenNext ==
     \/ Next
     \/ /\ state = Authorized /\ state' = Leased
-       /\ leased' = TRUE /\ UNCHANGED <<authorized, reserved, denied>>
+       /\ leased' = TRUE /\ UNCHANGED <<authorized, reserved, denied, leaseSpent, effects>>
 
 BrokenSpec == Init /\ [][BrokenNext]_vars
 

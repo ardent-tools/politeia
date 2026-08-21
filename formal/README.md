@@ -12,7 +12,7 @@ gets misread is by being quoted without its configuration.
 | Path | What it is |
 |---|---|
 | `Delegation.tla` / `.cfg` | Monotonic delegation: a grant may narrow its parent on every authority axis, never exceed it. |
-| `Workflow.tla` / `.cfg` | The protected-operation path: authorization, budget reservation, single-use lease, execution, the evidence states that follow it, and denial. |
+| `Workflow.tla` / `.cfg` | The protected-operation path: authorization, budget reservation, single-use lease, execution, the evidence states that follow it, denial, and retry. |
 | `negative/*.tla` / `.cfg` | Specifications with a planted defect. **CI requires the checker to reject each one.** |
 
 ## Model-to-Rust correspondence
@@ -36,6 +36,9 @@ thing to weigh when reading a result.
 Stated plainly, because the gaps are larger than the coverage and a reader who
 assumes otherwise will over-trust a green run.
 
+- **Concurrency.** Replay is modelled as a sequential retry of one intent. Two
+  dispatchers racing for the same lease is a different question, and the ledger
+  tests in `politeia-runtime` are what cover it.
 - **Exactness of binding.** `Workflow` records *that* an operation was
   authorized, reserved and leased -- not *which* delegation, budget or lease it
   was bound to. "No effect without a lease" is modelled; "no effect except under
@@ -90,11 +93,16 @@ So each planted defect is checked in and CI requires a rejection:
 | `SkippedReservation` | leases and runs without committing a budget | `NeverExecutesWithoutReservation` |
 | `SkippedLease` | runs on a reservation with no lease issued | `NeverExecutesWithoutLease` |
 | `ResurrectedDenial` | a retry carries a denied operation into execution | `DenialIsFinal` |
+| `DoubleSpentLease` | a retry re-presents a lease without checking whether it is spent | `AtMostOneEffectPerLease` |
 | `UncheckedAxis` | `dataClasses` dropped from the narrowing rule | `EveryAxisIsChecked` |
 | `SlackCap` | one unit of cap slack against a positive parent cap | `NarrowsCapIsTransitive` |
 
 Each `.cfg` lists **every** invariant, not only the one expected to fail, so the
-others passing is part of the recorded result.
+others passing is part of the recorded result. CI checks that too: a fixture
+whose configuration omits the invariant it targets can still be rejected by some
+*other* invariant, and would then isolate nothing while looking correct. That is
+not hypothetical -- it happened while these were being written, when a substring
+guard matched an invariant's name in a comment and skipped declaring it.
 
 The last column is the point. Each defect is caught by **exactly one** invariant
 and passes the rest, so each invariant is shown to do work no other one does. An
