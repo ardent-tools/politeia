@@ -19,14 +19,23 @@ pub mod generation;
 pub mod institution;
 pub mod lifecycle;
 
+/// Canonical textual form of every typed identifier: lowercase hyphenated UUID.
+///
+/// WHY the schema and the decoder both cite this one constant: `uuid`'s own
+/// `Deserialize` accepts four textual shapes (simple, hyphenated, braced,
+/// `urn:uuid:`) case-insensitively, while its `Serialize` only ever emits the
+/// hyphenated lowercase form. Publishing a schema pattern for the emitted form
+/// alone would make the schema reject values the decoder accepts -- the inverse
+/// of the divergence this pattern exists to close. The decoder below narrows to
+/// match instead, so one canonical form is the whole contract in both directions.
+const TYPED_ID_PATTERN: &str = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+
 macro_rules! typed_id {
     ($name:ident, $doc:expr) => {
         #[doc = $doc]
         #[repr(transparent)]
-        #[derive(
-            Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-        )]
-        pub struct $name(pub Uuid);
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
+        pub struct $name(#[schemars(regex(pattern = TYPED_ID_PATTERN))] pub Uuid);
         impl $name {
             /// Create a new identifier (UUIDv7: random with time-ordered prefix).
             pub fn new() -> Self {
@@ -36,6 +45,22 @@ macro_rules! typed_id {
         impl Default for $name {
             fn default() -> Self {
                 Self::new()
+            }
+        }
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let text = String::deserialize(deserializer)?;
+                let parsed = Uuid::parse_str(&text).map_err(serde::de::Error::custom)?;
+                // Re-encoding through `uuid`'s own printer derives the accepted
+                // form from the emitted one rather than restating it, so the two
+                // cannot drift apart in a later `uuid` release.
+                if parsed.hyphenated().to_string() == text {
+                    Ok(Self(parsed))
+                } else {
+                    Err(serde::de::Error::custom(
+                        "identifier must be canonical lowercase-hyphenated UUID text",
+                    ))
+                }
             }
         }
     };
@@ -236,16 +261,22 @@ pub enum DataClass {
 #[serde(deny_unknown_fields)]
 pub struct ResourceBudget {
     /// Wall-clock limit in milliseconds.
+    #[schemars(range(max = u64::MAX))]
     pub wall_ms: Option<u64>,
     /// CPU-time limit in milliseconds.
+    #[schemars(range(max = u64::MAX))]
     pub cpu_ms: Option<u64>,
     /// Memory limit in bytes.
+    #[schemars(range(max = u64::MAX))]
     pub memory_bytes: Option<u64>,
     /// I/O limit in bytes.
+    #[schemars(range(max = u64::MAX))]
     pub io_bytes: Option<u64>,
     /// Network transfer limit in bytes.
+    #[schemars(range(max = u64::MAX))]
     pub network_bytes: Option<u64>,
     /// External spend limit in microunits.
+    #[schemars(range(max = u64::MAX))]
     pub external_cost_microunits: Option<u64>,
 }
 
