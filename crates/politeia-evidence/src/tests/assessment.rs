@@ -478,7 +478,7 @@ fn authority_is_judged_at_assertion_time_rather_than_projection_time() {
         principal,
     };
     let mut asserted = relation(RelationKind::Supersession, &original, &replacement, &holder);
-    asserted.asserted_at = expiry - SignedDuration::from_minutes(1);
+    asserted.asserted_at = expiry - SignedDuration::from_mins(1);
 
     assert_eq!(
         project(
