@@ -1,22 +1,22 @@
-//! Every leaf-binding and registry check, exercised against the guard it names.
-//!
-//! Two gaps motivate this file. The registry-build attenuation check in
-//! `DispatcherConfig::new` had no test of any kind, so a child that widened its
-//! parent could have been admitted into the trusted registry and nothing would
-//! have said so. And the five leaf-binding checks in `validate_intent` were
-//! unreachable from the existing fixtures, because the identity checks that run
-//! before them reject any intent whose operation or chain has been altered —
-//! mutating the intent to widen it produces "unknown operation", not the
-//! binding refusal one is trying to observe.
-//!
-//! So the fixture here narrows the delegation on *both* sides of the identity
-//! check at once, leaving the registry self-consistent and the operation
-//! genuinely outside what the delegation permits.
-//!
-//! Each assertion names the exact `reason` the guard reports rather than only
-//! its error variant. Matching the variant alone would pass when a different
-//! guard fired first, which is precisely the failure these tests exist to rule
-//! out.
+// Every leaf-binding and registry check, exercised against the guard it names.
+//
+// Two gaps motivate this file. The registry-build attenuation check in
+// `DispatcherConfig::new` had no test of any kind, so a child that widened its
+// parent could have been admitted into the trusted registry and nothing would
+// have said so. And the five leaf-binding checks in `validate_intent` were
+// unreachable from the existing fixtures, because the identity checks that run
+// before them reject any intent whose operation or chain has been altered —
+// mutating the intent to widen it produces "unknown operation", not the
+// binding refusal one is trying to observe.
+//
+// So the fixture here narrows the delegation on *both* sides of the identity
+// check at once, leaving the registry self-consistent and the operation
+// genuinely outside what the delegation permits.
+//
+// Each assertion names the exact `reason` the guard reports rather than only
+// its error variant. Matching the variant alone would pass when a different
+// guard fired first, which is precisely the failure these tests exist to rule
+// out.
 
 /// Build a dispatcher whose trusted delegation genuinely fails to cover the
 /// trusted operation, so `validate_intent`'s leaf-binding checks are reachable.
