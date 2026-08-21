@@ -6,6 +6,7 @@
 
 #![deny(missing_docs)]
 
+pub mod evaluate;
 pub mod hardening;
 
 use politeia_core::{Digest, PolicyBundleId, PrincipalId};

@@ -126,7 +126,11 @@ struct WithheldSchema {
 /// surface, and this scaffold has not earned more of it yet.
 ///
 /// LIMIT, stated because the list looks more complete than it is: nothing here
-/// proves the list is total. Rust offers no way to enumerate every `JsonSchema`
+/// proves the list is total, and nothing proves an entry belongs. A type that
+/// does not derive `JsonSchema` can be recorded as withheld and no check
+/// objects -- which puts a decision in the record for something that was never
+/// a candidate, in exactly the register that exists to tell a decision from an
+/// oversight. Both directions need the mechanical membership derivation. Rust offers no way to enumerate every `JsonSchema`
 /// implementor, so a type added tomorrow appears in neither population and
 /// nothing fails. Deriving membership mechanically is #9's authoritative-selector
 /// work, and it is Phase 5.
