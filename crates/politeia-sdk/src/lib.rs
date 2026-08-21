@@ -239,7 +239,7 @@ mod tests {
             Effect::ChangeAuthorization,
         ] {
             assert_eq!(
-                probe(&[effect.clone()]).is_read_only(),
+                probe(std::slice::from_ref(&effect)).is_read_only(),
                 !effect.mutates(),
                 "{effect:?} must be judged the same way in both layers"
             );
