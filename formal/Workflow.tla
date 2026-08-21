@@ -1,47 +1,92 @@
 ------------------------------ MODULE Workflow ------------------------------
 EXTENDS Naturals
 
-\* Operation lifecycle states, per the vertical-slice path in
-\* docs/18-FIRST_VERTICAL_SLICE.md.
-CONSTANTS Proposed, Authorized, Running, Candidate, Verified, Accepted
+\* The protected-operation path, per docs/18-FIRST_VERTICAL_SLICE.md and the
+\* dispatcher in politeia-runtime. An operation is authorized, its budget is
+\* committed, a single-use lease is issued, and only then may an effect run.
+\* Denial is a terminal outcome available before the lease exists.
+CONSTANTS Proposed, Authorized, Reserved, Leased,
+          Running, Candidate, Verified, Accepted, Denied
 
-\* `authorized` is history rather than lifecycle: it records that the
-\* authorization step occurred, so the safety property below can be stated
-\* about the trace instead of about the shape of the transition relation.
+\* Four history variables, one per precondition the constitution places on
+\* execution. They record that a step happened rather than that the state
+\* machine currently sits on it.
 \*
-\* WHY it exists: "nothing executes unauthorized" is not a fact about the
-\* current state. Read off `state` alone it can only be re-derived from the
-\* edges the model happens to have, which makes the invariant restate the
-\* specification rather than constrain it. With history it becomes falsifiable
-\* -- add an edge into an executing state that does not authorize, and the
-\* invariant fails. `formal/negative/` checks in exactly that edge and requires
-\* the checker to report it.
-VARIABLES state, authorized
+\* WHY history rather than reading `state`: "nothing executes without a
+\* committed reservation" is a claim about the trace. Derived from `state`
+\* alone it can only be re-read off whichever edges the model happens to have,
+\* which makes each invariant restate the transition relation instead of
+\* constraining it. With history, removing a step from the path fails a check --
+\* and `formal/negative/` checks in exactly those removals.
+VARIABLES state, authorized, reserved, leased, denied
 
-vars == <<state, authorized>>
+vars == <<state, authorized, reserved, leased, denied>>
 
+\* States in which an externally visible effect may have run.
 Executing == {Running, Candidate, Verified, Accepted}
 
-Init == state = Proposed /\ authorized = FALSE
+Init ==
+    /\ state = Proposed
+    /\ authorized = FALSE
+    /\ reserved = FALSE
+    /\ leased = FALSE
+    /\ denied = FALSE
 
-\* Transitions move only forward along the authorized path. There is no skip
-\* from Proposed to Running (execution without authorization) and no path back.
 Next ==
-    \/ /\ state = Proposed   /\ state' = Authorized /\ authorized' = TRUE
-    \/ /\ state = Authorized /\ state' = Running    /\ UNCHANGED authorized
-    \/ /\ state = Running    /\ state' = Candidate  /\ UNCHANGED authorized
-    \/ /\ state = Candidate  /\ state' = Verified   /\ UNCHANGED authorized
-    \/ /\ state = Verified   /\ state' = Accepted   /\ UNCHANGED authorized
+    \* Authorization, then a committed budget reservation, then a single-use
+    \* lease. Each records itself.
+    \/ /\ state = Proposed   /\ state' = Authorized
+       /\ authorized' = TRUE /\ UNCHANGED <<reserved, leased, denied>>
+    \/ /\ state = Authorized /\ state' = Reserved
+       /\ reserved' = TRUE   /\ UNCHANGED <<authorized, leased, denied>>
+    \/ /\ state = Reserved   /\ state' = Leased
+       /\ leased' = TRUE     /\ UNCHANGED <<authorized, reserved, denied>>
+    \* Execution and the evidence path that follows it.
+    \/ /\ state = Leased     /\ state' = Running
+       /\ UNCHANGED <<authorized, reserved, leased, denied>>
+    \/ /\ state = Running    /\ state' = Candidate
+       /\ UNCHANGED <<authorized, reserved, leased, denied>>
+    \/ /\ state = Candidate  /\ state' = Verified
+       /\ UNCHANGED <<authorized, reserved, leased, denied>>
+    \/ /\ state = Verified   /\ state' = Accepted
+       /\ UNCHANGED <<authorized, reserved, leased, denied>>
+    \* Denial is available until a lease exists, and is terminal.
+    \/ /\ state \in {Proposed, Authorized, Reserved} /\ state' = Denied
+       /\ denied' = TRUE     /\ UNCHANGED <<authorized, reserved, leased>>
 
 TypeOK ==
-    /\ state \in {Proposed, Authorized, Running, Candidate, Verified, Accepted}
+    /\ state \in {Proposed, Authorized, Reserved, Leased,
+                  Running, Candidate, Verified, Accepted, Denied}
     /\ authorized \in BOOLEAN
+    /\ reserved \in BOOLEAN
+    /\ leased \in BOOLEAN
+    /\ denied \in BOOLEAN
 
 \* Nothing executes without having been authorized first.
 NeverExecutesUnauthorized == (state \in Executing) => authorized
 
+\* Nothing executes without a committed budget reservation. Distinct from
+\* authorization: an operation may be permitted and still have no budget
+\* committed to it, and spending in that state is the overdraft the reservation
+\* exists to prevent.
+NeverExecutesWithoutReservation == (state \in Executing) => reserved
+
+\* Nothing executes without an issued lease. Distinct again: authorization says
+\* the operation may run, the reservation says it may spend, and the lease is
+\* the single-use grant that a specific effect invocation consumes.
+NeverExecutesWithoutLease == (state \in Executing) => leased
+
+\* A denied operation stays denied. Without this, a path that re-establishes a
+\* reservation and lease could carry a refused operation into execution with
+\* every other precondition satisfied.
+DenialIsFinal == denied => (state = Denied)
+
 Spec == Init /\ [][Next]_vars
 
-THEOREM Spec => []TypeOK /\ []NeverExecutesUnauthorized
+THEOREM Spec => []TypeOK
+            /\ []NeverExecutesUnauthorized
+            /\ []NeverExecutesWithoutReservation
+            /\ []NeverExecutesWithoutLease
+            /\ []DenialIsFinal
 
 =============================================================================

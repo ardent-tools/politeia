@@ -160,7 +160,10 @@ jobs:
           for module in "${modules[@]}"; do
             name="${module%.tla}"
             echo "::group::${name} (must be rejected)"
-            if java -XX:+UseParallelGC -cp ../../tla2tools.jar tlc2.TLC \
+            # -DTLA-Library=.. so a fixture may EXTEND the model it mirrors
+            # instead of restating it; a restated fixture drifts, and a drifted
+            # fixture tests something other than what it claims.
+            if java -XX:+UseParallelGC -DTLA-Library=.. -cp ../../tla2tools.jar tlc2.TLC \
                  -nowarning -config "${name}.cfg" "${module}"
             then
               echo "::error::the planted defect in ${name} was accepted; the model \

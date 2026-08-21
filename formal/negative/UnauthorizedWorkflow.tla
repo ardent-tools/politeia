@@ -1,46 +1,25 @@
 ------------------------ MODULE UnauthorizedWorkflow ------------------------
-\* A deliberately broken copy of Workflow, checked in so the model checker can
-\* be seen failing.
-\*
-\* WHY this file exists: a checking step that has only ever run against
-\* specifications which satisfy their invariants has not demonstrated that it
-\* can report a violation. It would go green against a misconfigured `.cfg`
-\* naming no invariant, against a jar that never ran, and against an invariant
-\* written as `TRUE` -- which is what this repository's workflow invariant was
-\* before the change that added this file.
+\* Workflow with one extra edge: an operation that acquires a reservation and a
+\* lease and runs, without ever being authorized.
 \*
 \* CI requires TLC to REJECT this module. A green run here is the failure.
 \*
-\* The only difference from `Workflow` is the third disjunct of `Next`: an edge
-\* straight from Proposed to Running that never authorizes. That is exactly the
-\* transition `NeverExecutesUnauthorized` exists to forbid.
-EXTENDS Naturals
+\* WHY it exists: a checking step that has only run against specifications which
+\* satisfy their invariants has not demonstrated that it can report a violation.
+\* It would go green against a `.cfg` naming no invariant, against a jar that
+\* never ran, and against an invariant written as `TRUE` -- which is what this
+\* repository's workflow invariant was before the change that added this file.
+\*
+\* The edge supplies a reservation and a lease so that only the authorization
+\* invariant fails. An edge that supplied neither would trip three invariants at
+\* once, and the fixture would stop isolating the one it is named after.
+EXTENDS Workflow
 
-CONSTANTS Proposed, Authorized, Running, Candidate, Verified, Accepted
+BrokenNext ==
+    \/ Next
+    \/ /\ state = Proposed /\ state' = Running
+       /\ reserved' = TRUE /\ leased' = TRUE /\ UNCHANGED <<authorized, denied>>
 
-VARIABLES state, authorized
-
-vars == <<state, authorized>>
-
-Executing == {Running, Candidate, Verified, Accepted}
-
-Init == state = Proposed /\ authorized = FALSE
-
-Next ==
-    \/ /\ state = Proposed   /\ state' = Authorized /\ authorized' = TRUE
-    \/ /\ state = Authorized /\ state' = Running    /\ UNCHANGED authorized
-    \* The planted defect: execution without authorization.
-    \/ /\ state = Proposed   /\ state' = Running    /\ UNCHANGED authorized
-    \/ /\ state = Running    /\ state' = Candidate  /\ UNCHANGED authorized
-    \/ /\ state = Candidate  /\ state' = Verified   /\ UNCHANGED authorized
-    \/ /\ state = Verified   /\ state' = Accepted   /\ UNCHANGED authorized
-
-TypeOK ==
-    /\ state \in {Proposed, Authorized, Running, Candidate, Verified, Accepted}
-    /\ authorized \in BOOLEAN
-
-NeverExecutesUnauthorized == (state \in Executing) => authorized
-
-Spec == Init /\ [][Next]_vars
+BrokenSpec == Init /\ [][BrokenNext]_vars
 
 =============================================================================
