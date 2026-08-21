@@ -18,6 +18,7 @@ pub mod commissioning;
 pub mod evidence;
 pub mod generation;
 pub mod institution;
+pub mod knowledge;
 pub mod lifecycle;
 pub mod records;
 
@@ -131,6 +132,14 @@ typed_id!(
 typed_id!(
     RoutingDecisionId,
     "Identity of one evidence-bearing execution-resource selection or escalation."
+);
+typed_id!(
+    ObservationId,
+    "Identity of one sourced statement about reality."
+);
+typed_id!(
+    ClaimId,
+    "Identity of one interpreted proposition with provenance."
 );
 /// A content digest (blake3, lowercase hex).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
