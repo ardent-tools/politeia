@@ -1,0 +1,130 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "claims": [
+    {
+      "exercised_by": [
+        "one_bounded_path_runs_end_to_end"
+      ],
+      "id": "POL-A",
+      "mechanisms": [
+        "politeia_core::reconnaissance",
+        "politeia_core::knowledge"
+      ],
+      "still_needs": "a real deployment commissioned and handed off from the public distribution; no in-memory test can show the absence of private infrastructure"
+    },
+    {
+      "exercised_by": [
+        "foreign_material_is_refused_at_every_hop",
+        "private_material_does_not_reach_a_commissioner_machine_by_default",
+        "an_entry_names_its_value_rather_than_holding_it"
+      ],
+      "id": "POL-B",
+      "mechanisms": [
+        "politeia_core::institution::InstitutionBoundary",
+        "politeia_core::outbox",
+        "politeia_core::state"
+      ],
+      "still_needs": "deployment evidence that the trust domain holds in a real environment, which a process-local boundary cannot demonstrate"
+    },
+    {
+      "exercised_by": [
+        "handoff_requires_admitted_client_evidence_after_revocation"
+      ],
+      "id": "POL-C",
+      "mechanisms": [
+        "politeia_evidence::HandoffReceipt"
+      ],
+      "still_needs": "a revocation performed against a running generation, showing it keeps running"
+    },
+    {
+      "exercised_by": [
+        "identical_inputs_produce_identical_identity_and_bytes",
+        "declared_fields_may_vary_and_others_may_not"
+      ],
+      "id": "POL-D",
+      "mechanisms": [
+        "politeia_core::generation::RuntimeGeneration",
+        "politeia_core::activation"
+      ],
+      "still_needs": "a specializer that builds an artifact; the kernel proves identity is a function of inputs, not that a build is"
+    },
+    {
+      "exercised_by": [
+        "hard_filtering_precedes_ordered_locality_and_cost_preferences",
+        "hard_locality_rejects_a_cheaper_remote_resource"
+      ],
+      "id": "POL-E",
+      "mechanisms": [
+        "politeia_runtime::routing"
+      ],
+      "still_needs": "two real execution resources with evidence-backed capability profiles"
+    },
+    {
+      "exercised_by": [
+        "the_commissioner_rule_applies_to_locality_rather_than_to_a_named_sink"
+      ],
+      "id": "POL-F",
+      "mechanisms": [
+        "politeia_core::ExecutionLocality",
+        "politeia_core::outbox"
+      ],
+      "still_needs": "an inference boundary that exists to be forbidden"
+    },
+    {
+      "exercised_by": [
+        "deterministic_requirement_never_selects_an_available_model",
+        "missing_hard_capability_escalates_instead_of_selecting_closest"
+      ],
+      "id": "POL-G",
+      "mechanisms": [
+        "politeia_runtime::routing"
+      ],
+      "still_needs": "a deterministic tool and an available model to prefer it over"
+    },
+    {
+      "exercised_by": [
+        "a_proxy_must_be_calibrated_before_it_may_block",
+        "a_self_reported_verification_cannot_be_attested",
+        "self_verified_or_stale_capability_evidence_is_ineligible"
+      ],
+      "id": "POL-H",
+      "mechanisms": [
+        "politeia_policy::hardening",
+        "politeia_policy::evaluate"
+      ],
+      "still_needs": "calibration performed against real adversarial fixtures rather than declared"
+    },
+    {
+      "exercised_by": [
+        "foreign_material_is_refused_at_every_hop",
+        "cross_client_workspace_substitution_is_rejected"
+      ],
+      "id": "POL-I",
+      "mechanisms": [
+        "politeia_core::institution::InstitutionBoundary"
+      ],
+      "still_needs": "two institutions built from one public core, showing neither is an input to the other"
+    },
+    {
+      "exercised_by": [],
+      "id": "POL-J",
+      "mechanisms": [
+        "politeia_evidence::HandoffReceipt"
+      ],
+      "still_needs": "a replacement maintainer recommissioning from preserved inputs; nothing in the tree bears on this yet"
+    },
+    {
+      "exercised_by": [],
+      "id": "POL-K",
+      "mechanisms": [],
+      "still_needs": "a deployment proving no required external dependency; an absence cannot be shown by a type"
+    },
+    {
+      "exercised_by": [],
+      "id": "POL-L",
+      "mechanisms": [],
+      "still_needs": "a control plane to disconnect"
+    }
+  ],
+  "not_an_assurance_record": "docs/12-ASSURANCE_CASE.md requires an assurance record to bind the exact identities applicable to its claim, and states that a document, a test name, a green CI run, or an actor's self-certification is not itself proof. This register is a document naming test names. It records what exists to be exercised and what each claim still needs; it proves nothing."
+}
