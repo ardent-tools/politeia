@@ -13,6 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
+pub mod activation;
 pub mod canonical;
 pub mod commissioning;
 pub mod evidence;
@@ -24,6 +25,9 @@ pub mod outbox;
 pub mod reconnaissance;
 pub mod records;
 pub mod state;
+
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 mod attenuation_properties;
