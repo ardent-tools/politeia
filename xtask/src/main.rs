@@ -1,6 +1,7 @@
 //! xtask: repository maintenance tasks (structural checks + spec derivation).
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Context;
@@ -11,8 +12,35 @@ const GENERATED_COMMENT: &str = "Authoritative pre-release v1 projection, derive
 /// Directory holding every published projection.
 const SPEC_DIR: &str = "spec";
 
-/// Suffix identifying a generated schema, as opposed to a hand-authored file.
+/// Suffix identifying a generated schema, as opposed to another projection.
 const SCHEMA_SUFFIX: &str = ".schema.json";
+
+/// Where the progressive-hardening ladder is published.
+const POLICY_LIFECYCLE_PATH: &str = "spec/policy-lifecycle.yaml";
+
+/// Format version of the published ladder table.
+///
+/// This versions the *document shape* -- the `states`/`transitions` layout --
+/// not the ladder. A rung added or an edge changed leaves this at 1; a consumer
+/// reading `states` and `transitions` keeps working. It moves only when those
+/// keys mean something else.
+const POLICY_LIFECYCLE_VERSION: u32 = 1;
+
+/// Tokens a YAML scalar may carry without quoting, and which cannot be read as
+/// a boolean, null, or number.
+///
+/// WHY the generator asserts this rather than quoting defensively: quoting
+/// everything would emit a table that no longer matches the hand-authored one
+/// it replaces, and reviewing that diff would mean reading past the quotes to
+/// find the real change. Asserting instead means a rung named `no` or `on`
+/// fails the derivation, where it is a two-line fix, rather than shipping a
+/// table a YAML reader parses into `false`.
+fn is_plain_yaml_scalar(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|character| character.is_ascii_lowercase() || character == '_')
+}
 
 /// Canonical textual form `jiff::Timestamp` emits: RFC 3339, UTC, `Z`-suffixed.
 ///
@@ -62,6 +90,16 @@ struct DerivedSpec {
     path: &'static str,
     urn: String,
     type_name: &'static str,
+    bytes: Vec<u8>,
+}
+
+/// A published projection that is not a JSON Schema.
+///
+/// It carries no URN because it describes a relation rather than a record
+/// shape, and `published_urn` deliberately refuses to mint an identity for one.
+struct DerivedTable {
+    path: &'static str,
+    owner: &'static str,
     bytes: Vec<u8>,
 }
 
@@ -219,14 +257,77 @@ fn generated_specs() -> anyhow::Result<Vec<DerivedSpec>> {
     ])
 }
 
-/// Emit public JSON schemas from their authoritative Rust types.
+/// The serde token a rung is published under.
+///
+/// Derived from `Serialize` rather than restated, so the table and the wire
+/// format cannot disagree about what a rung is called.
+fn rung_token(state: politeia_policy::hardening::HardeningState) -> anyhow::Result<String> {
+    let value = serde_json::to_value(state)?;
+    let token = value
+        .as_str()
+        .with_context(|| format!("{state:?} must serialize as a string"))?;
+    anyhow::ensure!(
+        is_plain_yaml_scalar(token),
+        "rung `{token}` needs YAML quoting; the ladder projection emits plain scalars"
+    );
+    Ok(token.to_string())
+}
+
+/// Project the progressive-hardening ladder as a published transition table.
+fn render_policy_lifecycle() -> anyhow::Result<DerivedTable> {
+    use politeia_policy::hardening::HardeningState;
+
+    let mut text = String::new();
+    writeln!(text, "# {GENERATED_COMMENT}")?;
+    writeln!(text, "version: {POLICY_LIFECYCLE_VERSION}")?;
+
+    writeln!(text, "states:")?;
+    for state in HardeningState::all() {
+        writeln!(text, "  - {}", rung_token(state)?)?;
+    }
+
+    writeln!(text, "transitions:")?;
+    for state in HardeningState::all() {
+        let from = rung_token(state)?;
+        for next in state.successors() {
+            writeln!(text, "  - [{from}, {}]", rung_token(*next)?)?;
+        }
+    }
+
+    Ok(DerivedTable {
+        path: POLICY_LIFECYCLE_PATH,
+        owner: std::any::type_name::<HardeningState>(),
+        bytes: text.into_bytes(),
+    })
+}
+
+/// Every published projection that is not a JSON Schema.
+fn generated_tables() -> anyhow::Result<Vec<DerivedTable>> {
+    Ok(vec![render_policy_lifecycle()?])
+}
+
+/// Emit public projections from their authoritative Rust types.
 fn derive() -> anyhow::Result<()> {
     for spec in generated_specs()? {
         std::fs::write(spec.path, spec.bytes)
             .with_context(|| format!("write derived schema {}", spec.path))?;
         println!("derived {} ({})", spec.path, spec.urn);
     }
+    for table in generated_tables()? {
+        std::fs::write(table.path, table.bytes)
+            .with_context(|| format!("write derived table {}", table.path))?;
+        println!("derived {} ({})", table.path, table.owner);
+    }
     Ok(())
+}
+
+/// A count with its noun, pluralised.
+fn counted(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 /// Check structural invariants and exact generated-schema freshness without mutation.
@@ -250,14 +351,27 @@ fn check() -> anyhow::Result<()> {
             spec.path
         );
     }
-    reject_unowned_schemas(&specs, Path::new(SPEC_DIR))?;
+
+    let tables = generated_tables()?;
+    for table in &tables {
+        let checked_in = std::fs::read(table.path)
+            .with_context(|| format!("read checked-in table {}", table.path))?;
+        anyhow::ensure!(
+            checked_in == table.bytes,
+            "{} is stale; run cargo run -p xtask -- derive",
+            table.path
+        );
+    }
+
+    reject_unowned_publications(&specs, &tables, Path::new(SPEC_DIR))?;
     reject_contradictory_population(&specs)?;
 
     println!(
-        "starter structural checks passed; {} published schemas, none unowned; \
-         {} schema-bearing types recorded as withheld",
-        specs.len(),
-        WITHHELD_SCHEMAS.len()
+        "starter structural checks passed; {} and {}, none unowned; \
+         {} recorded as withheld",
+        counted(specs.len(), "published schema"),
+        counted(tables.len(), "published table"),
+        counted(WITHHELD_SCHEMAS.len(), "schema-bearing type")
     );
     Ok(())
 }
@@ -311,38 +425,56 @@ fn reject_contradictory_population(specs: &[DerivedSpec]) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Fail when `spec/` holds a generated schema that no Rust owner declares.
+/// Fail when `spec/` holds a file no Rust owner declares.
 ///
-/// WHY this is a separate pass: the freshness loop walks the declared population
-/// and reads each file, so it catches a declared schema whose file is missing.
-/// It cannot catch the opposite, because a file nobody declares is a file it
-/// never looks at. That is the direction a deleted owner leaves behind -- the
-/// projection stays published, stays byte-identical to itself forever, and every
-/// check keeps passing while it describes a type the product no longer has.
+/// WHY this is a separate pass: the freshness loops walk the declared
+/// population and read each file, so they catch a declared projection whose
+/// file is missing. They cannot catch the opposite, because a file nobody
+/// declares is a file they never look at. That is the direction a deleted owner
+/// leaves behind -- the projection stays published, stays byte-identical to
+/// itself forever, and every check keeps passing while it describes a type the
+/// product no longer has.
+///
+/// WHY the whole directory decides membership, rather than the schema suffix:
+/// every file here is now derived, so `spec/` can mean *published projection*
+/// without qualification. While the ladder table was hand-authored the suffix
+/// had to decide, and the cost was that the one file with no owner was also the
+/// one file this check could not see. An unowned hand-authored file in a
+/// directory of generated ones reads as a projection without being one, and
+/// nothing but a reader's care distinguished them.
 ///
 /// Membership is derived from the directory rather than from a second list, so
 /// adding a projection cannot also require remembering to register it here.
-fn reject_unowned_schemas(specs: &[DerivedSpec], spec_dir: &Path) -> anyhow::Result<()> {
-    let declared: BTreeSet<&str> = specs.iter().map(|spec| spec.path).collect();
+fn reject_unowned_publications(
+    specs: &[DerivedSpec],
+    tables: &[DerivedTable],
+    spec_dir: &Path,
+) -> anyhow::Result<()> {
+    let declared: BTreeSet<&str> = specs
+        .iter()
+        .map(|spec| spec.path)
+        .chain(tables.iter().map(|table| table.path))
+        .collect();
 
-    let entries = std::fs::read_dir(spec_dir)
-        .with_context(|| format!("read the published schema directory {}", spec_dir.display()))?;
+    let entries = std::fs::read_dir(spec_dir).with_context(|| {
+        format!(
+            "read the published projection directory {}",
+            spec_dir.display()
+        )
+    })?;
     for entry in entries {
         let path = entry
             .with_context(|| format!("read an entry of {}", spec_dir.display()))?
             .path();
-        let name = path.file_name().and_then(std::ffi::OsStr::to_str);
-        // Only generated projections are owned. Hand-authored companions such as
-        // `policy-lifecycle.yaml` live here legitimately and have no Rust owner
-        // to find, so the suffix -- not the directory -- decides membership.
-        let Some(name) = name.filter(|name| name.ends_with(SCHEMA_SUFFIX)) else {
-            continue;
-        };
+        let name = path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .with_context(|| format!("{} has no readable name", path.display()))?;
         let relative = format!("{SPEC_DIR}/{name}");
         anyhow::ensure!(
             declared.contains(relative.as_str()),
-            "{relative} is published but no Rust type declares it; \
-             either restore its owner in generated_specs() or delete the file"
+            "{relative} is published but nothing derives it; \
+             either restore its owner in generated_specs()/generated_tables() or delete the file"
         );
     }
     Ok(())
@@ -396,16 +528,25 @@ mod tests {
         clippy::expect_used,
         reason = "a population that cannot render or a directory that cannot be read is a broken fixture, not a finding"
     )]
-    fn every_published_schema_has_exactly_one_owner() {
+    fn every_published_file_has_exactly_one_owner() {
         let specs = generated_specs().expect("the authoritative schemas must render");
+        let tables = generated_tables().expect("the authoritative tables must render");
 
-        let declared: BTreeSet<&str> = specs.iter().map(|spec| spec.path).collect();
+        let declared: BTreeSet<&str> = specs
+            .iter()
+            .map(|spec| spec.path)
+            .chain(tables.iter().map(|table| table.path))
+            .collect();
         assert_eq!(
             declared.len(),
-            specs.len(),
+            specs.len() + tables.len(),
             "two owners declare the same publication path"
         );
 
+        // WHY every entry, unfiltered: the suffix filter this once carried made
+        // the set comparison blind to precisely the file that had no owner, so
+        // the strongest-looking assertion in the file could not see the one
+        // discrepancy that existed.
         let mut on_disk = BTreeSet::new();
         for entry in std::fs::read_dir(published_dir()).expect("the published directory must exist")
         {
@@ -415,10 +556,9 @@ mod tests {
             let name = path
                 .file_name()
                 .and_then(std::ffi::OsStr::to_str)
-                .map(str::to_owned);
-            if let Some(name) = name.filter(|name| name.ends_with(SCHEMA_SUFFIX)) {
-                on_disk.insert(format!("{SPEC_DIR}/{name}"));
-            }
+                .expect("a published file has a readable name")
+                .to_owned();
+            on_disk.insert(format!("{SPEC_DIR}/{name}"));
         }
 
         let declared_owned: BTreeSet<String> =
@@ -434,18 +574,71 @@ mod tests {
         clippy::expect_used,
         reason = "the mutation needs a rendered population to remove one member from"
     )]
-    fn an_unowned_schema_is_rejected() {
+    fn an_unowned_publication_is_rejected() {
         // The guard is an absence check, so it passes trivially unless it is shown
         // failing. Dropping one owner makes its still-published file unowned --
         // exactly the state a deleted Rust type leaves behind.
         let mut specs = generated_specs().expect("the authoritative schemas must render");
+        let tables = generated_tables().expect("the authoritative tables must render");
         let orphaned = specs.pop().expect("the population is not empty");
 
-        let result = reject_unowned_schemas(&specs, &published_dir());
+        let result = reject_unowned_publications(&specs, &tables, &published_dir());
         let error = result.expect_err("a published schema with no owner must be rejected");
         assert!(
             error.to_string().contains(orphaned.path),
             "the refusal must name the unowned file, got: {error}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the mutation needs a rendered population to remove one member from"
+    )]
+    fn an_unowned_table_is_rejected() {
+        // The same mutation from the other population. Without this, dropping
+        // table ownership from the check would leave `an_unowned_publication_is_rejected`
+        // passing on the schema half alone.
+        let specs = generated_specs().expect("the authoritative schemas must render");
+        let mut tables = generated_tables().expect("the authoritative tables must render");
+        let orphaned = tables.pop().expect("the table population is not empty");
+
+        let result = reject_unowned_publications(&specs, &tables, &published_dir());
+        let error = result.expect_err("a published table with no owner must be rejected");
+        assert!(
+            error.to_string().contains(orphaned.path),
+            "the refusal must name the unowned file, got: {error}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the projection must render for a repository that publishes it"
+    )]
+    fn the_published_ladder_lists_every_rung_and_edge() {
+        // The projection is a loop over `all()` and `successors()`, so it agrees
+        // with itself by construction. What it cannot check is that it emitted
+        // anything: an empty `states:` block is valid YAML and a silent lie.
+        use politeia_policy::hardening::HardeningState;
+
+        let table = render_policy_lifecycle().expect("the ladder projection must render");
+        let text = String::from_utf8(table.bytes).expect("the table is UTF-8");
+
+        let states = HardeningState::all();
+        let edges: usize = states.iter().map(|state| state.successors().len()).sum();
+        assert_eq!(
+            text.matches("\n  - ").count(),
+            states.len() + edges,
+            "the table lists a different number of entries than the ladder declares:\n{text}"
+        );
+        assert!(
+            text.contains("  - [advisory, enforced]"),
+            "the edge progressive hardening is named for is missing:\n{text}"
+        );
+        assert!(
+            !text.contains("  - [unknown, enforced]"),
+            "the table publishes a shortcut the ladder refuses:\n{text}"
         );
     }
 
@@ -509,8 +702,9 @@ mod tests {
     )]
     fn the_full_population_is_accepted() {
         let specs = generated_specs().expect("the authoritative schemas must render");
-        reject_unowned_schemas(&specs, &published_dir())
-            .expect("every published schema is owned by the full population");
+        let tables = generated_tables().expect("the authoritative tables must render");
+        reject_unowned_publications(&specs, &tables, &published_dir())
+            .expect("every published file is owned by the full population");
     }
 
     #[test]

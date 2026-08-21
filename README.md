@@ -25,6 +25,8 @@ This product turns the institution itself into an explicit, typed, evidence-bear
 - Exact binding of evidence and attestations to artifact, policy, runtime, adapter, and delegation identities.
 - Harness independence: MCP/A2A/HTTP/CLI are transports, not the ontology.
 - Progressive hardening: observe → model → approve → shadow → calibrate → enforce → structural.
+  The ladder is declared by `politeia_policy::hardening` and published as a transition table at
+  `spec/policy-lifecycle.yaml`; this line is prose for a reader, not the authority.
 - A deliberately small trusted semantic kernel.
 - Adapters and domain packs remain at the edges.
 - Self-sufficient commissioning from the public source distribution inside a client-controlled environment.

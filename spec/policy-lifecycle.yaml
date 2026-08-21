@@ -1,3 +1,4 @@
+# Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.
 version: 1
 states:
   - unknown
@@ -15,11 +16,11 @@ transitions:
   - [observed, proposed]
   - [proposed, approved]
   - [approved, shadow]
+  - [approved, retired]
   - [shadow, calibrated]
+  - [shadow, retired]
   - [calibrated, advisory]
   - [advisory, enforced]
-  - [enforced, structural]
-  - [approved, retired]
-  - [shadow, retired]
   - [advisory, retired]
+  - [enforced, structural]
   - [enforced, retired]
