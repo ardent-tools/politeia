@@ -26,8 +26,10 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::institution::InstitutionWorkspaceId;
-use crate::{AdapterId, ClaimId, DelegationId, Digest, EvidenceId, ObservationId, PrincipalId};
+use crate::{
+    AdapterId, ClaimId, DelegationId, Digest, EvidenceId, InstitutionWorkspaceId, ObservationId,
+    PrincipalId,
+};
 
 /// A sourced statement about reality.
 ///
