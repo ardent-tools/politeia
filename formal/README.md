@@ -16,6 +16,7 @@ gets misread is by being quoted without its configuration.
 | `Workflow.tla` / `.cfg` | The protected-operation path: authorization, budget reservation, single-use lease, execution, the evidence states that follow it, denial, and retry. |
 | `EffectAmbiguity.tla` / `.cfg` | Ambiguous effect execution: delivery state, execution outcome, epistemic resolution and replay disposition as four separate facts, with reconciliation and compensation. |
 | `EffectAmbiguityIdempotentTarget.tla` / `.cfg` | The same model under `TargetEnforcesIdempotency = TRUE`, where the easiest ground for replay is always available and the other rules have to hold anyway. |
+| `Authority.tla` / `.cfg` | Authority as a claim about a moment and a scope: expiry and revocation as events that happen while work is in flight, and nested reauthorization that cannot outlive what it derives from. |
 | `negative/*.tla` / `.cfg` | Specifications with a planted defect. **CI requires the checker to reject each one.** |
 
 ## Model-to-Rust correspondence
@@ -35,6 +36,9 @@ thing to weigh when reading a result.
 | `Workflow`'s `state`, `authorized`, `reserved`, `leased`, `denied` | the dispatcher's authorize / reserve / lease / execute path | Identity. The model records *that* each step happened, not *which* delegation, budget or lease it happened against. Exactness of those bindings is tested in `politeia-runtime`, not modelled. |
 | `EffectAmbiguity`'s `delivery`, `outcome`, `resolution`, `replay` | the rules in `docs/11-FAILURE_SEMANTICS.md` | **Everything below the rules.** There is no Rust counterpart yet: the effect state machine this constrains is unimplemented, and the document requires it to define legal ambiguity and reconciliation transitions before the disconnected path is built. This model is that definition, ahead of the code rather than behind it. |
 | `overlap` | the canonical effect-subject derivation | The derivation itself. The model has a three-valued answer -- no overlap, overlaps, uncertain -- and says nothing about how a subject is derived from target, operation, resources and normalized parameters. |
+| `Authority`'s `clock` | the ledger's authoritative time | Real time and its granularity. The model needs only a monotone sequence of moments in which a lease can be issued at one and spent at another. |
+| `Authority`'s `revokedAt` | delegation revocation | Who revoked, and why. The model carries only *when*, which is the whole of what the invariants compare against. |
+| `Authority`'s `innerExpiry` | a nested reauthorization's expiry | Every other attenuation axis. `Delegation.tla` covers the width axes; this covers the one a lease runs out of. |
 
 ## What the models do not cover
 
@@ -44,14 +48,19 @@ assumes otherwise will over-trust a green run.
 - **Concurrency.** Replay is modelled as a sequential retry of one intent. Two
   dispatchers racing for the same lease is a different question, and the ledger
   tests in `politeia-runtime` are what cover it.
+- **Which authority.** `Authority` models one outer grant and one nested one,
+  by presence rather than identity. Two concurrent nested grants, or a chain
+  three deep, is a different question -- as with `Delegation`'s bounded grant
+  set, the relation is checked pairwise and depth is recovered by transitivity
+  rather than by exploring it.
 - **Exactness of binding.** `Workflow` records *that* an operation was
   authorized, reserved and leased -- not *which* delegation, budget or lease it
   was bound to. "No effect without a lease" is modelled; "no effect except under
   the exact lease issued for this intent" is not, and that is the substance of
-  REQ-02. `crates/politeia-runtime/src/tests/replay.rs` tests it.
-- **Expiry and revocation as events.** Expiry is an ordered value compared at
-  issuance. Nothing models a grant expiring *during* a run, or being revoked.
-- **Nested reauthorization.** Not modelled anywhere.
+  REQ-02 and of `docs/02-CONSTITUTION.md` law 8.
+  `crates/politeia-runtime/src/tests/replay.rs` tests it, and #46 is the work to
+  model it -- unlike the other entries here, this one is a gap to close rather
+  than an abstraction the models deliberately make.
 - **A reissue's own outcome.** `EffectAmbiguity` covers one effect subject
   through one ambiguity episode and the grounded reissue that follows it. The
   reissue's resolution is out of scope: `resolution`, `receiptBound`,
@@ -64,6 +73,13 @@ assumes otherwise will over-trust a green run.
 
 Both models are checked under **bounded** configurations, not exhaustively over
 their intended domains.
+
+`Authority` runs a clock of four moments with the authority expiring at the
+third. The expiry is deliberately **inside** the horizon: at or beyond it the
+authority would be live in every reachable state and three invariants would hold
+vacuously -- three green results over a model in which nothing ever expires. Two
+effects are explored because the behaviour that matters runs one while the
+authority is live and attempts a second after it lapses.
 
 `Delegation` caps the grant set at two. That is sufficient for `Monotonic`,
 which relates each grant to its direct parent and therefore forms every pair it
@@ -113,6 +129,11 @@ So each planted defect is checked in and CI requires a rejection:
 | `ReconciliationRunsTheEffect` | a read-only reconciliation that produces an effect | `EveryReissueHadAGrant` |
 | `RevisedOutcome` | a second source overwriting an established outcome | `CompensationFollowsResolution` |
 | `CompensationWithoutResolution` | compensating an effect nobody established ran | `CompensationFollowsResolution` |
+| `EffectAfterExpiry` | an effect run on a lease whose term has passed | `NoEffectAfterExpiry` |
+| `EffectAfterRevocation` | an effect run inside the term but after withdrawal | `NoEffectAfterRevocation` |
+| `RevocationUnmakesTheEffect` | a revocation that erases what already ran | `RevocationIsForwardOnly` |
+| `InnerOutlivesOuter` | a nested lease issued past its parent's term | `InnerNeverOutlivesOuter` |
+| `InnerSurvivesOuterLapse` | a nested effect that checks only its own term | `InnerEffectsNeedALiveOuter` |
 
 Each `.cfg` lists **every** invariant, not only the one expected to fail, so the
 others passing is part of the recorded result. CI checks that too: a fixture
