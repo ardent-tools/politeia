@@ -6,7 +6,7 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{DelegationId, Digest, EvidenceId, PrincipalId};
+use crate::{DelegationId, Digest, DigestDomain, EvidenceId, PrincipalId};
 
 /// How independent the evidence producer is from the actor being judged.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -55,7 +55,7 @@ impl EvidenceRecord {
     ///
     /// Returns the JSON encoding failure if the record cannot be represented.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::EvidenceRecord, self)
     }
 }
 

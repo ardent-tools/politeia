@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jiff::Timestamp;
 use politeia_core::{
-    AdapterId, CapabilityProfileId, CapabilityVerificationId, DataClass, Digest, Effect,
-    EvidenceId, ExecutionResourceId, PrincipalId, RoutingDecisionId, institution::TrustDomainId,
+    AdapterId, CapabilityProfileId, CapabilityVerificationId, DataClass, Digest, DigestDomain,
+    Effect, EvidenceId, ExecutionResourceId, PrincipalId, RoutingDecisionId,
+    institution::TrustDomainId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -90,7 +91,7 @@ impl CapabilityVerificationRecord {
     ///
     /// Time: O(n). Space: O(n), where n is the encoded record size.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::CapabilityVerification, self)
     }
 }
 
@@ -155,7 +156,7 @@ impl ExecutionResource {
     ///
     /// Time: O(n). Space: O(n), where n is the encoded resource size.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::ExecutionResource, self)
     }
 }
 
@@ -189,7 +190,7 @@ impl CapabilityProfile {
     ///
     /// Time: O(n). Space: O(n), where n is the encoded profile size.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::CapabilityProfile, self)
     }
 }
 
@@ -215,7 +216,7 @@ impl AvailabilitySnapshot {
     ///
     /// Time: O(n). Space: O(n), where n is the encoded snapshot size.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::AvailabilitySnapshot, self)
     }
 }
 
@@ -278,7 +279,7 @@ impl ExecutionRequirement {
     ///
     /// Time: O(n). Space: O(n), where n is the encoded requirement size.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::ExecutionRequirement, self)
     }
 }
 
@@ -448,7 +449,7 @@ impl RoutingDecision {
     ///
     /// Time: O(n). Space: O(n), where n is the encoded decision size.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::ExecutionAssignment, self)
     }
 
     /// Project a selected routing decision into the exact authorization input.
