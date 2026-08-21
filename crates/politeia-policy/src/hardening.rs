@@ -435,10 +435,6 @@ mod tests {
         HardeningLadder::try_from(path)
     }
 
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture that cannot climb its own ladder is a broken test"
-    )]
     fn enforced() -> HardeningLadder {
         let mut ladder = HardeningLadder::new();
         for rung in [
