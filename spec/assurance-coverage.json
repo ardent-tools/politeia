@@ -5,12 +5,15 @@
       "exercised_by": [
         "one_bounded_path_runs_end_to_end"
       ],
+      "falsifier": "a commissioning run from the public distribution that cannot complete without an artifact absent from it",
       "id": "POL-A",
       "mechanisms": [
         "politeia_core::reconnaissance",
         "politeia_core::knowledge"
       ],
-      "still_needs": "a real deployment commissioned and handed off from the public distribution; no in-memory test can show the absence of private infrastructure"
+      "residual_risk": "the tree can show no code path requires private infrastructure; it cannot show that no operational step does",
+      "still_needs": "a real deployment commissioned and handed off from the public distribution; no in-memory test can show the absence of private infrastructure",
+      "threat": "a commissioning step silently requires a tool, credential, or service only the commissioner holds, discovered when a client attempts it alone"
     },
     {
       "exercised_by": [
@@ -18,68 +21,86 @@
         "private_material_does_not_reach_a_commissioner_machine_by_default",
         "an_entry_names_its_value_rather_than_holding_it"
       ],
+      "falsifier": "material of a non-public class observed at a sink the workspace never declared",
       "id": "POL-B",
       "mechanisms": [
         "politeia_core::institution::InstitutionBoundary",
         "politeia_core::outbox",
         "politeia_core::state"
       ],
-      "still_needs": "deployment evidence that the trust domain holds in a real environment, which a process-local boundary cannot demonstrate"
+      "residual_risk": "the boundary governs what the code sends; it does not govern what an operator copies out of band",
+      "still_needs": "deployment evidence that the trust domain holds in a real environment, which a process-local boundary cannot demonstrate",
+      "threat": "material reaches a sink nobody classified, or a default admits what no decision did"
     },
     {
       "exercised_by": [
         "handoff_requires_admitted_client_evidence_after_revocation"
       ],
+      "falsifier": "an operational generation that stops serving after its commissioner is revoked",
       "id": "POL-C",
       "mechanisms": [
         "politeia_evidence::HandoffReceipt"
       ],
-      "still_needs": "a revocation performed against a running generation, showing it keeps running"
+      "residual_risk": "revocation is forward-only over records; nothing here holds a live process open across one",
+      "still_needs": "a revocation performed against a running generation, showing it keeps running",
+      "threat": "revocation implemented as deletion, taking the running generation down with the authority that created it"
     },
     {
       "exercised_by": [
         "identical_inputs_produce_identical_identity_and_bytes",
         "declared_fields_may_vary_and_others_may_not"
       ],
+      "falsifier": "two derivations from identical inputs producing different bytes with no declaration covering the difference",
       "id": "POL-D",
       "mechanisms": [
         "politeia_core::generation::RuntimeGeneration",
         "politeia_core::activation"
       ],
-      "still_needs": "a specializer that builds an artifact; the kernel proves identity is a function of inputs, not that a build is"
+      "residual_risk": "identity is a function of inputs here; the specializer is a digest rather than something this repository builds",
+      "still_needs": "a specializer that builds an artifact; the kernel proves identity is a function of inputs, not that a build is",
+      "threat": "a build varies in a field nobody declared and is activated because the variance was never compared"
     },
     {
       "exercised_by": [
         "hard_filtering_precedes_ordered_locality_and_cost_preferences",
         "hard_locality_rejects_a_cheaper_remote_resource"
       ],
+      "falsifier": "a routing decision selecting a resource that fails a hard constraint",
       "id": "POL-E",
       "mechanisms": [
         "politeia_runtime::routing"
       ],
-      "still_needs": "two real execution resources with evidence-backed capability profiles"
+      "residual_risk": "tested over fixture resources; no real capability evidence is admitted yet",
+      "still_needs": "two real execution resources with evidence-backed capability profiles",
+      "threat": "a cheaper resource is selected because the ordering ran before the filter"
     },
     {
       "exercised_by": [
         "the_commissioner_rule_applies_to_locality_rather_than_to_a_named_sink"
       ],
+      "falsifier": "an assignment or crossing reaching a locality the policy forbids for that data class",
       "id": "POL-F",
       "mechanisms": [
         "politeia_core::ExecutionLocality",
         "politeia_core::outbox"
       ],
-      "still_needs": "an inference boundary that exists to be forbidden"
+      "residual_risk": "the outbox governs egress and routing governs assignment; nothing yet joins them on one operation",
+      "still_needs": "an inference boundary that exists to be forbidden",
+      "threat": "locality is treated as a preference in a case where policy did not permit every candidate locality"
     },
     {
       "exercised_by": [
         "deterministic_requirement_never_selects_an_available_model",
         "missing_hard_capability_escalates_instead_of_selecting_closest"
       ],
+      "falsifier": "a fully deterministic requirement satisfied by a model while a verified tool was eligible",
       "id": "POL-G",
       "mechanisms": [
         "politeia_runtime::routing"
       ],
-      "still_needs": "a deterministic tool and an available model to prefer it over"
+      "residual_risk": "proven over declared requirements; no real deterministic tool is registered to prefer",
+      "still_needs": "a deterministic tool and an available model to prefer it over",
+      "threat": "a model is available and cheaper, and a deterministic requirement quietly degrades to a preference"
     },
     {
       "exercised_by": [
@@ -87,43 +108,58 @@
         "a_self_reported_verification_cannot_be_attested",
         "self_verified_or_stale_capability_evidence_is_ineligible"
       ],
+      "falsifier": "a binding blocking on an uncalibrated proxy, or a calibration widening a delegation",
       "id": "POL-H",
       "mechanisms": [
         "politeia_policy::hardening",
         "politeia_policy::evaluate"
       ],
-      "still_needs": "calibration performed against real adversarial fixtures rather than declared"
+      "residual_risk": "calibration is a declared boolean; nothing here verifies the adversarial fixtures behind it",
+      "still_needs": "calibration performed against real adversarial fixtures rather than declared",
+      "threat": "calibration is read as assurance, letting a heuristic acquire blocking authority"
     },
     {
       "exercised_by": [
         "foreign_material_is_refused_at_every_hop",
         "cross_client_workspace_substitution_is_rejected"
       ],
+      "falsifier": "a generation whose inputs digest covers material from another workspace",
       "id": "POL-I",
       "mechanisms": [
         "politeia_core::institution::InstitutionBoundary"
       ],
-      "still_needs": "two institutions built from one public core, showing neither is an input to the other"
+      "residual_risk": "enforced over typed records; a filesystem or build cache sits outside what these types see",
+      "still_needs": "two institutions built from one public core, showing neither is an input to the other",
+      "threat": "a shared fixture, cache, or default carries one client's material into another's build"
     },
     {
       "exercised_by": [],
+      "falsifier": "a recommissioning that cannot complete without the original commissioner's accounts or systems",
       "id": "POL-J",
       "mechanisms": [
         "politeia_evidence::HandoffReceipt"
       ],
-      "still_needs": "a replacement maintainer recommissioning from preserved inputs; nothing in the tree bears on this yet"
+      "residual_risk": "nothing in the tree bears on this claim",
+      "still_needs": "a replacement maintainer recommissioning from preserved inputs; nothing in the tree bears on this yet",
+      "threat": "an implicit dependency on the original commissioner's identity, invisible until they are gone"
     },
     {
       "exercised_by": [],
+      "falsifier": "an operation that fails when institution-external infrastructure is unreachable",
       "id": "POL-K",
       "mechanisms": [],
-      "still_needs": "a deployment proving no required external dependency; an absence cannot be shown by a type"
+      "residual_risk": "an absence cannot be shown by a type; only a deployment can fail to need something",
+      "still_needs": "a deployment proving no required external dependency; an absence cannot be shown by a type",
+      "threat": "a hosted service becomes load-bearing by convenience rather than by decision"
     },
     {
       "exercised_by": [],
+      "falsifier": "a generation that stops serving, or an authorized local update that fails, while disconnected",
       "id": "POL-L",
       "mechanisms": [],
-      "still_needs": "a control plane to disconnect"
+      "residual_risk": "no control plane exists to disconnect",
+      "still_needs": "a control plane to disconnect",
+      "threat": "activation or policy refresh reaches out at run time, making the control plane load-bearing"
     }
   ],
   "not_an_assurance_record": "docs/12-ASSURANCE_CASE.md requires an assurance record to bind the exact identities applicable to its claim, and states that a document, a test name, a green CI run, or an actor's self-certification is not itself proof. This register is a document naming test names. It records what exists to be exercised and what each claim still needs; it proves nothing."

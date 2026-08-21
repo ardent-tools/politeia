@@ -526,6 +526,17 @@ struct ClaimCoverage {
     exercised_by: &'static [&'static str],
     /// What stands between this and an assurance record.
     still_needs: &'static str,
+    /// How the claim fails in the world, if it does.
+    threat: &'static str,
+    /// What the mechanism does not reach even when it works.
+    residual_risk: &'static str,
+    /// The observation that would show the claim is false.
+    ///
+    /// `docs/12-ASSURANCE_CASE.md` requires every claim to identify one. A
+    /// claim with no falsifier is unfalsifiable in exactly the way an invariant
+    /// implied by its neighbour is: it will keep reading as satisfied because
+    /// nothing counts as contradicting it.
+    falsifier: &'static str,
 }
 
 /// The bounded first-slice claims, with what the tree holds for each.
@@ -536,6 +547,9 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
         exercised_by: &["one_bounded_path_runs_end_to_end"],
         still_needs: "a real deployment commissioned and handed off from the public distribution; \
                       no in-memory test can show the absence of private infrastructure",
+        threat: "a commissioning step silently requires a tool, credential, or service only the commissioner holds, discovered when a client attempts it alone",
+        residual_risk: "the tree can show no code path requires private infrastructure; it cannot show that no operational step does",
+        falsifier: "a commissioning run from the public distribution that cannot complete without an artifact absent from it",
     },
     ClaimCoverage {
         id: "POL-B",
@@ -551,12 +565,18 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
         ],
         still_needs: "deployment evidence that the trust domain holds in a real environment, \
                       which a process-local boundary cannot demonstrate",
+        threat: "material reaches a sink nobody classified, or a default admits what no decision did",
+        residual_risk: "the boundary governs what the code sends; it does not govern what an operator copies out of band",
+        falsifier: "material of a non-public class observed at a sink the workspace never declared",
     },
     ClaimCoverage {
         id: "POL-C",
         mechanisms: &["politeia_evidence::HandoffReceipt"],
         exercised_by: &["handoff_requires_admitted_client_evidence_after_revocation"],
         still_needs: "a revocation performed against a running generation, showing it keeps running",
+        threat: "revocation implemented as deletion, taking the running generation down with the authority that created it",
+        residual_risk: "revocation is forward-only over records; nothing here holds a live process open across one",
+        falsifier: "an operational generation that stops serving after its commissioner is revoked",
     },
     ClaimCoverage {
         id: "POL-D",
@@ -570,6 +590,9 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
         ],
         still_needs: "a specializer that builds an artifact; the kernel proves identity is a \
                       function of inputs, not that a build is",
+        threat: "a build varies in a field nobody declared and is activated because the variance was never compared",
+        residual_risk: "identity is a function of inputs here; the specializer is a digest rather than something this repository builds",
+        falsifier: "two derivations from identical inputs producing different bytes with no declaration covering the difference",
     },
     ClaimCoverage {
         id: "POL-E",
@@ -579,12 +602,18 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
             "hard_locality_rejects_a_cheaper_remote_resource",
         ],
         still_needs: "two real execution resources with evidence-backed capability profiles",
+        threat: "a cheaper resource is selected because the ordering ran before the filter",
+        residual_risk: "tested over fixture resources; no real capability evidence is admitted yet",
+        falsifier: "a routing decision selecting a resource that fails a hard constraint",
     },
     ClaimCoverage {
         id: "POL-F",
         mechanisms: &["politeia_core::ExecutionLocality", "politeia_core::outbox"],
         exercised_by: &["the_commissioner_rule_applies_to_locality_rather_than_to_a_named_sink"],
         still_needs: "an inference boundary that exists to be forbidden",
+        threat: "locality is treated as a preference in a case where policy did not permit every candidate locality",
+        residual_risk: "the outbox governs egress and routing governs assignment; nothing yet joins them on one operation",
+        falsifier: "an assignment or crossing reaching a locality the policy forbids for that data class",
     },
     ClaimCoverage {
         id: "POL-G",
@@ -594,6 +623,9 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
             "missing_hard_capability_escalates_instead_of_selecting_closest",
         ],
         still_needs: "a deterministic tool and an available model to prefer it over",
+        threat: "a model is available and cheaper, and a deterministic requirement quietly degrades to a preference",
+        residual_risk: "proven over declared requirements; no real deterministic tool is registered to prefer",
+        falsifier: "a fully deterministic requirement satisfied by a model while a verified tool was eligible",
     },
     ClaimCoverage {
         id: "POL-H",
@@ -604,6 +636,9 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
             "self_verified_or_stale_capability_evidence_is_ineligible",
         ],
         still_needs: "calibration performed against real adversarial fixtures rather than declared",
+        threat: "calibration is read as assurance, letting a heuristic acquire blocking authority",
+        residual_risk: "calibration is a declared boolean; nothing here verifies the adversarial fixtures behind it",
+        falsifier: "a binding blocking on an uncalibrated proxy, or a calibration widening a delegation",
     },
     ClaimCoverage {
         id: "POL-I",
@@ -614,6 +649,9 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
         ],
         still_needs: "two institutions built from one public core, showing neither is an input \
                       to the other",
+        threat: "a shared fixture, cache, or default carries one client's material into another's build",
+        residual_risk: "enforced over typed records; a filesystem or build cache sits outside what these types see",
+        falsifier: "a generation whose inputs digest covers material from another workspace",
     },
     ClaimCoverage {
         id: "POL-J",
@@ -621,6 +659,9 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
         exercised_by: &[],
         still_needs: "a replacement maintainer recommissioning from preserved inputs; nothing in \
                       the tree bears on this yet",
+        threat: "an implicit dependency on the original commissioner's identity, invisible until they are gone",
+        residual_risk: "nothing in the tree bears on this claim",
+        falsifier: "a recommissioning that cannot complete without the original commissioner's accounts or systems",
     },
     ClaimCoverage {
         id: "POL-K",
@@ -628,12 +669,18 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
         exercised_by: &[],
         still_needs: "a deployment proving no required external dependency; an absence cannot be \
                       shown by a type",
+        threat: "a hosted service becomes load-bearing by convenience rather than by decision",
+        residual_risk: "an absence cannot be shown by a type; only a deployment can fail to need something",
+        falsifier: "an operation that fails when institution-external infrastructure is unreachable",
     },
     ClaimCoverage {
         id: "POL-L",
         mechanisms: &[],
         exercised_by: &[],
         still_needs: "a control plane to disconnect",
+        threat: "activation or policy refresh reaches out at run time, making the control plane load-bearing",
+        residual_risk: "no control plane exists to disconnect",
+        falsifier: "a generation that stops serving, or an authorized local update that fails, while disconnected",
     },
 ];
 
@@ -648,6 +695,9 @@ fn render_assurance_coverage() -> anyhow::Result<DerivedTable> {
                 "mechanisms": coverage.mechanisms,
                 "exercised_by": coverage.exercised_by,
                 "still_needs": coverage.still_needs,
+                "threat": coverage.threat,
+                "residual_risk": coverage.residual_risk,
+                "falsifier": coverage.falsifier,
             })
         })
         .collect();
