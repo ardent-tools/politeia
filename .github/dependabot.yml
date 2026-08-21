@@ -1,0 +1,30 @@
+version: 2
+
+# One cargo entry is correct here: the root workspace holds every crate and
+# there is a single Cargo.lock. A crate excluded from the workspace, or one
+# declaring its own [workspace], carries its own lockfile and would need a row
+# of its own -- nothing fails when such a row is missing, so add it with the
+# exclusion rather than afterwards.
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      patch-updates:
+        update-types: [patch]
+      minor-updates:
+        update-types: [minor]
+    reviewers:
+      - forkwright
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
