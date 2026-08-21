@@ -68,7 +68,7 @@ fn activation() -> ActivationProof {
 fn a_clean_run_with_activation_and_full_coverage_supports_the_claim() {
     let runs = [run(ControlResult::Clean)];
     assert_eq!(
-        clean_claim(&runs, &subject(), &activation()),
+        clean_claim(&runs, CONTROL, &subject(), &activation()),
         Ok(&runs[0]),
         "the one configuration that should support a clean claim must support it"
     );
@@ -84,7 +84,7 @@ fn every_state_but_clean_refuses_the_claim() {
     let mut passed = Vec::new();
     for state in ControlResult::all() {
         let runs = [run(state)];
-        match clean_claim(&runs, &subject(), &activation) {
+        match clean_claim(&runs, CONTROL, &subject(), &activation) {
             Ok(_) => passed.push(state),
             Err(refusal) => assert_eq!(
                 refusal,
@@ -133,7 +133,12 @@ fn a_run_over_a_different_subject_does_not_support_the_claim() {
     // Wrong-subject activation: the control ran, cleanly, over something else.
     let runs = [run(ControlResult::Clean)];
     assert_eq!(
-        clean_claim(&runs, &Digest::blake3(b"another subject"), &activation()),
+        clean_claim(
+            &runs,
+            CONTROL,
+            &Digest::blake3(b"another subject"),
+            &activation()
+        ),
         Err(ClaimRefusal::NoRun)
     );
 }
@@ -143,7 +148,7 @@ fn no_run_at_all_is_refused_rather_than_treated_as_nothing_wrong() {
     // The bypass case. Nothing failed because nothing ran, and an absence of
     // violations is what a bypassed control and a working one have in common.
     assert_eq!(
-        clean_claim(&[], &subject(), &activation()),
+        clean_claim(&[], CONTROL, &subject(), &activation()),
         Err(ClaimRefusal::NoRun)
     );
 }
@@ -156,7 +161,7 @@ fn partial_coverage_is_refused() {
         observed: 3,
     };
     assert_eq!(
-        clean_claim(&[partial], &subject(), &activation()),
+        clean_claim(&[partial], CONTROL, &subject(), &activation()),
         Err(ClaimRefusal::PartialCoverage {
             observed: 3,
             population: 4,
@@ -176,22 +181,21 @@ fn an_empty_population_is_refused_separately_from_partial_coverage() {
         observed: 0,
     };
     assert_eq!(
-        clean_claim(&[empty], &subject(), &activation()),
+        clean_claim(&[empty], CONTROL, &subject(), &activation()),
         Err(ClaimRefusal::EmptyPopulation)
     );
 }
 
 #[test]
 fn a_duplicate_invocation_is_refused_rather_than_resolved() {
-    // Two runs of one control over one input, disagreeing. With both in hand
+    // Two runs of one control over one subject, disagreeing. With both in hand
     // the tempting move is to take the clean one, and that is exactly how a
     // flaky or partly-bypassed control becomes a passing claim.
-    let mut violation = run(ControlResult::Violation);
+    let violation = run(ControlResult::Violation);
     let clean = run(ControlResult::Clean);
-    violation.input_digest = clean.input_digest.clone();
 
     assert_eq!(
-        clean_claim(&[violation, clean], &subject(), &activation()),
+        clean_claim(&[violation, clean], CONTROL, &subject(), &activation()),
         Err(ClaimRefusal::DuplicateInvocation {
             control: CONTROL.to_string(),
         }),
@@ -204,11 +208,10 @@ fn a_duplicate_invocation_is_refused_even_when_both_runs_agree() {
     // Agreement is not evidence that the control ran once. It is what two
     // invocations of a control returning a constant also look like.
     let first = run(ControlResult::Clean);
-    let mut second = run(ControlResult::Clean);
-    second.input_digest = first.input_digest.clone();
+    let second = run(ControlResult::Clean);
 
     assert!(matches!(
-        clean_claim(&[first, second], &subject(), &activation()),
+        clean_claim(&[first, second], CONTROL, &subject(), &activation()),
         Err(ClaimRefusal::DuplicateInvocation { .. })
     ));
 }
@@ -221,14 +224,14 @@ fn a_missing_activation_binding_is_refused_on_each_axis() {
     let mut wrong_control = activation();
     wrong_control.control = "detector:something-else".to_string();
     assert_eq!(
-        clean_claim(&runs, &subject, &wrong_control),
+        clean_claim(&runs, CONTROL, &subject, &wrong_control),
         Err(ClaimRefusal::ActivationControlMismatch)
     );
 
     let mut wrong_version = activation();
     wrong_version.control_version = "3.0.0".to_string();
     assert_eq!(
-        clean_claim(&runs, &subject, &wrong_version),
+        clean_claim(&runs, CONTROL, &subject, &wrong_version),
         Err(ClaimRefusal::ActivationVersionMismatch),
         "a proof about a previous version says nothing about this one"
     );
@@ -236,14 +239,14 @@ fn a_missing_activation_binding_is_refused_on_each_axis() {
     let mut wrong_configuration = activation();
     wrong_configuration.configuration_digest = Digest::blake3(b"other configuration");
     assert_eq!(
-        clean_claim(&runs, &subject, &wrong_configuration),
+        clean_claim(&runs, CONTROL, &subject, &wrong_configuration),
         Err(ClaimRefusal::ActivationConfigurationMismatch)
     );
 
     let mut wrong_path = activation();
     wrong_path.mediation_path = "test-harness".to_string();
     assert_eq!(
-        clean_claim(&runs, &subject, &wrong_path),
+        clean_claim(&runs, CONTROL, &subject, &wrong_path),
         Err(ClaimRefusal::ActivationPathMismatch),
         "a control proved on a harness has not been proved on the real path"
     );
@@ -264,7 +267,7 @@ fn an_activation_proof_that_did_not_refuse_is_refused() {
         let mut proof = activation();
         proof.planted_violation_result = outcome;
         assert_eq!(
-            clean_claim(&runs, &subject(), &proof),
+            clean_claim(&runs, CONTROL, &subject(), &proof),
             Err(ClaimRefusal::ActivationDidNotRefuse(outcome))
         );
     }
@@ -279,7 +282,7 @@ fn an_activation_proof_that_rejected_the_known_good_is_refused() {
     let mut proof = activation();
     proof.known_good_result = ControlResult::Violation;
     assert_eq!(
-        clean_claim(&runs, &subject(), &proof),
+        clean_claim(&runs, CONTROL, &subject(), &proof),
         Err(ClaimRefusal::ActivationRejectedKnownGood(
             ControlResult::Violation
         ))
@@ -287,11 +290,33 @@ fn an_activation_proof_that_rejected_the_known_good_is_refused() {
 }
 
 #[test]
+fn another_controls_run_over_the_same_subject_is_not_this_claim() {
+    // Several controls may judge one subject. A claim that took only the
+    // subject would have to choose among their runs, and any choice is
+    // arbitrary and order-dependent -- so the claim names its control, and a
+    // stranger's run is invisible to it whatever it says.
+    let mine = run(ControlResult::Clean);
+    let mut theirs = run(ControlResult::Violation);
+    theirs.control = "detector:something-else".to_string();
+
+    for pair in [
+        [mine.clone(), theirs.clone()],
+        [theirs.clone(), mine.clone()],
+    ] {
+        assert_eq!(
+            clean_claim(&pair, CONTROL, &subject(), &activation()).map(|run| &run.id),
+            Ok(&mine.id),
+            "the claim must find its own control's run whatever order they arrive in"
+        );
+    }
+}
+
+#[test]
 fn a_run_that_ended_before_it_began_is_refused() {
     let mut inverted = run(ControlResult::Clean);
     inverted.finished_at = inverted.started_at - SignedDuration::from_secs(1);
     assert_eq!(
-        clean_claim(&[inverted], &subject(), &activation()),
+        clean_claim(&[inverted], CONTROL, &subject(), &activation()),
         Err(ClaimRefusal::InvertedInterval)
     );
 }
@@ -341,11 +366,16 @@ fn every_refusal_variant_names_the_test_that_reaches_it() {
         "no_run_at_all_is_refused_rather_than_treated_as_nothing_wrong"
     );
     assert!(matches!(
-        clean_claim(&[], &subject(), &activation()),
+        clean_claim(&[], CONTROL, &subject(), &activation()),
         Err(ClaimRefusal::NoRun)
     ));
     assert!(matches!(
-        clean_claim(&[run(ControlResult::Violation)], &subject(), &activation()),
+        clean_claim(
+            &[run(ControlResult::Violation)],
+            CONTROL,
+            &subject(),
+            &activation()
+        ),
         Err(ClaimRefusal::ResultNotClean(ControlResult::Violation))
     ));
 }

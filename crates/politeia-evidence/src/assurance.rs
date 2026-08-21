@@ -22,8 +22,6 @@
 //! eight states is exhaustive, so a state added later stops the build rather
 //! than falling into whichever arm was written last.
 
-use std::collections::BTreeSet;
-
 use jiff::Timestamp;
 use politeia_core::{Digest, EvidenceId, PrincipalId};
 use schemars::JsonSchema;
@@ -283,32 +281,43 @@ impl std::error::Error for ClaimRefusal {}
 /// mediation path, and showing both that the planted violation was refused and
 /// that the known-good subject was admitted.
 ///
+/// WHY the claim names one control rather than judging a subject in general:
+/// several controls may judge one subject, and a function that took only the
+/// subject would have to choose among their runs. Any choice is arbitrary and
+/// order-dependent, and the tempting one -- the first clean result -- is the
+/// bug. An assurance case is built claim by claim, one control at a time, so
+/// the signature says so.
+///
 /// # Errors
 ///
 /// Returns the first [`ClaimRefusal`] that applies. Checks run from the cheapest
 /// and most specific outward, so the reported reason is the one nearest to what
 /// the caller controls.
 ///
-/// Time: O(n log n) for n runs. Space: O(n).
+/// Time: O(n) for n runs. Space: O(1).
 pub fn clean_claim<'run>(
     runs: &'run [ControlRun],
+    control: &str,
     subject: &Digest,
     activation: &ActivationProof,
 ) -> Result<&'run ControlRun, ClaimRefusal> {
-    let judged: Vec<&ControlRun> = runs.iter().filter(|run| &run.subject == subject).collect();
+    let mut judged = runs
+        .iter()
+        .filter(|run| run.control == control && &run.subject == subject);
 
-    let mut invocations = BTreeSet::new();
-    for run in &judged {
-        if !invocations.insert((&run.control, &run.input_digest)) {
-            return Err(ClaimRefusal::DuplicateInvocation {
-                control: run.control.clone(),
-            });
-        }
-    }
-
-    let Some(run) = judged.first() else {
+    let Some(run) = judged.next() else {
         return Err(ClaimRefusal::NoRun);
     };
+    // WHY any second run refuses, whatever it says: two invocations of one
+    // control over one subject leave nothing saying which is authoritative.
+    // Agreement does not help -- it is also what a control returning a
+    // constant produces -- and disagreement is where taking the clean one
+    // turns a flaky or partly-bypassed control into a passing claim.
+    if judged.next().is_some() {
+        return Err(ClaimRefusal::DuplicateInvocation {
+            control: control.to_string(),
+        });
+    }
 
     // The exhaustive match is the point. A state added later has no arm and the
     // build stops, rather than the new state falling through to whichever
