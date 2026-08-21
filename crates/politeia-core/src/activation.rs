@@ -170,23 +170,27 @@ impl ActiveGeneration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generation::RuntimeGenerationInputs;
+    use crate::Digest;
+    use crate::generation::{ReproducibilityContract, RuntimeGenerationInputs};
     use crate::institution::InstitutionBoundary;
-    use crate::test_support::fixture;
-    use crate::{Digest, InstitutionId};
+    use crate::test_support::{Fixture, fixture, fixture_with};
 
+    // WHY every helper takes the fixture rather than calling `fixture()`: each
+    // call mints fresh identities, so inputs from one call and a workspace from
+    // another do not describe the same institution -- and `derive` rejects the
+    // pair on provenance rather than producing a subtly wrong generation. One
+    // fixture, one institution.
     #[expect(
         clippy::expect_used,
         reason = "a fixture whose generation cannot derive is a broken test, not a finding"
     )]
-    fn generation(inputs: RuntimeGenerationInputs) -> RuntimeGeneration {
-        let f = fixture();
+    fn generation(f: &Fixture, inputs: RuntimeGenerationInputs) -> RuntimeGeneration {
         RuntimeGeneration::derive(inputs, &f.workspace, &f.commissioning)
             .expect("the fixture inputs derive a generation")
     }
 
-    fn fixture_generation() -> RuntimeGeneration {
-        generation(fixture().inputs)
+    fn generation_of(f: &Fixture) -> RuntimeGeneration {
+        generation(f, f.inputs.clone())
     }
 
     fn boundary_for(generation: &RuntimeGeneration) -> InstitutionBoundary<()> {
@@ -203,11 +207,12 @@ mod tests {
 
     #[test]
     fn a_deterministic_candidate_with_no_variance_activates() {
-        let running = fixture_generation();
+        let f = fixture();
+        let running = generation_of(&f);
         let b = boundary_for(&running);
         let mut active = ActiveGeneration::new(running.clone());
 
-        let candidate = fixture_generation();
+        let candidate = generation_of(&f);
         let replaced = active.activate(&b, candidate.clone(), &nothing());
         assert_eq!(replaced, Ok(running));
         assert_eq!(active.current(), &candidate);
@@ -219,15 +224,16 @@ mod tests {
         reason = "a fixture that does not refuse is a broken test, not a finding"
     )]
     fn a_candidate_from_another_institution_is_quarantined_and_nothing_changes() {
-        let running = fixture_generation();
+        let f = fixture();
+        let running = generation_of(&f);
         let b = boundary_for(&running);
         let mut active = ActiveGeneration::new(running.clone());
 
-        // Derived for a different workspace: the boundary refuses it, and the
-        // institution keeps running what it was running.
-        let mut foreign_inputs = fixture().inputs;
-        foreign_inputs.institution = InstitutionId::new();
-        let foreign = generation(foreign_inputs);
+        // A second fixture is a second institution: fresh identities all the
+        // way down, and internally consistent, which is what makes it a fair
+        // test of the boundary rather than of provenance validation.
+        let theirs = fixture();
+        let foreign = generation_of(&theirs);
 
         let refused = active
             .activate(&b, foreign.clone(), &nothing())
@@ -256,13 +262,14 @@ mod tests {
         // `Deterministic` means exact inputs reproduce identical bytes, so a
         // field that varied is by definition uncovered -- there is no
         // declaration for it to fall under.
-        let running = fixture_generation();
+        let f = fixture();
+        let running = generation_of(&f);
         let b = boundary_for(&running);
         let mut active = ActiveGeneration::new(running.clone());
 
         let varied = BTreeSet::from(["build.timestamp".to_string()]);
         let refused = active
-            .activate(&b, fixture_generation(), &varied)
+            .activate(&b, generation_of(&f), &varied)
             .expect_err("undeclared variance must not activate");
         assert_eq!(
             refused.reason,
@@ -277,27 +284,26 @@ mod tests {
         reason = "a fixture that does not refuse is a broken test, not a finding"
     )]
     fn declared_fields_may_vary_and_others_may_not() {
-        let mut declared_inputs = fixture().inputs;
-        declared_inputs.approved.reproducibility =
-            crate::generation::ReproducibilityContract::DeclaredNondeterminism {
-                fields: BTreeSet::from(["build.timestamp".to_string()]),
-                contract_digest: Digest::blake3(b"the nondeterminism contract"),
-            };
-        let running = generation(declared_inputs.clone());
+        let f = fixture_with(ReproducibilityContract::DeclaredNondeterminism {
+            fields: BTreeSet::from(["build.timestamp".to_string()]),
+            contract_digest: Digest::blake3(b"the nondeterminism contract"),
+        });
+        let declared_inputs = f.inputs.clone();
+        let running = generation(&f, declared_inputs.clone());
         let b = boundary_for(&running);
         let mut active = ActiveGeneration::new(running.clone());
 
         let covered = BTreeSet::from(["build.timestamp".to_string()]);
         assert!(
             active
-                .activate(&b, generation(declared_inputs.clone()), &covered)
+                .activate(&b, generation(&f, declared_inputs.clone()), &covered)
                 .is_ok(),
             "a declared field may vary"
         );
 
         let mixed = BTreeSet::from(["build.timestamp".to_string(), "adapter.digest".to_string()]);
         let refused = active
-            .activate(&b, generation(declared_inputs), &mixed)
+            .activate(&b, generation(&f, declared_inputs), &mixed)
             .expect_err("an undeclared field alongside a declared one must refuse");
         assert_eq!(
             refused.reason,
@@ -314,18 +320,18 @@ mod tests {
         // `ActiveGeneration` has no empty variant, so a system between
         // generations is unrepresentable -- which is why there is no `rollback`
         // to return from one.
-        let running = fixture_generation();
+        let f = fixture();
+        let running = generation_of(&f);
         let b = boundary_for(&running);
         let mut active = ActiveGeneration::new(running.clone());
 
-        let mut foreign_inputs = fixture().inputs;
-        foreign_inputs.institution = InstitutionId::new();
-        let _ = active.activate(&b, generation(foreign_inputs), &nothing());
+        let theirs = fixture();
+        let _ = active.activate(&b, generation_of(&theirs), &nothing());
         assert_eq!(active.current(), &running);
 
         let _ = active.activate(
             &b,
-            fixture_generation(),
+            generation_of(&f),
             &BTreeSet::from(["anything".to_string()]),
         );
         assert_eq!(

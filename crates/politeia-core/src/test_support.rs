@@ -35,11 +35,26 @@ pub(crate) struct Fixture {
     pub(crate) commissioning: CommissioningRecord,
 }
 
+/// A fixture whose generation is reproducible bit-for-bit.
+pub(crate) fn fixture() -> Fixture {
+    fixture_with(ReproducibilityContract::Deterministic)
+}
+
+/// A fixture built around an exact reproducibility posture.
+///
+/// WHY the contract is a parameter rather than something a caller edits
+/// afterwards: it is bound in three places -- the approved plan, the workspace
+/// manifest that approves it, and the commissioning approval over that plan's
+/// digest. Changing one leaves the other two describing a different plan, and
+/// `RuntimeGeneration::derive` rejects the pair on provenance. That refusal is
+/// `docs/02-CONSTITUTION.md`'s exact-binding law working; building the chain
+/// around the contract is how a test asks a different question without
+/// defeating it.
 #[expect(
     clippy::expect_used,
     reason = "canonical trust-domain fixture must fail loudly if validation drifts"
 )]
-pub(crate) fn fixture() -> Fixture {
+pub(crate) fn fixture_with(reproducibility: ReproducibilityContract) -> Fixture {
     let institution = InstitutionId::new();
     let workspace_id = InstitutionWorkspaceId::new();
     let trust_domain: TrustDomainId = "client-a:production"
@@ -60,7 +75,7 @@ pub(crate) fn fixture() -> Fixture {
         excluded_commissioning_capabilities: CommissioningCapability::all(),
         specializer_digest: Digest::blake3(b"specializer"),
         toolchain_digest: Digest::blake3(b"toolchain"),
-        reproducibility: ReproducibilityContract::Deterministic,
+        reproducibility,
     };
     let workspace = InstitutionWorkspace {
         id: workspace_id.clone(),
