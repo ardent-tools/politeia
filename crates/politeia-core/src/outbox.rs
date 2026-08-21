@@ -27,6 +27,7 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::institution::{InstitutionBoundary, WorkspaceScoped};
 use crate::{
     DataClass, DelegationId, Digest, ExecutionLocality, ExecutionResourceId,
     InstitutionWorkspaceId, PrincipalId, RoutingDecisionId,
@@ -74,16 +75,19 @@ pub struct Sink {
     pub locality: ExecutionLocality,
 }
 
-/// What one workspace has declared about its own boundary.
+/// What one workspace has declared may leave it.
 ///
 /// Everything not named here is unknown, and unknown fails closed. That is the
 /// whole reason this is a declaration rather than a set of defaults: a default
 /// is an answer nobody gave.
+///
+/// It carries no workspace identity of its own. The
+/// [`InstitutionBoundary`](crate::institution::InstitutionBoundary) that holds
+/// it owns that, so a declaration and its boundary cannot disagree about whose
+/// institution they serve.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct DeclaredBoundary {
-    /// The workspace this boundary belongs to.
-    pub workspace: InstitutionWorkspaceId,
+pub struct OutboxDeclaration {
     /// Classified destinations, by identity.
     pub sinks: BTreeMap<String, Sink>,
     /// Purposes the institution has approved.
@@ -138,6 +142,12 @@ pub struct BoundaryCrossing {
     pub subject: Digest,
     /// When it was attempted.
     pub at: Timestamp,
+}
+
+impl WorkspaceScoped for BoundaryCrossing {
+    fn workspace(&self) -> &InstitutionWorkspaceId {
+        &self.workspace
+    }
 }
 
 /// Why a crossing was refused.
@@ -221,26 +231,35 @@ impl Adjudication {
 /// and more visible mistake than ignoring an error.
 ///
 /// Time: O(c log c) for c data classes. Space: O(c).
-pub fn adjudicate(boundary: &DeclaredBoundary, crossing: &BoundaryCrossing) -> Adjudication {
+pub fn adjudicate(
+    boundary: &InstitutionBoundary<OutboxDeclaration>,
+    crossing: &BoundaryCrossing,
+) -> Adjudication {
     let record = |denied| Adjudication {
         crossing: crossing.clone(),
         denied,
     };
 
-    if crossing.workspace != boundary.workspace {
+    // Asked of the boundary rather than compared here, so this rule has one
+    // implementation across the outbox, reconnaissance, and anything added next.
+    if !boundary.owns(crossing) {
         return record(Some(DenialReason::ForeignWorkspace));
     }
-    let Some(sink) = boundary.sinks.get(&crossing.sink) else {
+    let declaration = boundary.outbox();
+    let Some(sink) = declaration.sinks.get(&crossing.sink) else {
         return record(Some(DenialReason::UnknownSink {
             sink: crossing.sink.clone(),
         }));
     };
-    if !boundary.purposes.contains(&crossing.purpose) {
+    if !declaration.purposes.contains(&crossing.purpose) {
         return record(Some(DenialReason::UnknownPurpose {
             purpose: crossing.purpose.clone(),
         }));
     }
-    if !boundary.retention_rules.contains(&crossing.retention_rule) {
+    if !declaration
+        .retention_rules
+        .contains(&crossing.retention_rule)
+    {
         return record(Some(DenialReason::UnknownRetentionRule {
             rule: crossing.retention_rule.clone(),
         }));
@@ -251,7 +270,7 @@ pub fn adjudicate(boundary: &DeclaredBoundary, crossing: &BoundaryCrossing) -> A
             .data_classes
             .iter()
             .filter(|class| {
-                **class != DataClass::Public && !boundary.commissioner_export.contains(class)
+                **class != DataClass::Public && !declaration.commissioner_export.contains(class)
             })
             .cloned()
             .collect();
@@ -282,9 +301,16 @@ mod tests {
     const PROVIDER: &str = "inference:acme";
     const COMMISSIONER: &str = "workstation:commissioner";
 
-    fn boundary() -> DeclaredBoundary {
-        DeclaredBoundary {
-            workspace: InstitutionWorkspaceId::new(),
+    fn boundary() -> InstitutionBoundary<OutboxDeclaration> {
+        InstitutionBoundary::new(
+            crate::InstitutionId::new(),
+            InstitutionWorkspaceId::new(),
+            declaration(),
+        )
+    }
+
+    fn declaration() -> OutboxDeclaration {
+        OutboxDeclaration {
             sinks: BTreeMap::from([
                 (
                     PROVIDER.to_string(),
@@ -310,12 +336,12 @@ mod tests {
     }
 
     fn crossing(
-        boundary: &DeclaredBoundary,
+        boundary: &InstitutionBoundary<OutboxDeclaration>,
         sink: &str,
         classes: &[DataClass],
     ) -> BoundaryCrossing {
         BoundaryCrossing {
-            workspace: boundary.workspace.clone(),
+            workspace: boundary.workspace().clone(),
             purpose: "answer a support question".to_string(),
             source: "crm:contacts".to_string(),
             transformation: "summarised".to_string(),
@@ -441,7 +467,7 @@ mod tests {
         // happens when nobody decided, so the field recording the decision
         // starts empty and this is what that emptiness means.
         let b = boundary();
-        assert!(b.commissioner_export.is_empty());
+        assert!(b.outbox().commissioner_export.is_empty());
         let c = crossing(
             &b,
             COMMISSIONER,
@@ -458,8 +484,13 @@ mod tests {
 
     #[test]
     fn an_explicit_export_authorization_permits_exactly_what_it_names() {
-        let mut b = boundary();
-        b.commissioner_export = BTreeSet::from([DataClass::Confidential]);
+        let mut declared = declaration();
+        declared.commissioner_export = BTreeSet::from([DataClass::Confidential]);
+        let b = InstitutionBoundary::new(
+            crate::InstitutionId::new(),
+            InstitutionWorkspaceId::new(),
+            declared,
+        );
 
         assert!(
             adjudicate(&b, &crossing(&b, COMMISSIONER, &[DataClass::Confidential])).allowed(),
@@ -487,14 +518,19 @@ mod tests {
     fn the_commissioner_rule_applies_to_locality_rather_than_to_a_named_sink() {
         // A second commissioner-controlled destination is covered without being
         // listed anywhere, because the rule turns on where the sink sits.
-        let mut b = boundary();
-        b.sinks.insert(
+        let mut declared = declaration();
+        declared.sinks.insert(
             "log:commissioner-laptop".to_string(),
             Sink {
                 kind: SinkKind::Log,
                 identity: "log:commissioner-laptop".to_string(),
                 locality: ExecutionLocality::CommissionerLocal,
             },
+        );
+        let b = InstitutionBoundary::new(
+            crate::InstitutionId::new(),
+            InstitutionWorkspaceId::new(),
+            declared,
         );
         let c = crossing(&b, "log:commissioner-laptop", &[DataClass::Internal]);
         assert!(matches!(

@@ -156,7 +156,7 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "reconnaissance authoring surface; publication waits on the first vertical slice",
     },
     WithheldSchema {
-        type_name: "politeia_core::outbox::DeclaredBoundary",
+        type_name: "politeia_core::outbox::OutboxDeclaration",
         reason: "institution boundary declaration; publication waits on the first vertical slice",
     },
     WithheldSchema {
@@ -169,7 +169,7 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
     },
     WithheldSchema {
         type_name: "politeia_core::outbox::Sink",
-        reason: "projected as part of DeclaredBoundary; no standalone wire consumer",
+        reason: "projected as part of OutboxDeclaration; no standalone wire consumer",
     },
     WithheldSchema {
         type_name: "politeia_core::outbox::SinkKind",
