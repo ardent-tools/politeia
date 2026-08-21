@@ -13,22 +13,42 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-/// Every schema `xtask -- derive` publishes.
-const SPEC_FILES: &[&str] = &[
-    "extension-manifest.schema.json",
-    "semantic-operation.schema.json",
-    "institution-workspace.schema.json",
-    "commissioning-record.schema.json",
-    "runtime-generation.schema.json",
-    "execution-resource.schema.json",
-    "execution-requirement.schema.json",
-    "capability-profile.schema.json",
-    "capability-verification.schema.json",
-    "availability-snapshot.schema.json",
-    "routing-decision.schema.json",
-    "lifecycle-transition.schema.json",
-    "handoff-receipt.schema.json",
-];
+/// Suffix identifying a generated projection, matching the derivation's own rule.
+const SCHEMA_SUFFIX: &str = ".schema.json";
+
+/// Every published schema, read from the directory rather than listed here.
+///
+/// WHY derived: a hand-written list is a second copy of the population that
+/// `generated_specs()` already owns, and the two can drift. The drift is silent
+/// in the direction that matters — a projection added to the derivation and not
+/// to the list is simply never swept, so every assertion below keeps passing
+/// while saying nothing about the new schema. Reading the directory means a new
+/// projection is covered the moment it exists.
+///
+/// The suffix, not the directory, decides membership: `spec/` also holds
+/// hand-authored companions that no derivation produces.
+fn spec_files() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(spec_dir())
+        .unwrap_or_else(|error| panic!("read the published schema directory: {error}"))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("read a published directory entry: {error}"))
+                .path()
+        })
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .filter(|name| name.ends_with(SCHEMA_SUFFIX))
+                .map(str::to_owned)
+        })
+        .collect();
+    names.sort();
+    assert!(
+        !names.is_empty(),
+        "no published schemas found; the sweeps below would pass vacuously"
+    );
+    names
+}
 
 fn spec_dir() -> PathBuf {
     // WHY not a relative path: `cargo test` sets the working directory to the
@@ -94,8 +114,8 @@ fn format_of(node: &Value) -> Option<&str> {
 
 #[test]
 fn every_uuid_node_carries_a_pattern() {
-    for name in SPEC_FILES {
-        let document = load(name);
+    for name in spec_files() {
+        let document = load(&name);
         walk(&document, "", &mut |node, path| {
             if format_of(node) == Some("uuid") {
                 assert!(
@@ -110,8 +130,8 @@ fn every_uuid_node_carries_a_pattern() {
 
 #[test]
 fn every_date_time_node_carries_a_pattern() {
-    for name in SPEC_FILES {
-        let document = load(name);
+    for name in spec_files() {
+        let document = load(&name);
         walk(&document, "", &mut |node, path| {
             if format_of(node) == Some("date-time") {
                 assert!(
@@ -125,8 +145,8 @@ fn every_date_time_node_carries_a_pattern() {
 
 #[test]
 fn every_uint64_node_carries_the_type_maximum() {
-    for name in SPEC_FILES {
-        let document = load(name);
+    for name in spec_files() {
+        let document = load(&name);
         walk(&document, "", &mut |node, path| {
             if format_of(node) == Some("uint64") {
                 let maximum = node.get("maximum").and_then(Value::as_u64);
