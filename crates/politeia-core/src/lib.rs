@@ -20,6 +20,7 @@ pub mod generation;
 pub mod institution;
 pub mod knowledge;
 pub mod lifecycle;
+pub mod reconnaissance;
 pub mod records;
 
 #[cfg(test)]
@@ -410,6 +411,29 @@ pub enum Effect {
     CreateArtifact,
     /// Change an authorization.
     ChangeAuthorization,
+}
+
+impl Effect {
+    /// Whether producing this effect can change something outside the system.
+    ///
+    /// WHY a method on the enum rather than a set at each call site: read-only
+    /// is a property of an effect, and a caller that keeps its own list is one
+    /// variant behind from the moment a new effect is added. The exhaustive
+    /// match means a new variant stops the build until someone decides which
+    /// side it falls on -- and the safe answer for something nobody has
+    /// classified is that it mutates.
+    pub const fn mutates(self) -> bool {
+        match self {
+            Effect::ReadFilesystem | Effect::ReadSecret | Effect::ReadExternalSystem => false,
+            Effect::WriteFilesystem
+            | Effect::SpawnProcess
+            | Effect::NetworkEgress
+            | Effect::WriteSecret
+            | Effect::WriteExternalSystem
+            | Effect::CreateArtifact
+            | Effect::ChangeAuthorization => true,
+        }
+    }
 }
 
 /// A data classification governing sources, transforms, retention, locality, and sinks.
