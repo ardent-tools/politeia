@@ -5,6 +5,8 @@
 
 #![deny(missing_docs)]
 
+pub mod assessment;
+
 use std::collections::BTreeSet;
 
 use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
@@ -396,3 +398,7 @@ impl HandoffReceipt {
 #[cfg(test)]
 #[path = "tests/handoff.rs"]
 mod commissioning_tests;
+
+#[cfg(test)]
+#[path = "tests/assessment.rs"]
+mod assessment_tests;
