@@ -22,7 +22,7 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::institution::{InstitutionBoundary, WorkspaceScoped};
+use crate::institution::InstitutionBoundary;
 use crate::knowledge::Observation;
 use crate::{AdapterId, Delegation, DelegationId, Effect, InstitutionWorkspaceId, PrincipalId};
 
