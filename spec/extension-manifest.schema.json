@@ -272,6 +272,7 @@
         "cpu_ms": {
           "description": "CPU-time limit in milliseconds.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -281,6 +282,7 @@
         "external_cost_microunits": {
           "description": "External spend limit in microunits.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -290,6 +292,7 @@
         "io_bytes": {
           "description": "I/O limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -299,6 +302,7 @@
         "memory_bytes": {
           "description": "Memory limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -308,6 +312,7 @@
         "network_bytes": {
           "description": "Network transfer limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -317,6 +322,7 @@
         "wall_ms": {
           "description": "Wall-clock limit in milliseconds.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",

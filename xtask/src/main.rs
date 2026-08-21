@@ -7,6 +7,50 @@ use schemars::JsonSchema;
 
 const GENERATED_COMMENT: &str = "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.";
 
+/// Canonical textual form `jiff::Timestamp` emits: RFC 3339, UTC, `Z`-suffixed.
+///
+/// WHY a pattern rather than the `format: "date-time"` schemars already emits:
+/// JSON Schema 2020-12 treats `format` as an annotation unless a validator opts
+/// into the format-assertion vocabulary, so a schema-only consumer using default
+/// settings enforces nothing. `pattern` is core vocabulary and always asserts.
+///
+/// This is deliberately narrower than what `jiff` will parse. Its reader also
+/// accepts numeric offsets, lowercase `z`, and bracketed IANA zone annotations
+/// (`2024-03-10T02:05-04[America/New_York]`), none of which its writer ever
+/// produces. Those forms are rejected by this schema and accepted by the
+/// decoder -- a one-sided asymmetry, recorded rather than closed: `Timestamp` is
+/// foreign, so narrowing its decoder would mean wrapping it at every timestamp
+/// field across three crates, which is beyond this projection's scope.
+const TIMESTAMP_TEXT_PATTERN: &str = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$";
+
+/// True when a schema node admits the JSON string type.
+///
+/// WARNING: `type` is a string for a required field and an array for an
+/// `Option`, so a `== "string"` test silently skips every nullable node. One
+/// `Option<Timestamp>` exists today (`CommissionerGrantRecord::revoked_at`) and
+/// would keep annotation-only enforcement under the simpler test.
+fn schema_admits_string(schema: &schemars::Schema) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::String(kind)) => kind == "string",
+        Some(serde_json::Value::Array(kinds)) => {
+            kinds.iter().any(|kind| kind.as_str() == Some("string"))
+        }
+        _ => false,
+    }
+}
+
+/// Stamp the canonical RFC 3339 pattern onto any `date-time` node lacking one.
+fn constrain_date_time(schema: &mut schemars::Schema) {
+    let is_date_time = schema_admits_string(schema)
+        && schema.get("format").and_then(serde_json::Value::as_str) == Some("date-time");
+    if is_date_time && schema.get("pattern").is_none() {
+        schema.insert(
+            "pattern".to_string(),
+            serde_json::Value::String(TIMESTAMP_TEXT_PATTERN.to_string()),
+        );
+    }
+}
+
 struct DerivedSpec {
     path: &'static str,
     urn: &'static str,
@@ -29,7 +73,10 @@ fn render_schema<T: JsonSchema>(
     path: &'static str,
     urn: &'static str,
 ) -> anyhow::Result<DerivedSpec> {
-    let mut value = serde_json::to_value(schemars::schema_for!(T))?;
+    let generator = schemars::generate::SchemaSettings::draft2020_12()
+        .with_transform(schemars::transform::RecursiveTransform(constrain_date_time))
+        .into_generator();
+    let mut value = serde_json::to_value(generator.into_root_schema_for::<T>())?;
     let object = value.as_object_mut().context("schema root is an object")?;
     object.insert(
         "$id".to_string(),
