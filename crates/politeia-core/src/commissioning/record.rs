@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use jiff::Timestamp;
 
 use crate::{
-    CommissioningRecordId, DelegationId, Digest, EvidenceId, InstitutionId, InstitutionWorkspaceId,
-    PolicyBundleId, PrincipalId,
+    CommissioningRecordId, DelegationId, Digest, DigestDomain, EvidenceId, InstitutionId,
+    InstitutionWorkspaceId, PolicyBundleId, PrincipalId,
     evidence::{IndependenceClass, TrustedEvidenceRegistry},
     generation::ApprovedGenerationInputs,
     institution::InstitutionWorkspace,
@@ -263,7 +263,7 @@ impl CommissioningRecord {
     ///
     /// Returns the JSON encoding failure if the record cannot be represented.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::CommissioningRecord, self)
     }
 
     /// Record identity.

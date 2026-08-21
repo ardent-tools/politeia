@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu, ensure};
 
 use politeia_core::{
-    AdapterId, BudgetReservationId, DataClass, Delegation, DelegationId, Digest, Effect,
-    EffectLeaseId, OperationId, OperationSpec, PolicyBundleId, PrincipalId, ResourceBudget,
+    AdapterId, BudgetReservationId, DataClass, Delegation, DelegationId, Digest, DigestDomain,
+    Effect, EffectLeaseId, OperationId, OperationSpec, PolicyBundleId, PrincipalId, ResourceBudget,
     RuntimeGenerationId,
 };
 use politeia_policy::PolicyDecision;
@@ -191,8 +191,7 @@ impl OperationIntent {
     /// Returns [`RuntimeError::LeaseEncoding`] if the typed intent cannot be
     /// serialized. BTree-backed sets make the representation deterministic.
     pub fn digest(&self) -> Result<Digest, RuntimeError> {
-        let bytes = serde_json::to_vec(self).context(LeaseEncodingSnafu)?;
-        Ok(Digest::blake3(&bytes))
+        Digest::of(DigestDomain::OperationIntent, self).context(LeaseEncodingSnafu)
     }
 }
 
@@ -317,8 +316,7 @@ impl EffectLease {
     }
 
     fn claims_digest(claims: &LeaseClaims) -> Result<Digest, RuntimeError> {
-        let bytes = serde_json::to_vec(claims).context(LeaseEncodingSnafu)?;
-        Ok(Digest::blake3(&bytes))
+        Digest::of(DigestDomain::LeaseClaims, claims).context(LeaseEncodingSnafu)
     }
 
     fn has_valid_claims_digest(&self) -> Result<bool, RuntimeError> {

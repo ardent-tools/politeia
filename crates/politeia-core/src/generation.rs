@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AdapterId, CommissioningRecordId, Digest, InstitutionId, InstitutionWorkspaceId,
+    AdapterId, CommissioningRecordId, Digest, DigestDomain, InstitutionId, InstitutionWorkspaceId,
     PolicyBundleId, RuntimeGenerationId,
     commissioning::CommissioningRecord,
     institution::{InstitutionWorkspace, TrustDomainId},
@@ -127,7 +127,7 @@ impl ApprovedGenerationInputs {
     ///
     /// Time: O(n). Space: O(n), where n is the encoded plan size.
     pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+        Digest::of(DigestDomain::ApprovedGenerationInputs, self)
     }
 }
 
@@ -241,9 +241,10 @@ impl RuntimeGeneration {
             return Err(RuntimeGenerationError::EmptyNondeterminismDeclaration);
         }
         Self::validate_bindings(&inputs, workspace, commissioning)?;
-        let bytes = serde_json::to_vec(&inputs).map_err(RuntimeGenerationError::Encoding)?;
+        let identity = Digest::of(DigestDomain::RuntimeGenerationInputs, &inputs)
+            .map_err(RuntimeGenerationError::Encoding)?;
         Ok(Self {
-            id: RuntimeGenerationId::derive(&bytes),
+            id: RuntimeGenerationId::from_digest(identity),
             inputs,
         })
     }

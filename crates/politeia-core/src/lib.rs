@@ -22,6 +22,9 @@ pub mod lifecycle;
 #[cfg(test)]
 mod attenuation_properties;
 
+#[cfg(test)]
+mod digest_domains;
+
 /// Canonical textual form of every typed identifier: lowercase hyphenated UUID.
 ///
 /// WHY the schema and the decoder both cite this one constant: `uuid`'s own
@@ -144,9 +147,20 @@ pub struct Digest(#[schemars(length(equal = 64), regex(pattern = "^[0-9a-f]{64}$
 pub struct RuntimeGenerationId(Digest);
 
 impl RuntimeGenerationId {
-    /// Digest arbitrary canonical input bytes into a generation identity.
+    /// Digest arbitrary content bytes into a generation identity.
+    ///
+    /// WARNING: this carries no semantic domain, so it identifies bytes rather
+    /// than a generation. A real generation identity comes from
+    /// [`RuntimeGenerationId::from_digest`] over a
+    /// [`DigestDomain::RuntimeGenerationInputs`] digest; this remains for
+    /// content whose meaning is fixed by its source rather than its type.
     pub fn derive(bytes: &[u8]) -> Self {
         Self(Digest::blake3(bytes))
+    }
+
+    /// Adopt an already domain-separated digest as a generation identity.
+    pub fn from_digest(digest: Digest) -> Self {
+        Self(digest)
     }
 
     /// The canonical digest that identifies the generation.
@@ -167,10 +181,101 @@ impl std::fmt::Display for InvalidDigest {
 
 impl std::error::Error for InvalidDigest {}
 
+/// The semantic class a digest identifies.
+///
+/// WHY a digest carries its domain: `blake3` is a function of bytes alone, so
+/// two records whose encodings coincide receive one identity. Nothing in the
+/// type system prevents that coincidence — `Digest` and `RuntimeGenerationId`
+/// are both `#[serde(transparent)]` over the same hex string and already encode
+/// identically — and a digest here is not a checksum but a binding: the
+/// dispatcher admits an execution assignment by comparing one. Tagging the
+/// domain makes the collision unrepresentable rather than merely unlikely.
+///
+/// Tags are versioned and append-only. Changing one changes every digest in
+/// that domain, which invalidates every stored binding that cites it, so a
+/// changed encoding takes a new tag rather than an edited one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum DigestDomain {
+    /// An admitted evidence record.
+    EvidenceRecord,
+    /// An append-only commissioning provenance record.
+    CommissioningRecord,
+    /// The approved inputs a runtime generation is derived from.
+    ApprovedGenerationInputs,
+    /// The full input set identifying an immutable runtime generation.
+    RuntimeGenerationInputs,
+    /// A typed operation intent presented for authorization.
+    OperationIntent,
+    /// The sealed claims of one dispatcher-issued effect lease.
+    LeaseClaims,
+    /// An execution resource available for bounded work.
+    ExecutionResource,
+    /// An evidence-backed execution-resource capability profile.
+    CapabilityProfile,
+    /// One trusted, time-bounded verification of a capability profile.
+    CapabilityVerification,
+    /// A time-bounded execution-resource availability snapshot.
+    AvailabilitySnapshot,
+    /// The hard and soft requirements a routed operation declares.
+    ExecutionRequirement,
+    /// One evidence-bearing resource selection or escalation.
+    RoutingDecision,
+    /// The exact resource binding admitted for one routed operation.
+    ExecutionAssignment,
+}
+
+impl DigestDomain {
+    /// The stable wire tag mixed into every digest of this domain.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            DigestDomain::EvidenceRecord => "evidence_record_v1",
+            DigestDomain::CommissioningRecord => "commissioning_record_v1",
+            DigestDomain::ApprovedGenerationInputs => "approved_generation_inputs_v1",
+            DigestDomain::RuntimeGenerationInputs => "runtime_generation_inputs_v1",
+            DigestDomain::OperationIntent => "operation_intent_v1",
+            DigestDomain::LeaseClaims => "lease_claims_v1",
+            DigestDomain::ExecutionResource => "execution_resource_v1",
+            DigestDomain::CapabilityProfile => "capability_profile_v1",
+            DigestDomain::CapabilityVerification => "capability_verification_v1",
+            DigestDomain::AvailabilitySnapshot => "availability_snapshot_v1",
+            DigestDomain::ExecutionRequirement => "execution_requirement_v1",
+            DigestDomain::RoutingDecision => "routing_decision_v1",
+            DigestDomain::ExecutionAssignment => "execution_assignment_v1",
+        }
+    }
+}
+
+/// A record encoded together with the domain it belongs to.
+#[derive(Serialize)]
+struct Domained<'a, T: Serialize> {
+    kind: &'static str,
+    value: &'a T,
+}
+
 impl Digest {
     /// Hash bytes with blake3 and return the hex digest.
+    ///
+    /// WARNING: this identifies *content*, not a record. Two records that encode
+    /// to the same bytes receive the same digest here, which is why every typed
+    /// record uses [`Digest::of`] instead. Reserve this for opaque bytes whose
+    /// meaning is fixed by where they came from — a file, an executable, a
+    /// policy bundle — rather than by their type.
     pub fn blake3(bytes: &[u8]) -> Self {
         Self(blake3::hash(bytes).to_hex().to_string())
+    }
+
+    /// Digest a typed record under its semantic domain.
+    ///
+    /// # Errors
+    ///
+    /// Returns the JSON encoding failure if the record cannot be represented.
+    pub fn of<T: Serialize>(domain: DigestDomain, value: &T) -> Result<Self, serde_json::Error> {
+        serde_json::to_vec(&Domained {
+            kind: domain.tag(),
+            value,
+        })
+        .map(|bytes| Self::blake3(&bytes))
     }
 
     /// The canonical lowercase hexadecimal representation.
