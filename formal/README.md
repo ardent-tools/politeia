@@ -57,7 +57,10 @@ assumes otherwise will over-trust a green run.
   authorized, reserved and leased -- not *which* delegation, budget or lease it
   was bound to. "No effect without a lease" is modelled; "no effect except under
   the exact lease issued for this intent" is not, and that is the substance of
-  REQ-02. `crates/politeia-runtime/src/tests/replay.rs` tests it.
+  REQ-02 and of `docs/02-CONSTITUTION.md` law 8.
+  `crates/politeia-runtime/src/tests/replay.rs` tests it, and #46 is the work to
+  model it -- unlike the other entries here, this one is a gap to close rather
+  than an abstraction the models deliberately make.
 - **A reissue's own outcome.** `EffectAmbiguity` covers one effect subject
   through one ambiguity episode and the grounded reissue that follows it. The
   reissue's resolution is out of scope: `resolution`, `receiptBound`,
