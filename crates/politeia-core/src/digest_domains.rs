@@ -173,19 +173,58 @@ fn golden_vectors_pin_the_envelope_encoding() {
     // Regenerating them is a deliberate act: it means every digest of that
     // domain has moved.
     let expected: BTreeMap<&'static str, &'static str> = BTreeMap::from([
-        ("approved_generation_inputs_v1", "GOLDEN"),
-        ("availability_snapshot_v1", "GOLDEN"),
-        ("capability_profile_v1", "GOLDEN"),
-        ("capability_verification_v1", "GOLDEN"),
-        ("commissioning_record_v1", "GOLDEN"),
-        ("evidence_record_v1", "GOLDEN"),
-        ("execution_assignment_v1", "GOLDEN"),
-        ("execution_requirement_v1", "GOLDEN"),
-        ("execution_resource_v1", "GOLDEN"),
-        ("lease_claims_v1", "GOLDEN"),
-        ("operation_intent_v1", "GOLDEN"),
-        ("routing_decision_v1", "GOLDEN"),
-        ("runtime_generation_inputs_v1", "GOLDEN"),
+        (
+            "approved_generation_inputs_v1",
+            "7bc7ceb965936bbbcb1e0317241dcc46ca6042aaf071c50ac4c491d0248a4d97",
+        ),
+        (
+            "availability_snapshot_v1",
+            "b4f43e3ddf90230e6e1ea8429b22ca34e6bfc7ba31e1243ff1450a4a81032fcf",
+        ),
+        (
+            "capability_profile_v1",
+            "afe5f1a279000f6f9c01277795188f3e1c4a1b77399244c4c519b9485e3845eb",
+        ),
+        (
+            "capability_verification_v1",
+            "d4fbd01dd61ccf68ae0b0d1965ebab8250c4386942e9377226d1fb76dc2f590b",
+        ),
+        (
+            "commissioning_record_v1",
+            "5808d5de9a2b36823baf452544b83261fadb84c4b204f7bad0202ecf9fefd97f",
+        ),
+        (
+            "evidence_record_v1",
+            "b7196a02ce671f7af44204d3e8d3b83e4314b633994d39eb57ba079bbc734aeb",
+        ),
+        (
+            "execution_assignment_v1",
+            "e02a9ba46364ac05e428241e69e22d8ee1b870bd941f4b996d31972687e5a13c",
+        ),
+        (
+            "execution_requirement_v1",
+            "a451cabc0a66e4ae816dee9d7526c4eda81cdd191410ef6b11afede9d4a799c2",
+        ),
+        (
+            "execution_resource_v1",
+            "6e63e3bc9c273067c484b2841b2be681e517f2b02f8dfd4bd6764209d5489d66",
+        ),
+        (
+            "lease_claims_v1",
+            "037a56021021a8195d73380ece70673ceb470acda98cfbcfb431a84056f6cb0c",
+        ),
+        (
+            "operation_intent_v1",
+            "e5fadd59e9d9b38a3f936f56c0b8640eb43fc41d7a1985905a80e9074fc0a8e5",
+        ),
+        (
+            "routing_decision_v1",
+            "ac9f98d4aa6dced8c5c11b84972d77235f8cbbb4d3a1e0c66f2da9294c894e54",
+        ),
+        (
+            "runtime_generation_inputs_v1",
+            "2d087b07cccde1ce126575aad94610fb0be4a323d0074f4af0e7162c7c8eb78d",
+        ),
     ]);
 
     let actual: BTreeMap<&'static str, String> = all_domains()
