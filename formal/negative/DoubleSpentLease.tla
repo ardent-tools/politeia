@@ -19,8 +19,8 @@ BrokenNext ==
     \/ Next
     \/ /\ state \in {Running, Candidate} /\ effects < MaxAttempts
        /\ state' = Running
-       /\ leaseSpent' = TRUE /\ effects' = effects + 1
-       /\ UNCHANGED <<authorized, reserved, leased, denied>>
+       /\ leaseSpent' = TRUE /\ effects' = effects + 1 /\ effectFor' = intent
+       /\ UNCHANGED <<intent, authorized, reserved, leased, denied>>
 
 BrokenSpec == Init /\ [][BrokenNext]_vars
 
