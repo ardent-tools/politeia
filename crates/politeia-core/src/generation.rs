@@ -1,5 +1,6 @@
 //! Deterministic specialization inputs and runtime-generation identity.
 
+use crate::canonical::{CanonicalError, to_canonical_bytes};
 use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
@@ -126,7 +127,7 @@ impl ApprovedGenerationInputs {
     /// Returns the JSON encoding failure if the plan cannot be represented.
     ///
     /// Time: O(n). Space: O(n), where n is the encoded plan size.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::ApprovedGenerationInputs, self)
     }
 }
@@ -179,7 +180,7 @@ pub enum RuntimeGenerationError {
         field: &'static str,
     },
     /// Canonical JSON encoding failed.
-    Encoding(serde_json::Error),
+    Encoding(CanonicalError),
 }
 
 impl std::fmt::Display for RuntimeGenerationError {
@@ -356,12 +357,12 @@ impl RuntimeGeneration {
     ///
     /// # Errors
     ///
-    /// Returns the JSON encoding failure if the typed generation cannot be
-    /// serialized.
+    /// Returns the canonical-encoding failure if the typed generation cannot be
+    /// represented.
     ///
     /// Time: O(n). Space: O(n), where n is the encoded manifest size.
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CanonicalError> {
+        to_canonical_bytes(self)
     }
 }
 

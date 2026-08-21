@@ -1,5 +1,6 @@
 //! Institution ownership, trust-domain, role, and workspace contracts.
 
+use crate::canonical::{CanonicalError, to_canonical_bytes};
 use std::collections::BTreeSet;
 
 use schemars::JsonSchema;
@@ -164,8 +165,8 @@ impl InstitutionWorkspace {
     /// represented canonically.
     ///
     /// Time: O(n). Space: O(n), where n is the canonical manifest size.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(self).map(|bytes| Digest::blake3(&bytes))
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
+        to_canonical_bytes(self).map(|bytes| Digest::blake3(&bytes))
     }
 }
 
