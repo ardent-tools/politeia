@@ -203,6 +203,10 @@ fn golden_vectors_pin_the_envelope_encoding() {
             "d84ab38efeca1e23795ebf20383dee9ccf9634f26a93897971b38787658c7b4a",
         ),
         (
+            "transition_journal_entry_v1",
+            "556e0755add52648fcb77fd43c058b45eb223ffeff9aceac5a73df4a8482d242",
+        ),
+        (
             "runtime_generation_inputs_v1",
             "eb9474a0fb0567cd22293ee474111dc6d66c75776d763277a832901b2aa24d2c",
         ),

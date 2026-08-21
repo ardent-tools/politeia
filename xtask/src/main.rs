@@ -156,6 +156,14 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "reconnaissance authoring surface; publication waits on the first vertical slice",
     },
     WithheldSchema {
+        type_name: "politeia_core::journal::TransitionEntry",
+        reason: "institution transition journal; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::journal::ChainedEntry",
+        reason: "projected as part of the journal; no standalone wire consumer",
+    },
+    WithheldSchema {
         type_name: "politeia_core::state::StateEntry",
         reason: "institution operational state; publication waits on the first vertical slice",
     },
