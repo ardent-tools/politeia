@@ -393,6 +393,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "Exact routing requirement that must produce an admitted execution\nassignment before this operation may be authorized."
         },
         "id": {
@@ -536,6 +537,7 @@
           "type": "null"
         }
       ],
+      "default": null,
       "description": "Exact resource selection bound before policy evaluation, when the work\nrequires an external execution resource."
     },
     "idempotency_key": {
