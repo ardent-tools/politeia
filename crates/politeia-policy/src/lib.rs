@@ -6,9 +6,13 @@
 
 #![deny(missing_docs)]
 
+pub mod hardening;
+
 use politeia_core::{Digest, PolicyBundleId, PrincipalId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use hardening::BindingAuthority;
 
 /// The kind of a normative clause.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -73,11 +77,28 @@ pub struct DetectorSpec {
     /// Its known blind spots.
     pub known_blind_spots: Vec<String>,
     /// Whether it has been calibrated against adversarial fixtures.
-    pub calibrated: bool,
+    ///
+    /// WHY the qualifier: a bare `calibrated` collided with
+    /// [`hardening::HardeningState::Calibrated`], a rung of a binding's climb
+    /// toward blocking authority. The two are different facts about different
+    /// subjects -- `06-POLICY_COMPILER.md` is explicit that blocking authority
+    /// belongs to the binding and is not inherent in the detector -- and a
+    /// shared word made them read as one.
+    pub adversarially_calibrated: bool,
 }
 
-/// The consequence a binding applies when its clause is evaluated.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+/// The consequence a binding applies when its clause is evaluated, from
+/// weakest to strongest.
+///
+/// WHY the ordering is derived rather than written out: declaration order *is*
+/// the severity order, and [`hardening::HardeningState::authorises`] compares
+/// with `<=` against the strongest consequence a rung permits. A second,
+/// hand-kept severity table would be the same fact in two places, free to
+/// disagree. `hardening`'s tests assert the order so a reordering cannot
+/// silently redefine what every rung permits.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 pub enum Consequence {
     /// Record only.
     Informational,
@@ -91,7 +112,7 @@ pub enum Consequence {
 
 /// Where a clause applies, which detectors produce admissible evidence, and
 /// what consequence follows.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyBinding {
     /// Binding identity.
@@ -102,8 +123,14 @@ pub struct PolicyBinding {
     pub detector_ids: Vec<String>,
     /// The scope the binding applies to.
     pub scope: String,
-    /// The consequence on evaluation.
-    pub consequence: Consequence,
+    /// The rung this binding has climbed to, and the consequence that rung
+    /// authorises it to apply.
+    ///
+    /// The two travel together because neither is meaningful alone: a
+    /// consequence without the climb behind it is an assertion of authority the
+    /// binding has not earned, and [`BindingAuthority`] is what makes that pair
+    /// unrepresentable rather than merely discouraged.
+    pub authority: BindingAuthority,
 }
 
 /// A normalized authorization/governance result.

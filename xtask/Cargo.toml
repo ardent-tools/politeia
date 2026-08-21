@@ -11,6 +11,7 @@ serde_json.workspace = true
 schemars.workspace = true
 politeia-core.workspace = true
 politeia-evidence.workspace = true
+politeia-policy.workspace = true
 politeia-runtime.workspace = true
 politeia-sdk.workspace = true
 
