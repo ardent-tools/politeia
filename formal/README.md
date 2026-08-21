@@ -13,7 +13,7 @@ gets misread is by being quoted without its configuration.
 | Path | What it is |
 |---|---|
 | `Delegation.tla` / `.cfg` | Monotonic delegation: a grant may narrow its parent on every authority axis, never exceed it. |
-| `Workflow.tla` / `.cfg` | The protected-operation path: authorization, budget reservation, single-use lease, execution, the evidence states that follow it, denial, and retry. |
+| `Workflow.tla` / `.cfg` | The protected-operation path: authorization, budget reservation, single-use lease, execution, the evidence states that follow it, denial, and retry -- each bound to the intent it was granted for. |
 | `EffectAmbiguity.tla` / `.cfg` | Ambiguous effect execution: delivery state, execution outcome, epistemic resolution and replay disposition as four separate facts, with reconciliation and compensation. |
 | `EffectAmbiguityIdempotentTarget.tla` / `.cfg` | The same model under `TargetEnforcesIdempotency = TRUE`, where the easiest ground for replay is always available and the other rules have to hold anyway. |
 | `Authority.tla` / `.cfg` | Authority as a claim about a moment and a scope: expiry and revocation as events that happen while work is in flight, and nested reauthorization that cannot outlive what it derives from. |
@@ -33,7 +33,7 @@ thing to weigh when reading a result.
 | `actions`, `resources`, `effects`, `dataClasses`, `audience` | the matching `BTreeSet` fields | Element identity. The model uses model values; the Rust types use strings and enums, one of which (`DataClass::ClientRestricted`) carries a payload that participates in equality. |
 | `expiresAt` in `0..MaxExpiry` | `expires_at: jiff::Timestamp` | Real time. The model needs only an order. |
 | `grants` as a set | the trusted delegation registry | Identity and issuer/subject linkage. `DispatcherConfig::new` enforces those separately, and they are not width axes. |
-| `Workflow`'s `state`, `authorized`, `reserved`, `leased`, `denied` | the dispatcher's authorize / reserve / lease / execute path | Identity. The model records *that* each step happened, not *which* delegation, budget or lease it happened against. Exactness of those bindings is tested in `politeia-runtime`, not modelled. |
+| `Workflow`'s `state`, `authorized`, `reserved`, `leased`, `denied` | the dispatcher's authorize / reserve / lease / execute path | Which delegation, budget or lease. The model binds each step to the *intent* it was granted for, which is what makes substitution expressible; it does not carry the identities of the grants themselves. |
 | `EffectAmbiguity`'s `delivery`, `outcome`, `resolution`, `replay` | the rules in `docs/11-FAILURE_SEMANTICS.md` | **Everything below the rules.** There is no Rust counterpart yet: the effect state machine this constrains is unimplemented, and the document requires it to define legal ambiguity and reconciliation transitions before the disconnected path is built. This model is that definition, ahead of the code rather than behind it. |
 | `overlap` | the canonical effect-subject derivation | The derivation itself. The model has a three-valued answer -- no overlap, overlaps, uncertain -- and says nothing about how a subject is derived from target, operation, resources and normalized parameters. |
 | `Authority`'s `clock` | the ledger's authoritative time | Real time and its granularity. The model needs only a monotone sequence of moments in which a lease can be issued at one and spent at another. |
@@ -53,14 +53,11 @@ assumes otherwise will over-trust a green run.
   three deep, is a different question -- as with `Delegation`'s bounded grant
   set, the relation is checked pairwise and depth is recovered by transitivity
   rather than by exploring it.
-- **Exactness of binding.** `Workflow` records *that* an operation was
-  authorized, reserved and leased -- not *which* delegation, budget or lease it
-  was bound to. "No effect without a lease" is modelled; "no effect except under
-  the exact lease issued for this intent" is not, and that is the substance of
-  REQ-02 and of `docs/02-CONSTITUTION.md` law 8.
-  `crates/politeia-runtime/src/tests/replay.rs` tests it, and #46 is the work to
-  model it -- unlike the other entries here, this one is a gap to close rather
-  than an abstraction the models deliberately make.
+- **Grant identity.** `Workflow` binds each step to the intent it was granted
+  for, so "no effect except under the lease issued for this intent" is modelled.
+  What is not is *which* delegation, budget or lease object satisfied it: a
+  second lease issued for the same intent is indistinguishable from the first.
+  `crates/politeia-runtime/src/tests/replay.rs` covers that in Rust.
 - **A reissue's own outcome.** `EffectAmbiguity` covers one effect subject
   through one ambiguity episode and the grounded reissue that follows it. The
   reissue's resolution is out of scope: `resolution`, `receiptBound`,
@@ -90,7 +87,14 @@ and violated across three. Root-to-leaf attenuation is recovered by checking
 that the narrowing relation is transitive — `NarrowsCapIsTransitive`, exhaustive
 over the modelled cap domain — rather than by exploring deep chains.
 
-Every constant set is a single element. That is the smallest configuration in
+`Workflow` carries two intents. That is the smallest set in which a
+substitution exists at all: with one, `ExecutesUnderItsOwnGrant` would be true
+by construction and `CrossIntentLease` could not be written. The model runs one
+operation about one of them, so the second exists as a value a substitution can
+name rather than as concurrent work -- two operations racing is the concurrency
+question below, not this one.
+
+Every constant set in `Delegation` is a single element. That is the smallest configuration in
 which each axis can still be widened, and widening is what the invariants exist
 to refuse. **The sets must stay non-empty**: `EveryAxisIsChecked` widens each
 axis to its full constant, so an empty constant makes that widening a no-op and
@@ -121,6 +125,7 @@ So each planted defect is checked in and CI requires a rejection:
 | `SlackCap` | one unit of cap slack against a positive parent cap | `NarrowsCapIsTransitive` |
 | `UnattenuatedChild` | a child admitted without narrowing at all | `Monotonic` |
 | `UnspentLeaseEffect` | an effect that runs without spending its lease | `EffectsRequireASpentLease` |
+| `CrossIntentLease` | an effect run under another intent's lease | `ExecutesUnderItsOwnGrant` |
 | `AcknowledgedMeansRan` | acknowledgement written as an execution outcome | `OutcomeRequiresEvidence` |
 | `UnresolvedReadsAsNotRun` | evidence gathered, an outcome recorded, resolution never reached | `UnresolvedIsNotAnOutcome` |
 | `LocalKeyGrantsReplay` | a locally minted identifier treated as grounds for replay | `ReplayNeedsGrounds` |
