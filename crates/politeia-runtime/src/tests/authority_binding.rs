@@ -250,3 +250,96 @@ fn a_registry_child_removing_a_budget_cap_is_refused() {
         child.budget.wall_ms = None;
     });
 }
+
+// --- Execution-assignment binding --------------------------------------------
+//
+// Two arms of the (requirement, assignment) match had no test. Both are
+// fail-closed refusals rather than comparisons, which is exactly the kind of
+// branch that looks obviously correct and is never run.
+
+/// Assert the execution-assignment guard refuses, naming the reason.
+async fn assert_execution_refused(expected_reason: &str, fixture: &Fixture) {
+    let result = fixture.dispatcher.authorize(&fixture.intent).await;
+    match result {
+        Err(RuntimeError::InvalidExecutionAssignment { reason, .. }) => assert_eq!(
+            reason, expected_reason,
+            "an execution-assignment guard refused, but not the one under test"
+        ),
+        Err(other) => panic!("expected an execution-assignment refusal, got {other:?}"),
+        Ok(_) => panic!("an invalid execution assignment was authorized: {expected_reason}"),
+    }
+    assert_eq!(
+        fixture.dispatcher.port.call_count(),
+        0,
+        "a refused authorization must not reach the effect port"
+    );
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "the assignment fixture uses canonical trust-domain identities"
+)]
+fn assignment(fixture: &Fixture, requirement_digest: Digest, expires_at: Timestamp) -> routing::ExecutionAssignment {
+    routing::ExecutionAssignment {
+        resource: ExecutionResourceId::new(),
+        resource_digest: Digest::blake3(b"resource"),
+        adapter: fixture.dispatcher.adapter.clone(),
+        trust_domain: "client-a:production"
+            .parse()
+            .expect("fixture trust domain is canonical"),
+        control_domain: "client-a:production"
+            .parse()
+            .expect("fixture trust domain is canonical"),
+        locality: ExecutionLocality::ClientLocal,
+        capability_profile: CapabilityProfileId::new(),
+        capability_profile_digest: Digest::blake3(b"profile"),
+        routing_decision: RoutingDecisionId::new(),
+        requirement_digest,
+        routing_decision_digest: Digest::blake3(b"decision"),
+        availability_snapshot_digest: Digest::blake3(b"availability"),
+        expires_at,
+    }
+}
+
+#[tokio::test]
+async fn an_assignment_on_an_operation_that_admits_none_is_refused() {
+    // The operation declares no execution requirement, so supplying an
+    // assignment is not a mismatch to compare -- it is a claim the contract
+    // cannot make sense of, and the arm exists to refuse rather than ignore it.
+    let mut fixture = fixture();
+    fixture.intent.execution = Some(assignment(
+        &fixture,
+        Digest::blake3(b"unrequested requirement"),
+        fixture.now + SignedDuration::from_mins(5),
+    ));
+
+    assert_execution_refused("operation contract does not admit an execution resource", &fixture)
+        .await;
+}
+
+#[tokio::test]
+async fn a_trusted_assignment_past_its_own_expiry_is_refused() {
+    // Everything here is admitted and exact: the requirement digest matches, the
+    // assignment is in the trusted bootstrap, the adapter is right. Only time has
+    // moved, which is the one axis a substituted-identity test cannot reach.
+    let mut fixture = fixture();
+    let requirement_digest = Digest::blake3(b"required routing contract");
+    fixture.intent.operation.execution_requirement = Some(requirement_digest.clone());
+    fixture.dispatcher.config.trusted_operations.insert(
+        fixture.intent.operation.id.clone(),
+        fixture.intent.operation.clone(),
+    );
+
+    // Expiring exactly at `now`: the guard is `now < expires_at`, so the instant
+    // of expiry is already too late. Testing a comfortably-past instant would
+    // leave the boundary itself unexercised.
+    let expired = assignment(&fixture, requirement_digest, fixture.now);
+    fixture
+        .dispatcher
+        .config
+        .trusted_execution_assignments
+        .insert(expired.routing_decision.clone(), expired.clone());
+    fixture.intent.execution = Some(expired);
+
+    assert_execution_refused("routing assignment is expired", &fixture).await;
+}
