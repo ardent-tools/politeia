@@ -30,11 +30,5 @@ pub(super) fn compare_resources(
 }
 
 fn locality_rank(locality: &ExecutionLocality) -> u8 {
-    match locality {
-        ExecutionLocality::ClientLocal => 0,
-        ExecutionLocality::ClientRemote => 1,
-        ExecutionLocality::ProviderRemote => 2,
-        ExecutionLocality::CommissionerLocal => 3,
-        ExecutionLocality::Other => 4,
-    }
+    locality.client_control_rank()
 }

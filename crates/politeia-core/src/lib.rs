@@ -473,6 +473,57 @@ pub enum DataClass {
     ClientRestricted(String),
 }
 
+// WHY this lives beside `DataClass` and `Effect` rather than with routing:
+// `docs/16-DATA_GOVERNANCE.md` makes locality a hard policy axis over the data
+// class, operation, execution resource, trust domain, and sink. Routing is one
+// consumer of that axis and the governance layer is another, and the governance
+// layer is upstream -- a definition in the routing crate is out of reach of
+// everything that needs to reason about a boundary crossing.
+//
+// WARNING: this reasoning is a `//` comment and not a `///` one on purpose. The
+// doc comment below is projected verbatim into `description` in every published
+// schema that references this type, so it is public API for schema consumers.
+// Which Rust crate a type lives in is not something they can act on, and the
+// derived-spec check is what caught it being told to them.
+/// Where an execution resource operates relative to the client trust domain.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionLocality {
+    /// Runs inside the client-controlled local environment.
+    ClientLocal,
+    /// Runs in a remote environment controlled by the client.
+    ClientRemote,
+    /// Runs in a remote provider-controlled environment.
+    ProviderRemote,
+    /// Runs on commissioner-controlled infrastructure.
+    CommissionerLocal,
+    /// Other explicitly modeled locality.
+    Other,
+}
+
+impl ExecutionLocality {
+    /// How close this locality is to client control, lowest first.
+    ///
+    /// WHY the ordering lives with the type rather than with the routing code
+    /// that sorts by it: it is a property of the locality -- how much of the
+    /// environment the client controls -- and not of any one consumer's policy.
+    /// Keeping it here also keeps the match exhaustive. `ExecutionLocality` is
+    /// `#[non_exhaustive]`, so a consumer in another crate cannot match it
+    /// exhaustively and must write a catch-all; a new variant would then take
+    /// whatever rank that arm happened to give it, silently. Here a new variant
+    /// stops the build until someone places it.
+    pub const fn client_control_rank(&self) -> u8 {
+        match self {
+            ExecutionLocality::ClientLocal => 0,
+            ExecutionLocality::ClientRemote => 1,
+            ExecutionLocality::ProviderRemote => 2,
+            ExecutionLocality::CommissionerLocal => 3,
+            ExecutionLocality::Other => 4,
+        }
+    }
+}
+
 /// Bounded consumption limits on a delegation or operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
