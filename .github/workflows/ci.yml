@@ -15,23 +15,53 @@ concurrency:
 
 jobs:
   msrv:
-    name: msrv (1.85.0)
+    # WHY the name carries no version: it is a required status context, and a
+    # required context is matched by name. A version in the name means bumping
+    # the toolchain renames the check, so branch protection then waits forever
+    # on a context nothing produces -- or, worse, the requirement lapses
+    # silently because the name it guarded no longer exists. The version the
+    # job actually ran is in its log and in the step below.
+    name: msrv
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # The one place the MSRV patch level is written. `Cargo.toml` declares the
+      # minor version; this pins which patch of it CI proves, and the step below
+      # fails if the two ever disagree.
+      MSRV_TOOLCHAIN: "1.85.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Require the pinned toolchain to be the declared MSRV
+        shell: bash
+        run: |
+          declared="$(sed -n 's/^rust-version = "\([^"]*\)"$/\1/p' Cargo.toml)"
+          test -n "${declared}"
+          echo "Cargo.toml declares rust-version ${declared}; CI proves ${MSRV_TOOLCHAIN}"
+          case "${MSRV_TOOLCHAIN}" in
+            "${declared}".*|"${declared}") ;;
+            *)
+              echo "::error::CI pins ${MSRV_TOOLCHAIN} but Cargo.toml declares \
+          rust-version ${declared}; one of the two is wrong and the green check \
+          would be about a toolchain nobody promised"
+              exit 1
+              ;;
+          esac
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: "1.85.0"
+          toolchain: ${{ env.MSRV_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
-          key: msrv-1.85.0
-      - run: cargo +1.85.0 check --workspace --all-targets --locked
+          key: msrv-${{ env.MSRV_TOOLCHAIN }}
+      - run: cargo +${{ env.MSRV_TOOLCHAIN }} check --workspace --all-targets --locked
 
   rust:
-    name: rust (1.97.1)
+    # Same reason as `msrv` above, and sharper here: this job already *derives*
+    # its toolchain from `rust-toolchain.toml`, so a version in the name was a
+    # restatement of a fact the job reads at run time. After a bump it would not
+    # merely go stale -- it would name a toolchain the job did not use.
+    name: rust
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -49,6 +79,9 @@ jobs:
         with:
           toolchain: ${{ steps.repository-toolchain.outputs.channel }}
           components: rustfmt, clippy
+      - name: Record the toolchain under test
+        shell: bash
+        run: cargo --version && rustc --version
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       # --locked everywhere: a stale Cargo.lock fails fast at the step that
       # needed it rather than surfacing as a dirty-tree failure at the end.
@@ -57,48 +90,28 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - id: derive-schemas
-        name: Derive public schemas
+        name: Derive public projections
         shell: bash
         run: |
           cargo run -p xtask --locked -- derive
           schema_status="$(git status --porcelain=v1 --untracked-files=all -- \
-            spec/extension-manifest.schema.json \
-            spec/semantic-operation.schema.json \
-            spec/institution-workspace.schema.json \
-            spec/commissioning-record.schema.json \
-            spec/runtime-generation.schema.json \
-            spec/execution-resource.schema.json \
-            spec/execution-requirement.schema.json \
-            spec/capability-profile.schema.json \
-            spec/capability-verification.schema.json \
-            spec/availability-snapshot.schema.json \
-            spec/routing-decision.schema.json \
-            spec/lifecycle-transition.schema.json \
-            spec/handoff-receipt.schema.json)"
+            spec)"
           if [[ -z "$schema_status" ]]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Upload stale schema replacements
+      - name: Upload stale projection replacements
         if: steps.derive-schemas.outputs.changed == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
-          name: politeia-generated-schemas-${{ github.sha }}
-          path: |
-            spec/extension-manifest.schema.json
-            spec/semantic-operation.schema.json
-            spec/institution-workspace.schema.json
-            spec/commissioning-record.schema.json
-            spec/runtime-generation.schema.json
-            spec/execution-resource.schema.json
-            spec/execution-requirement.schema.json
-            spec/capability-profile.schema.json
-            spec/capability-verification.schema.json
-            spec/availability-snapshot.schema.json
-            spec/routing-decision.schema.json
-            spec/lifecycle-transition.schema.json
-            spec/handoff-receipt.schema.json
+          name: politeia-generated-projections-${{ github.sha }}
+          # The whole directory rather than a list of thirteen paths. The list
+          # was a second copy of `generated_specs()` and had already fallen
+          # behind: the two derived tables were absent, so a contributor whose
+          # `policy-lifecycle.yaml` or `canonical-vectors.json` drifted got a
+          # failure and an artifact missing the file they needed.
+          path: spec
           if-no-files-found: error
           retention-days: 7
       - run: cargo run -p xtask --locked -- check
