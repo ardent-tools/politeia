@@ -92,10 +92,13 @@
       "description": "Exact institution-approved inputs from which specialization may derive a generation.\n\nKeeping these axes in one canonical value prevents a commissioner from preserving\nthe approved model and policy while substituting an adapter, pack, schema, topology,\ntoolchain, or weaker reproducibility posture during derivation.",
       "properties": {
         "adapter_digests": {
-          "additionalProperties": {
-            "$ref": "#/$defs/Digest"
-          },
+          "additionalProperties": false,
           "description": "Trusted adapters included in the generation.",
+          "patternProperties": {
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$": {
+              "$ref": "#/$defs/Digest"
+            }
+          },
           "type": "object"
         },
         "component_digests": {
@@ -182,6 +185,7 @@
         "revoked_at": {
           "description": "Trusted revocation time, when already revoked.",
           "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
           "type": [
             "string",
             "null"
@@ -190,6 +194,7 @@
         "valid_from": {
           "description": "Beginning of the trusted grant interval.",
           "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
           "type": "string"
         },
         "workspace": {
@@ -255,6 +260,7 @@
     "CommissioningRecordId": {
       "description": "Identity of one append-only commissioning provenance record.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "DataClass": {
@@ -358,6 +364,7 @@
         "expires_at": {
           "description": "Expiry instant (fail-closed at and after this time).",
           "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
           "type": "string"
         },
         "id": {
@@ -409,6 +416,7 @@
     "DelegationId": {
       "description": "Identity of a delegation from one authority context to another.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "DeploymentTopology": {
@@ -496,6 +504,7 @@
     "EvidenceId": {
       "description": "Identity of a provenance-bearing evidence record admitted for a claim.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "EvidenceRecord": {
@@ -517,6 +526,7 @@
         "observed_at": {
           "description": "Trusted observation time assigned by the admitting evidence store.",
           "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
           "type": "string"
         },
         "payload_digest": {
@@ -581,11 +591,13 @@
     "InstitutionId": {
       "description": "Identity of one institution authority domain.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "InstitutionWorkspaceId": {
       "description": "Identity of one institution-owned commissioning workspace.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "LifecycleProfile": {
@@ -621,11 +633,13 @@
     "PolicyBundleId": {
       "description": "Identity of an immutable policy bundle.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "PrincipalId": {
       "description": "Identity of an actor capable of requesting work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "ReproducibilityContract": {
@@ -682,6 +696,7 @@
         "cpu_ms": {
           "description": "CPU-time limit in milliseconds.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -691,6 +706,7 @@
         "external_cost_microunits": {
           "description": "External spend limit in microunits.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -700,6 +716,7 @@
         "io_bytes": {
           "description": "I/O limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -709,6 +726,7 @@
         "memory_bytes": {
           "description": "Memory limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -718,6 +736,7 @@
         "network_bytes": {
           "description": "Network transfer limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -727,6 +746,7 @@
         "wall_ms": {
           "description": "Wall-clock limit in milliseconds.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -753,6 +773,7 @@
     },
     "captured_at": {
       "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
       "type": "string"
     },
     "commissioner_grant": {

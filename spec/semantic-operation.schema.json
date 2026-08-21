@@ -4,11 +4,13 @@
     "AdapterId": {
       "description": "Identity of an adapter bridging the semantic protocol to an external system.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "CapabilityProfileId": {
       "description": "Identity of an evidence-backed execution-resource capability profile.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "DataClass": {
@@ -112,6 +114,7 @@
         "expires_at": {
           "description": "Expiry instant (fail-closed at and after this time).",
           "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
           "type": "string"
         },
         "id": {
@@ -163,6 +166,7 @@
     "DelegationId": {
       "description": "Identity of a delegation from one authority context to another.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "Digest": {
@@ -254,6 +258,7 @@
         "expires_at": {
           "description": "Assignment expiry; authorization may narrow but never extend it.",
           "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
           "type": "string"
         },
         "locality": {
@@ -335,11 +340,13 @@
     "ExecutionResourceId": {
       "description": "Identity of a model, deterministic tool, human, or service available for bounded work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "OperationId": {
       "description": "Identity of a typed operation contract.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "OperationSpec": {
@@ -420,6 +427,7 @@
     "PrincipalId": {
       "description": "Identity of an actor capable of requesting work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "ResourceBudget": {
@@ -429,6 +437,7 @@
         "cpu_ms": {
           "description": "CPU-time limit in milliseconds.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -438,6 +447,7 @@
         "external_cost_microunits": {
           "description": "External spend limit in microunits.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -447,6 +457,7 @@
         "io_bytes": {
           "description": "I/O limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -456,6 +467,7 @@
         "memory_bytes": {
           "description": "Memory limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -465,6 +477,7 @@
         "network_bytes": {
           "description": "Network transfer limit in bytes.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -474,6 +487,7 @@
         "wall_ms": {
           "description": "Wall-clock limit in milliseconds.",
           "format": "uint64",
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": [
             "integer",
@@ -486,6 +500,7 @@
     "RoutingDecisionId": {
       "description": "Identity of one evidence-bearing execution-resource selection or escalation.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "TrustDomainId": {

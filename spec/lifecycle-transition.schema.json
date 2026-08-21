@@ -4,16 +4,19 @@
     "DelegationId": {
       "description": "Identity of a delegation from one authority context to another.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "EvidenceId": {
       "description": "Identity of a provenance-bearing evidence record admitted for a claim.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "InstitutionId": {
       "description": "Identity of one institution authority domain.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     },
     "LifecycleProfile": {
@@ -49,6 +52,7 @@
     "PrincipalId": {
       "description": "Identity of an actor capable of requesting work.",
       "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
     }
   },
