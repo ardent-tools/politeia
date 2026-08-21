@@ -19,6 +19,9 @@ pub mod generation;
 pub mod institution;
 pub mod lifecycle;
 
+#[cfg(test)]
+mod attenuation_properties;
+
 /// Canonical textual form of every typed identifier: lowercase hyphenated UUID.
 ///
 /// WHY the schema and the decoder both cite this one constant: `uuid`'s own

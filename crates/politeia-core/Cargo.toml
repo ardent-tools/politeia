@@ -13,6 +13,13 @@ jiff.workspace = true
 blake3.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+# WHY default-features = false: the defaults pull rusty-fork, tempfile and
+# bit-set to run each case in a forked process. These properties are pure
+# functions over plain structs -- nothing to isolate, and a fork per case is
+# cost without a corresponding guarantee.
+proptest = { version = "1", default-features = false, features = ["std"] }
+
 [lints]
 workspace = true
 
