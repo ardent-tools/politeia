@@ -225,8 +225,26 @@ struct LeaseClaims {
 
 /// An unforgeable, single-use authorization to produce effects.
 ///
-/// The private typed claims bind every axis required by the kernel contract;
-/// `claims_digest` detects any substitution before the effect port is called.
+/// The private typed claims bind every axis required by the kernel contract.
+///
+/// WHY unforgeability is not the digest's doing: both fields are private, the
+/// only construction site is [`Dispatcher::authorize`], neither this type nor
+/// [`LeaseClaims`] implements `Deserialize`, and the invocation capability that
+/// follows is move-only. Nothing outside this crate can build, decode, or
+/// mutate a lease, so no digest is what stops it. Crediting the digest with
+/// that would teach the next reader that those guarantees are decorative.
+///
+/// What `claims_digest` does cover is the two places privacy does not reach:
+///
+/// - **Inside this crate**, where `claims` is an ordinary private field a
+///   descendant module can mutate. `has_valid_claims_digest` fails there, and
+///   for a tampered `id` it is the *only* check in the effect path that fails
+///   early — every other bound axis has its own `ensure!`.
+///   `tests::every_bound_axis_rejects_substitution` exercises each one.
+/// - **Across the ledger boundary**, where the digest travels in the
+///   [`ledger::ReservationRequest`] and `claim` requires the recorded
+///   reservation to equal the one presented. That side is a store, possibly in
+///   another process, so the two can genuinely differ.
 pub struct EffectLease {
     claims: LeaseClaims,
     claims_digest: Digest,

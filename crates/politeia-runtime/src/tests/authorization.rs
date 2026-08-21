@@ -265,10 +265,52 @@ async fn lease_binds_every_kernel_contract_axis() {
         "test-runtime",
         "the lease must bind the dispatcher's replay domain"
     );
+}
+
+#[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "the valid fixture must mint a lease before its claims are substituted"
+)]
+async fn a_substituted_claims_digest_is_refused_at_the_ledger() {
+    // The in-process check `Dispatcher::execute` performs compares two values
+    // this process holds, so it catches an in-crate mutation and nothing else.
+    // The ledger is the other side: a store, possibly in another process, where
+    // the value recorded at `reserve` and the value presented at `claim` can
+    // genuinely differ without either being a bug in this crate. Nothing
+    // covered that boundary.
+    let fixture = fixture();
+    let lease = fixture
+        .dispatcher
+        .authorize(&fixture.intent)
+        .await
+        .expect("the valid fixture must authorize");
+    let reservation = lease
+        .reservation_request()
+        .expect("the typed fixture claims must encode");
+
+    let substituted = ledger::ReservationRequest::new(
+        reservation.reservation_id().clone(),
+        reservation.replay_key().clone(),
+        reservation.retains_replay(),
+        reservation.replay_domain().to_string(),
+        reservation.budget_scopes().to_vec(),
+        reservation.requested_budget().clone(),
+        reservation.intent_digest().clone(),
+        reservation.expires_at(),
+        Digest::blake3(b"claims this lease was never issued for"),
+    );
+
     assert!(
-        lease
-            .has_valid_claims_digest()
-            .expect("typed fixture claims must encode"),
-        "the lease must bind its immutable claims digest"
+        matches!(
+            fixture.dispatcher.ledger.claim(&substituted).await,
+            Err(RuntimeError::ReservationMismatch { .. })
+        ),
+        "a reservation whose claims digest does not match the one reserved must fail closed"
+    );
+    assert!(
+        fixture.dispatcher.ledger.claim(&reservation).await.is_ok(),
+        "the unsubstituted reservation must still claim, so the refusal above is \
+         about the digest rather than about the reservation being consumed"
     );
 }
