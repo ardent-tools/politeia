@@ -691,8 +691,9 @@ mod tests {
     )]
     fn the_full_population_is_accepted() {
         let specs = generated_specs().expect("the authoritative schemas must render");
-        reject_unowned_schemas(&specs, &published_dir())
-            .expect("every published schema is owned by the full population");
+        let tables = generated_tables().expect("the authoritative tables must render");
+        reject_unowned_publications(&specs, &tables, &published_dir())
+            .expect("every published file is owned by the full population");
     }
 
     #[test]
