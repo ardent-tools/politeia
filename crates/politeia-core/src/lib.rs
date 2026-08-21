@@ -20,6 +20,7 @@ pub mod generation;
 pub mod institution;
 pub mod knowledge;
 pub mod lifecycle;
+pub mod outbox;
 pub mod reconnaissance;
 pub mod records;
 
