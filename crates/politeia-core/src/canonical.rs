@@ -137,15 +137,15 @@ mod tests {
         clippy::expect_used,
         reason = "a fixture that cannot encode is a broken test, not a finding"
     )]
-    fn canonical(value: serde_json::Value) -> String {
-        String::from_utf8(to_canonical_bytes(&value).expect("the fixture must encode"))
+    fn canonical(value: &serde_json::Value) -> String {
+        String::from_utf8(to_canonical_bytes(value).expect("the fixture must encode"))
             .expect("canonical bytes are UTF-8")
     }
 
     #[test]
     fn object_keys_are_emitted_in_lexicographic_order() {
         assert_eq!(
-            canonical(serde_json::json!({"b": 1, "a": 2, "c": 3})),
+            canonical(&serde_json::json!({"b": 1, "a": 2, "c": 3})),
             r#"{"a":2,"b":1,"c":3}"#
         );
     }
@@ -155,7 +155,7 @@ mod tests {
         // A canonicalizer that sorts only the root looks correct on every flat
         // fixture, and every record here nests.
         assert_eq!(
-            canonical(serde_json::json!({"outer": {"z": 1, "a": [{"y": 1, "x": 2}]}})),
+            canonical(&serde_json::json!({"outer": {"z": 1, "a": [{"y": 1, "x": 2}]}})),
             r#"{"outer":{"a":[{"x":2,"y":1}],"z":1}}"#
         );
     }
@@ -164,8 +164,8 @@ mod tests {
     fn declaration_order_does_not_survive() {
         // The property that matters: two encodings of the same fact converge.
         assert_eq!(
-            canonical(serde_json::json!({"a": 1, "b": 2})),
-            canonical(serde_json::json!({"b": 2, "a": 1}))
+            canonical(&serde_json::json!({"a": 1, "b": 2})),
+            canonical(&serde_json::json!({"b": 2, "a": 1}))
         );
     }
 
@@ -173,17 +173,17 @@ mod tests {
     fn array_order_is_preserved() {
         // Arrays are sequences, not sets. Sorting them would change the value
         // rather than normalise its spelling.
-        assert_eq!(canonical(serde_json::json!([3, 1, 2])), "[3,1,2]");
+        assert_eq!(canonical(&serde_json::json!([3, 1, 2])), "[3,1,2]");
     }
 
     #[test]
     fn null_is_encoded_rather_than_dropped() {
         // An omitted field and a null field must not encode alike: a record that
         // gains an optional field would otherwise digest as it did before.
-        assert_eq!(canonical(serde_json::json!({"a": null})), r#"{"a":null}"#);
+        assert_eq!(canonical(&serde_json::json!({"a": null})), r#"{"a":null}"#);
         assert_ne!(
-            canonical(serde_json::json!({"a": null})),
-            canonical(serde_json::json!({}))
+            canonical(&serde_json::json!({"a": null})),
+            canonical(&serde_json::json!({}))
         );
     }
 
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn integers_at_the_type_boundary_survive() {
         assert_eq!(
-            canonical(serde_json::json!({"max": u64::MAX, "min": i64::MIN})),
+            canonical(&serde_json::json!({"max": u64::MAX, "min": i64::MIN})),
             format!(r#"{{"max":{},"min":{}}}"#, u64::MAX, i64::MIN)
         );
     }
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn strings_keep_the_encoder_own_escaping() {
         assert_eq!(
-            canonical(serde_json::json!({"quote": "a\"b", "tab": "a\tb"})),
+            canonical(&serde_json::json!({"quote": "a\"b", "tab": "a\tb"})),
             r#"{"quote":"a\"b","tab":"a\tb"}"#
         );
     }
