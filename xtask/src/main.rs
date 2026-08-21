@@ -21,6 +21,9 @@ const POLICY_LIFECYCLE_PATH: &str = "spec/policy-lifecycle.yaml";
 /// Where the canonical-encoding reference vectors are published.
 const CANONICAL_VECTORS_PATH: &str = "spec/canonical-vectors.json";
 
+/// Where the assurance coverage register is published.
+const ASSURANCE_COVERAGE_PATH: &str = "spec/assurance-coverage.json";
+
 /// Format version of the published ladder table.
 ///
 /// This versions the *document shape* -- the `states`/`transitions` layout --
@@ -498,11 +501,249 @@ fn render_canonical_vectors() -> anyhow::Result<DerivedTable> {
     })
 }
 
+/// What one acceptance claim has in the tree today.
+///
+/// WHY this is not an assurance record, and says so where it is published:
+/// `docs/12-ASSURANCE_CASE.md` requires an assurance record to bind the exact
+/// identities applicable to its claim -- source commit, institution workspace,
+/// subject, policy, generation, resource, evidence producers, harness version
+/// -- and states outright that *a document, a test name, a green CI run, or an
+/// actor's self-certification is not itself proof of the claim*.
+///
+/// This register is a document naming test names. It is therefore evidence of
+/// nothing except what exists to be exercised, and calling it a receipt would
+/// be exactly the self-certification that sentence forbids. Its value is the
+/// other column: what each claim still needs.
+struct ClaimCoverage {
+    id: &'static str,
+    /// Mechanisms present in the tree that bear on the claim.
+    mechanisms: &'static [&'static str],
+    /// Tests that exercise those mechanisms.
+    ///
+    /// Every one is checked to exist. A cited test that has been renamed or
+    /// deleted fails the build, which is the rot a hand-written assurance case
+    /// suffers silently.
+    exercised_by: &'static [&'static str],
+    /// What stands between this and an assurance record.
+    still_needs: &'static str,
+}
+
+/// The bounded first-slice claims, with what the tree holds for each.
+const CLAIM_COVERAGE: &[ClaimCoverage] = &[
+    ClaimCoverage {
+        id: "POL-A",
+        mechanisms: &["politeia_core::reconnaissance", "politeia_core::knowledge"],
+        exercised_by: &["one_bounded_path_runs_end_to_end"],
+        still_needs: "a real deployment commissioned and handed off from the public distribution; \
+                      no in-memory test can show the absence of private infrastructure",
+    },
+    ClaimCoverage {
+        id: "POL-B",
+        mechanisms: &[
+            "politeia_core::institution::InstitutionBoundary",
+            "politeia_core::outbox",
+            "politeia_core::state",
+        ],
+        exercised_by: &[
+            "foreign_material_is_refused_at_every_hop",
+            "private_material_does_not_reach_a_commissioner_machine_by_default",
+            "an_entry_names_its_value_rather_than_holding_it",
+        ],
+        still_needs: "deployment evidence that the trust domain holds in a real environment, \
+                      which a process-local boundary cannot demonstrate",
+    },
+    ClaimCoverage {
+        id: "POL-C",
+        mechanisms: &["politeia_evidence::HandoffReceipt"],
+        exercised_by: &["handoff_requires_admitted_client_evidence_after_revocation"],
+        still_needs: "a revocation performed against a running generation, showing it keeps running",
+    },
+    ClaimCoverage {
+        id: "POL-D",
+        mechanisms: &[
+            "politeia_core::generation::RuntimeGeneration",
+            "politeia_core::activation",
+        ],
+        exercised_by: &[
+            "identical_inputs_produce_identical_identity_and_bytes",
+            "declared_fields_may_vary_and_others_may_not",
+        ],
+        still_needs: "a specializer that builds an artifact; the kernel proves identity is a \
+                      function of inputs, not that a build is",
+    },
+    ClaimCoverage {
+        id: "POL-E",
+        mechanisms: &["politeia_runtime::routing"],
+        exercised_by: &[
+            "hard_filtering_precedes_ordered_locality_and_cost_preferences",
+            "hard_locality_rejects_a_cheaper_remote_resource",
+        ],
+        still_needs: "two real execution resources with evidence-backed capability profiles",
+    },
+    ClaimCoverage {
+        id: "POL-F",
+        mechanisms: &["politeia_core::ExecutionLocality", "politeia_core::outbox"],
+        exercised_by: &["the_commissioner_rule_applies_to_locality_rather_than_to_a_named_sink"],
+        still_needs: "an inference boundary that exists to be forbidden",
+    },
+    ClaimCoverage {
+        id: "POL-G",
+        mechanisms: &["politeia_runtime::routing"],
+        exercised_by: &[
+            "deterministic_requirement_never_selects_an_available_model",
+            "missing_hard_capability_escalates_instead_of_selecting_closest",
+        ],
+        still_needs: "a deterministic tool and an available model to prefer it over",
+    },
+    ClaimCoverage {
+        id: "POL-H",
+        mechanisms: &["politeia_policy::hardening", "politeia_policy::evaluate"],
+        exercised_by: &[
+            "a_proxy_must_be_calibrated_before_it_may_block",
+            "a_self_reported_verification_cannot_be_attested",
+            "self_verified_or_stale_capability_evidence_is_ineligible",
+        ],
+        still_needs: "calibration performed against real adversarial fixtures rather than declared",
+    },
+    ClaimCoverage {
+        id: "POL-I",
+        mechanisms: &["politeia_core::institution::InstitutionBoundary"],
+        exercised_by: &[
+            "foreign_material_is_refused_at_every_hop",
+            "cross_client_workspace_substitution_is_rejected",
+        ],
+        still_needs: "two institutions built from one public core, showing neither is an input \
+                      to the other",
+    },
+    ClaimCoverage {
+        id: "POL-J",
+        mechanisms: &["politeia_evidence::HandoffReceipt"],
+        exercised_by: &[],
+        still_needs: "a replacement maintainer recommissioning from preserved inputs; nothing in \
+                      the tree bears on this yet",
+    },
+    ClaimCoverage {
+        id: "POL-K",
+        mechanisms: &[],
+        exercised_by: &[],
+        still_needs: "a deployment proving no required external dependency; an absence cannot be \
+                      shown by a type",
+    },
+    ClaimCoverage {
+        id: "POL-L",
+        mechanisms: &[],
+        exercised_by: &[],
+        still_needs: "a control plane to disconnect",
+    },
+];
+
 /// Every published projection that is not a JSON Schema.
+/// Project the acceptance-claim coverage register.
+fn render_assurance_coverage() -> anyhow::Result<DerivedTable> {
+    let claims: Vec<serde_json::Value> = CLAIM_COVERAGE
+        .iter()
+        .map(|coverage| {
+            serde_json::json!({
+                "id": coverage.id,
+                "mechanisms": coverage.mechanisms,
+                "exercised_by": coverage.exercised_by,
+                "still_needs": coverage.still_needs,
+            })
+        })
+        .collect();
+
+    let document = serde_json::json!({
+        "$comment": GENERATED_COMMENT,
+        "not_an_assurance_record": "docs/12-ASSURANCE_CASE.md requires an assurance record to bind the exact identities applicable to its claim, and states that a document, a test name, a green CI run, or an actor's self-certification is not itself proof. This register is a document naming test names. It records what exists to be exercised and what each claim still needs; it proves nothing.",
+        "claims": claims,
+    });
+    let mut bytes = serde_json::to_vec_pretty(&document)?;
+    bytes.push(b'\n');
+
+    Ok(DerivedTable {
+        path: ASSURANCE_COVERAGE_PATH,
+        owner: "xtask::CLAIM_COVERAGE",
+        bytes,
+    })
+}
+
+/// Every `.rs` file under a directory.
+fn walk_rust_sources(root: &Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory)
+            .with_context(|| format!("read {}", directory.display()))?
+        {
+            let path = entry
+                .with_context(|| format!("read an entry of {}", directory.display()))?
+                .path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("rs") {
+                found.push(path);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Fail when the register cites a claim or a test that does not exist.
+///
+/// WHY both directions: a register citing a deleted test reads as coverage that
+/// is gone, and a first-slice claim with no entry here reads as a claim nobody
+/// has considered. The first goes stale silently; the second is invisible by
+/// construction.
+///
+/// This caught its own author. Two of the test names first written into the
+/// register did not exist, because they were what a test ought to be called
+/// rather than what one was.
+fn reject_unanchored_assurance_claims() -> anyhow::Result<()> {
+    let case =
+        std::fs::read_to_string("docs/12-ASSURANCE_CASE.md").context("read the assurance case")?;
+
+    let mut sources = String::new();
+    for entry in walk_rust_sources(Path::new("crates"))? {
+        sources.push_str(
+            &std::fs::read_to_string(&entry)
+                .with_context(|| format!("read {} while checking cited tests", entry.display()))?,
+        );
+    }
+
+    let declared: BTreeSet<&str> = CLAIM_COVERAGE.iter().map(|c| c.id).collect();
+    for id in [
+        "POL-A", "POL-B", "POL-C", "POL-D", "POL-E", "POL-F", "POL-G", "POL-H", "POL-I", "POL-J",
+        "POL-K", "POL-L",
+    ] {
+        anyhow::ensure!(
+            case.contains(id),
+            "{id} is registered here but absent from docs/12-ASSURANCE_CASE.md"
+        );
+        anyhow::ensure!(
+            declared.contains(id),
+            "{id} is a first-slice claim with no coverage entry; an unconsidered claim is \
+             invisible rather than absent"
+        );
+    }
+
+    for coverage in CLAIM_COVERAGE {
+        for test in coverage.exercised_by {
+            anyhow::ensure!(
+                sources.contains(&format!("fn {test}(")),
+                "{} cites the test `{test}`, which no longer exists; a register naming a \
+                 deleted test reads as coverage that is gone",
+                coverage.id
+            );
+        }
+    }
+    Ok(())
+}
+
 fn generated_tables() -> anyhow::Result<Vec<DerivedTable>> {
     Ok(vec![
         render_policy_lifecycle()?,
         render_canonical_vectors()?,
+        render_assurance_coverage()?,
     ])
 }
 
@@ -564,6 +805,7 @@ fn check() -> anyhow::Result<()> {
     }
 
     reject_maintainer_notes_in_published_descriptions(&specs)?;
+    reject_unanchored_assurance_claims()?;
     reject_unowned_publications(&specs, &tables, Path::new(SPEC_DIR))?;
     reject_contradictory_population(&specs)?;
 
