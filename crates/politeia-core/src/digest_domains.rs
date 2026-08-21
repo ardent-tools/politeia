@@ -11,50 +11,6 @@ use serde::Serialize;
 
 use crate::{Digest, DigestDomain, domained_bytes};
 
-/// Every domain, in a form that cannot go stale.
-///
-/// WHY the exhaustive match: a hand-kept list silently omits a variant added
-/// later, and the omission is invisible — every test below keeps passing while
-/// covering one domain less. Matching exhaustively means a new variant stops
-/// the build until it is listed.
-fn all_domains() -> Vec<DigestDomain> {
-    let complete = |domain: DigestDomain| match domain {
-        DigestDomain::EvidenceRecord
-        | DigestDomain::CommissioningRecord
-        | DigestDomain::ApprovedGenerationInputs
-        | DigestDomain::RuntimeGenerationInputs
-        | DigestDomain::OperationIntent
-        | DigestDomain::LeaseClaims
-        | DigestDomain::ExecutionResource
-        | DigestDomain::CapabilityProfile
-        | DigestDomain::CapabilityVerification
-        | DigestDomain::AvailabilitySnapshot
-        | DigestDomain::ExecutionRequirement
-        | DigestDomain::RoutingDecision
-        | DigestDomain::ExecutionAssignment => (),
-    };
-
-    let domains = vec![
-        DigestDomain::EvidenceRecord,
-        DigestDomain::CommissioningRecord,
-        DigestDomain::ApprovedGenerationInputs,
-        DigestDomain::RuntimeGenerationInputs,
-        DigestDomain::OperationIntent,
-        DigestDomain::LeaseClaims,
-        DigestDomain::ExecutionResource,
-        DigestDomain::CapabilityProfile,
-        DigestDomain::CapabilityVerification,
-        DigestDomain::AvailabilitySnapshot,
-        DigestDomain::ExecutionRequirement,
-        DigestDomain::RoutingDecision,
-        DigestDomain::ExecutionAssignment,
-    ];
-    for domain in &domains {
-        complete(*domain);
-    }
-    domains
-}
-
 /// A payload with nothing domain-specific about it, so the only thing that can
 /// distinguish two digests of it is the domain itself.
 ///
@@ -81,7 +37,7 @@ fn payload() -> Payload {
     reason = "a payload that cannot encode is a broken fixture, not a finding"
 )]
 fn the_same_payload_digests_differently_in_every_domain() {
-    let digests: BTreeSet<String> = all_domains()
+    let digests: BTreeSet<String> = DigestDomain::all()
         .into_iter()
         .map(|domain| {
             Digest::of(domain, &payload())
@@ -93,7 +49,7 @@ fn the_same_payload_digests_differently_in_every_domain() {
 
     assert_eq!(
         digests.len(),
-        all_domains().len(),
+        DigestDomain::all().len(),
         "two domains produced the same digest for identical payload bytes, \
          which is the collision domain separation exists to prevent"
     );
@@ -104,10 +60,10 @@ fn every_domain_tag_is_distinct() {
     // The tag is the only thing separating the domains, so two domains sharing
     // one collapses them silently — every digest still computes, and two record
     // classes quietly share an identity space.
-    let tags: BTreeSet<&'static str> = all_domains().iter().map(|d| d.tag()).collect();
+    let tags: BTreeSet<&'static str> = DigestDomain::all().iter().map(|d| d.tag()).collect();
     assert_eq!(
         tags.len(),
-        all_domains().len(),
+        DigestDomain::all().len(),
         "two domains share a tag: {tags:?}"
     );
 }
@@ -117,7 +73,7 @@ fn every_domain_tag_carries_a_version() {
     // Tags are append-only. A tag without a version has nowhere to go when the
     // encoding changes, and the next author edits it in place — invalidating
     // every stored binding that cites it, with nothing to notice.
-    for domain in all_domains() {
+    for domain in DigestDomain::all() {
         let tag = domain.tag();
         assert!(
             tag.rsplit_once("_v")
@@ -252,7 +208,7 @@ fn golden_vectors_pin_the_envelope_encoding() {
         ),
     ]);
 
-    let actual: BTreeMap<&'static str, String> = all_domains()
+    let actual: BTreeMap<&'static str, String> = DigestDomain::all()
         .into_iter()
         .map(|domain| {
             (
