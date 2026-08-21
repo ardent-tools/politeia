@@ -106,6 +106,74 @@ pub struct RoleAssignment {
     pub delegation: DelegationId,
 }
 
+/// A thing that belongs to exactly one institution workspace.
+///
+/// WHY a trait rather than a field each component compares for itself: workspace
+/// scoping is one rule. A component that carries its own copy of the identity is
+/// a component that can disagree with its neighbours about whose institution it
+/// serves, and nothing would say which of them was right.
+pub trait WorkspaceScoped {
+    /// The workspace this belongs to.
+    fn workspace(&self) -> &InstitutionWorkspaceId;
+}
+
+/// One institution's boundary: everything scoped to a single workspace.
+///
+/// `docs/16-DATA_GOVERNANCE.md` puts institution-owned material, its
+/// classifications, its evidence and its egress inside one client-controlled
+/// trust boundary. This is that boundary as a type: it holds the identity once,
+/// and its components are the things that identity governs.
+///
+/// WHY the components do not carry the identity themselves: three copies of a
+/// workspace id are three chances to disagree, and the disagreement is silent —
+/// each component's own check passes against its own copy. Asking the boundary
+/// means there is one answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstitutionBoundary<Outbox> {
+    institution: InstitutionId,
+    workspace: InstitutionWorkspaceId,
+    outbox: Outbox,
+}
+
+impl<Outbox> InstitutionBoundary<Outbox> {
+    /// Establish a boundary around one workspace.
+    pub fn new(
+        institution: InstitutionId,
+        workspace: InstitutionWorkspaceId,
+        outbox: Outbox,
+    ) -> Self {
+        Self {
+            institution,
+            workspace,
+            outbox,
+        }
+    }
+
+    /// The institution this boundary serves.
+    pub fn institution(&self) -> &InstitutionId {
+        &self.institution
+    }
+
+    /// The workspace this boundary is scoped to.
+    pub fn workspace(&self) -> &InstitutionWorkspaceId {
+        &self.workspace
+    }
+
+    /// What may leave this boundary.
+    pub fn outbox(&self) -> &Outbox {
+        &self.outbox
+    }
+
+    /// Whether this boundary owns the given item.
+    ///
+    /// The one place the cross-institution question is asked. Everything that
+    /// refuses foreign material refuses it by asking here, so the rule cannot be
+    /// implemented two ways.
+    pub fn owns<T: WorkspaceScoped>(&self, item: &T) -> bool {
+        item.workspace() == &self.workspace
+    }
+}
+
 /// Client-owned semantic input boundary for commissioning and specialization.
 ///
 /// This manifest names digests and secret references, never secret values or

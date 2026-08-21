@@ -65,6 +65,12 @@ pub struct Observation {
     pub evidence: EvidenceId,
 }
 
+impl crate::institution::WorkspaceScoped for Observation {
+    fn workspace(&self) -> &InstitutionWorkspaceId {
+        &self.workspace
+    }
+}
+
 /// How well-supported a claim is, read off its observations.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,

@@ -22,22 +22,22 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::institution::InstitutionBoundary;
 use crate::knowledge::Observation;
-use crate::{
-    AdapterId, Delegation, DelegationId, Effect, InstitutionId, InstitutionWorkspaceId, PrincipalId,
-};
+use crate::{AdapterId, Delegation, DelegationId, Effect, InstitutionWorkspaceId, PrincipalId};
 
 /// The semantic action a delegation must carry to reconnoitre.
 pub const RECONNOITRE_ACTION: &str = "reconnaissance.observe";
 
 /// What one reconnaissance pass is permitted to look at.
+///
+/// It names no institution or workspace of its own. The
+/// [`InstitutionBoundary`](crate::institution::InstitutionBoundary) it is
+/// admitted against owns that, so a scope cannot be pointed at one institution
+/// while its observations are checked against another.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReconnaissanceScope {
-    /// The institution being commissioned.
-    pub institution: InstitutionId,
-    /// The workspace the observations belong to.
-    pub workspace: InstitutionWorkspaceId,
     /// The commissioner performing the pass.
     pub commissioner: PrincipalId,
     /// The exact delegation carrying its authority.
@@ -207,15 +207,19 @@ impl ReconnaissanceScope {
     ///
     /// Time: O(log n) in the scoped source and adapter counts, plus the
     /// authority check. Space: O(1).
-    pub fn admit(
+    pub fn admit<Outbox>(
         &self,
+        boundary: &InstitutionBoundary<Outbox>,
         delegation: &Delegation,
         observation: &Observation,
         now: Timestamp,
     ) -> Result<(), ReconnaissanceRefusal> {
         self.admit_authority(delegation, now)?;
 
-        if observation.workspace != self.workspace {
+        // Asked of the boundary, which is the one place this question has an
+        // answer. A scope comparing its own copy of the identity would pass
+        // against a copy nobody reconciled with the institution's.
+        if !boundary.owns(observation) {
             return Err(ReconnaissanceRefusal::ForeignWorkspace {
                 workspace: observation.workspace.clone(),
             });
@@ -259,6 +263,7 @@ mod tests {
     }
 
     struct Fixture {
+        boundary: InstitutionBoundary<()>,
         scope: ReconnaissanceScope,
         delegation: Delegation,
         observation: Observation,
@@ -290,9 +295,8 @@ mod tests {
         };
         let workspace = InstitutionWorkspaceId::new();
         Fixture {
+            boundary: InstitutionBoundary::new(crate::InstitutionId::new(), workspace.clone(), ()),
             scope: ReconnaissanceScope {
-                institution: InstitutionId::new(),
-                workspace: workspace.clone(),
                 commissioner,
                 delegation: delegation_id,
                 sources: BTreeSet::from(["crm".to_string()]),
@@ -316,7 +320,11 @@ mod tests {
     #[test]
     fn an_in_scope_observation_is_admitted() {
         let f = fixture();
-        assert_eq!(f.scope.admit(&f.delegation, &f.observation, now()), Ok(()));
+        assert_eq!(
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
+            Ok(())
+        );
     }
 
     #[test]
@@ -327,7 +335,8 @@ mod tests {
         let mut f = fixture();
         f.delegation.issuer = f.scope.commissioner.clone();
         assert_eq!(
-            f.scope.admit(&f.delegation, &f.observation, now()),
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::SelfIssuedAuthority)
         );
     }
@@ -339,7 +348,8 @@ mod tests {
         let mut f = fixture();
         f.delegation.effects.insert(Effect::WriteExternalSystem);
         assert_eq!(
-            f.scope.admit(&f.delegation, &f.observation, now()),
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::NotReadOnly {
                 effects: BTreeSet::from([Effect::WriteExternalSystem]),
             })
@@ -366,7 +376,10 @@ mod tests {
         ] {
             let mut f = fixture();
             f.delegation.effects = BTreeSet::from([effect.clone()]);
-            let admitted = f.scope.admit(&f.delegation, &f.observation, now()).is_ok();
+            let admitted = f
+                .scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now())
+                .is_ok();
             assert_eq!(
                 admitted,
                 !effect.mutates(),
@@ -405,7 +418,8 @@ mod tests {
         let mut f = fixture();
         f.delegation.subject = PrincipalId::new();
         assert_eq!(
-            f.scope.admit(&f.delegation, &f.observation, now()),
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::AuthorityMismatch)
         );
     }
@@ -415,7 +429,8 @@ mod tests {
         let mut f = fixture();
         f.delegation.id = DelegationId::new();
         assert_eq!(
-            f.scope.admit(&f.delegation, &f.observation, now()),
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::AuthorityMismatch)
         );
     }
@@ -425,7 +440,8 @@ mod tests {
         let mut f = fixture();
         f.delegation.actions = BTreeSet::from(["something.else".to_string()]);
         assert_eq!(
-            f.scope.admit(&f.delegation, &f.observation, now()),
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::ActionNotDelegated)
         );
     }
@@ -439,7 +455,8 @@ mod tests {
         let mut f = fixture();
         f.observation.workspace = InstitutionWorkspaceId::new();
         assert!(matches!(
-            f.scope.admit(&f.delegation, &f.observation, now()),
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::ForeignWorkspace { .. })
         ));
     }
@@ -449,7 +466,8 @@ mod tests {
         let mut f = fixture();
         f.observation.source = "payroll".to_string();
         assert_eq!(
-            f.scope.admit(&f.delegation, &f.observation, now()),
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::SourceOutOfScope {
                 source: "payroll".to_string(),
             })
@@ -463,7 +481,8 @@ mod tests {
         let mut f = fixture();
         f.observation.adapter = AdapterId::new();
         assert!(matches!(
-            f.scope.admit(&f.delegation, &f.observation, now()),
+            f.scope
+                .admit(&f.boundary, &f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::AdapterOutOfScope { .. })
         ));
     }
@@ -487,7 +506,7 @@ mod tests {
             ..f.delegation.clone()
         };
         assert_eq!(
-            scope.admit(&delegation, &f.observation, now()),
+            scope.admit(&f.boundary, &delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::ObservedAfterExpiry)
         );
     }
