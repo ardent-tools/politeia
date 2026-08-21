@@ -12,8 +12,8 @@ use std::collections::BTreeSet;
 
 use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::{
-    AdapterId, CommissioningRecordId, DelegationId, Digest, EvidenceId, InstitutionId,
-    InstitutionWorkspaceId, PolicyBundleId, PrincipalId, RuntimeGenerationId,
+    AdapterId, CommissioningRecordId, DelegationId, Digest, DigestDomain, EvidenceId,
+    InstitutionId, InstitutionWorkspaceId, PolicyBundleId, PrincipalId, RuntimeGenerationId,
     generation::{RuntimeGeneration, RuntimeGenerationError},
     institution::InstitutionWorkspace,
     lifecycle::LifecycleProfile,
@@ -103,12 +103,10 @@ pub struct Verification {
     pub independence: IndependenceClass,
 }
 
-/// A durable statement binding a verified subject to the exact policy,
-/// runtime, adapter, delegation, and evidence identities it was verified
-/// under. An attestation is not portable to another subject.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+/// The exact identities one attestation binds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Attestation {
+pub struct AttestationStatement {
     /// Digest of the attested subject.
     pub subject: Digest,
     /// The attesting verifier.
@@ -123,8 +121,191 @@ pub struct Attestation {
     pub delegation: DelegationId,
     /// The evidence records bound into the attestation.
     pub evidence: Vec<EvidenceId>,
-    /// Digest of the full attestation statement.
-    pub statement_digest: Digest,
+}
+
+impl AttestationStatement {
+    /// Digest the exact identities this statement binds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the canonical-encoding failure if the statement cannot be
+    /// represented.
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
+        Digest::of(DigestDomain::AttestationStatement, self)
+    }
+}
+
+/// Why an attestation may not be issued or admitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AttestationRefusal {
+    /// The verification it rests on did not pass.
+    VerificationFailed,
+    /// The verification cites no evidence.
+    ///
+    /// A verdict resting on nothing is an opinion. `docs/06-POLICY_COMPILER.md`
+    /// separates the detector from the claim precisely so that a verdict has to
+    /// name what it read.
+    NoEvidence,
+    /// The verifier reported on itself.
+    ///
+    /// `AGENTS.md`: do not allow the actor being judged to satisfy an
+    /// independence requirement by self-certification. `IndependenceClass`
+    /// already documents `SelfReported` as never satisfying the obligation;
+    /// this is where that stops being documentation.
+    SelfCertified,
+    /// The verifier is the principal whose work was judged.
+    ///
+    /// Distinct from the class: a verifier can honestly record itself as an
+    /// independent service and still *be* the actor under judgement, and the
+    /// class is a claim while this is a comparison.
+    VerifierIsTheSubjectActor,
+    /// The recorded statement digest is not the digest of the statement.
+    StatementDigestMismatch,
+    /// The statement could not be encoded.
+    Encoding(String),
+}
+
+impl std::fmt::Display for AttestationRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttestationRefusal::VerificationFailed => {
+                formatter.write_str("the verification did not pass")
+            }
+            AttestationRefusal::NoEvidence => {
+                formatter.write_str("the verification cites no evidence")
+            }
+            AttestationRefusal::SelfCertified => {
+                formatter.write_str("a self-reported verification cannot be attested")
+            }
+            AttestationRefusal::VerifierIsTheSubjectActor => {
+                formatter.write_str("the verifier is the principal whose work was judged")
+            }
+            AttestationRefusal::StatementDigestMismatch => {
+                formatter.write_str("the recorded digest is not the digest of the statement")
+            }
+            AttestationRefusal::Encoding(message) => {
+                write!(formatter, "the statement cannot be encoded: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AttestationRefusal {}
+
+/// A durable statement binding a verified subject to the exact policy,
+/// runtime, adapter, delegation, and evidence identities it was verified
+/// under.
+///
+/// An attestation is not portable to another subject, and that is enforced
+/// rather than asserted: the statement digest covers the subject along with
+/// every other bound identity, and both [`Attestation::issue`] and the
+/// deserializer recompute it. Swapping the subject leaves a digest that no
+/// longer describes the statement it sits beside.
+///
+/// WHY the digest is not a public field: a value the caller supplies is a value
+/// the caller can supply wrongly, and a false one is indistinguishable from a
+/// true one at every call site that reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Attestation {
+    statement: AttestationStatement,
+    statement_digest: Digest,
+}
+
+impl Attestation {
+    /// Issue an attestation over a passed, independent verification.
+    ///
+    /// `subject_actor` is the principal whose work was judged, which the
+    /// verifier may not be.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttestationRefusal`] when the verification did not pass, cites
+    /// no evidence, is self-reported, or was performed by the actor under
+    /// judgement — and when the statement cannot be encoded.
+    ///
+    /// Time: O(n) in the statement size. Space: O(n).
+    pub fn issue(
+        verification: &Verification,
+        subject_actor: &PrincipalId,
+        policy: PolicyBundleId,
+        runtime: RuntimeGenerationId,
+        adapter: AdapterId,
+        delegation: DelegationId,
+    ) -> Result<Self, AttestationRefusal> {
+        if !verification.passed {
+            return Err(AttestationRefusal::VerificationFailed);
+        }
+        if verification.evidence.is_empty() {
+            return Err(AttestationRefusal::NoEvidence);
+        }
+        if verification.independence == IndependenceClass::SelfReported {
+            return Err(AttestationRefusal::SelfCertified);
+        }
+        if &verification.verifier == subject_actor {
+            return Err(AttestationRefusal::VerifierIsTheSubjectActor);
+        }
+
+        let statement = AttestationStatement {
+            subject: verification.subject.clone(),
+            verifier: verification.verifier.clone(),
+            policy,
+            runtime,
+            adapter,
+            delegation,
+            evidence: verification.evidence.clone(),
+        };
+        let statement_digest = statement
+            .digest()
+            .map_err(|error| AttestationRefusal::Encoding(error.to_string()))?;
+        Ok(Self {
+            statement,
+            statement_digest,
+        })
+    }
+
+    /// The identities this attestation binds.
+    pub fn statement(&self) -> &AttestationStatement {
+        &self.statement
+    }
+
+    /// The digest over those identities.
+    pub fn statement_digest(&self) -> &Digest {
+        &self.statement_digest
+    }
+
+    /// Whether this attestation is about the given subject.
+    ///
+    /// The question a consumer should ask instead of reading `subject` and
+    /// comparing, because it is the question that has a wrong answer worth
+    /// preventing: an attestation presented for work it does not cover.
+    pub fn covers(&self, subject: &Digest) -> bool {
+        &self.statement.subject == subject
+    }
+}
+
+impl<'de> Deserialize<'de> for Attestation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            statement: AttestationStatement,
+            statement_digest: Digest,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let recomputed = wire.statement.digest().map_err(serde::de::Error::custom)?;
+        if recomputed != wire.statement_digest {
+            return Err(serde::de::Error::custom(
+                AttestationRefusal::StatementDigestMismatch,
+            ));
+        }
+        Ok(Self {
+            statement: wire.statement,
+            statement_digest: wire.statement_digest,
+        })
+    }
 }
 
 /// Evidence-bearing completion of operational handoff and commissioner revocation.
@@ -407,3 +588,7 @@ mod assessment_tests;
 #[cfg(test)]
 #[path = "tests/assurance.rs"]
 mod assurance_tests;
+
+#[cfg(test)]
+#[path = "tests/attestation.rs"]
+mod attestation_tests;
