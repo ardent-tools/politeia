@@ -86,23 +86,192 @@ pub struct ExtensionManifest {
     pub provenance: ExtensionProvenance,
 }
 
+impl ExtensionManifest {
+    /// Whether this extension only reads.
+    pub fn is_read_only(&self) -> bool {
+        !self.requires.effects.iter().any(Effect::mutates)
+    }
+
+    /// Check that a probe stays inside what its manifest requested.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProbeRefusal::EffectsExceedManifest`] when the probe produces
+    /// an effect the manifest does not request.
+    ///
+    /// Time: O(p log m) for p probe effects against m manifest effects.
+    /// Space: O(p).
+    pub fn admits_probe(&self, probe: &DiscoveryProbe) -> Result<(), ProbeRefusal> {
+        let excess: BTreeSet<Effect> = probe
+            .effects
+            .difference(&self.requires.effects)
+            .cloned()
+            .collect();
+        if excess.is_empty() {
+            Ok(())
+        } else {
+            Err(ProbeRefusal::EffectsExceedManifest { excess })
+        }
+    }
+}
+
 /// A reconnaissance probe declaration.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryProbe {
     /// Probe identity.
     pub id: String,
     /// What the probe observes.
     pub description: String,
-    /// Whether the probe is read-only (reconnaissance grants are read-only).
-    pub read_only: bool,
+    /// Externally visible effects the probe produces.
+    ///
+    /// WHY effects rather than a `read_only` flag: a flag is an assertion
+    /// nothing can contradict. A probe declaring itself read-only beside an
+    /// effect set containing `WriteExternalSystem` is self-inconsistent, and
+    /// with two fields carrying one fact the reader has to guess which is
+    /// true. Reading the property off the effects leaves one fact in one place.
+    pub effects: BTreeSet<Effect>,
     /// The observation kinds the probe emits.
     pub outputs: Vec<String>,
 }
 
+impl DiscoveryProbe {
+    /// Whether this probe only reads.
+    ///
+    /// Derived, not declared. `docs/03-ONTOLOGY.md` makes reconnaissance
+    /// authority read-only, and `politeia_core::Effect::mutates` is the single
+    /// classification that decides -- the same one
+    /// `politeia_core::reconnaissance` applies to a commissioner's delegation.
+    /// Two layers ask the question; one answer decides it.
+    pub fn is_read_only(&self) -> bool {
+        !self.effects.iter().any(Effect::mutates)
+    }
+
+    /// The effects that make this probe not read-only.
+    pub fn mutating_effects(&self) -> BTreeSet<Effect> {
+        self.effects
+            .iter()
+            .filter(|effect| effect.mutates())
+            .cloned()
+            .collect()
+    }
+}
+
+/// Why a probe may not be carried by a manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProbeRefusal {
+    /// The probe produces effects its extension never requested.
+    ///
+    /// A manifest is a request the host may deny, so a probe reaching past it
+    /// is asking the host to grant something it was never shown. This is the
+    /// attenuation rule the rest of the kernel applies to delegations, at the
+    /// extension boundary.
+    EffectsExceedManifest {
+        /// The effects requested by the probe and not by the manifest.
+        excess: BTreeSet<Effect>,
+    },
+}
+
+impl std::fmt::Display for ProbeRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProbeRefusal::EffectsExceedManifest { excess } => write!(
+                formatter,
+                "the probe produces {excess:?}, which its manifest does not request"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProbeRefusal {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe(effects: &[Effect]) -> DiscoveryProbe {
+        DiscoveryProbe {
+            id: "probe.contacts".to_string(),
+            description: "lists contact records".to_string(),
+            effects: effects.iter().cloned().collect(),
+            outputs: vec!["contact".to_string()],
+        }
+    }
+
+    #[test]
+    fn a_probe_that_only_reads_is_read_only() {
+        assert!(probe(&[Effect::ReadExternalSystem]).is_read_only());
+        assert!(probe(&[]).is_read_only());
+    }
+
+    #[test]
+    fn a_probe_cannot_declare_itself_read_only_past_its_effects() {
+        // The case a declared flag cannot catch: a probe asserting it only
+        // reads, beside an effect set that writes. With one fact in one place
+        // the assertion has nowhere to disagree from.
+        let writing = probe(&[Effect::ReadExternalSystem, Effect::WriteExternalSystem]);
+        assert!(!writing.is_read_only());
+        assert_eq!(
+            writing.mutating_effects(),
+            BTreeSet::from([Effect::WriteExternalSystem]),
+            "the answer names what makes it so, not merely that it is so"
+        );
+    }
+
+    #[test]
+    fn read_only_is_the_same_judgement_the_kernel_makes_of_a_delegation() {
+        // One classification, two layers. `politeia_core::reconnaissance`
+        // refuses a commissioner delegation carrying a mutating effect; this
+        // refuses a probe for the same reason, by the same function, so the
+        // extension boundary and the authority boundary cannot drift apart on
+        // what "read-only" means.
+        for effect in [
+            Effect::ReadFilesystem,
+            Effect::ReadSecret,
+            Effect::ReadExternalSystem,
+            Effect::WriteFilesystem,
+            Effect::SpawnProcess,
+            Effect::NetworkEgress,
+            Effect::WriteSecret,
+            Effect::WriteExternalSystem,
+            Effect::CreateArtifact,
+            Effect::ChangeAuthorization,
+        ] {
+            assert_eq!(
+                probe(std::slice::from_ref(&effect)).is_read_only(),
+                !effect.mutates(),
+                "{effect:?} must be judged the same way in both layers"
+            );
+        }
+    }
+
+    #[test]
+    fn a_probe_may_not_reach_past_what_its_manifest_requested() {
+        // A manifest is a request the host may deny, so a probe exceeding it is
+        // asking the host to grant something it was never shown. The same
+        // attenuation rule the kernel applies to delegations, at the extension
+        // boundary.
+        let manifest = manifest();
+        assert_eq!(
+            manifest.admits_probe(&probe(&[Effect::ReadExternalSystem])),
+            Ok(())
+        );
+        assert_eq!(
+            manifest.admits_probe(&probe(&[Effect::WriteExternalSystem])),
+            Err(ProbeRefusal::EffectsExceedManifest {
+                excess: BTreeSet::from([Effect::WriteExternalSystem]),
+            })
+        );
+    }
+
+    #[test]
+    fn a_manifest_requesting_only_reads_is_read_only() {
+        let mut requesting = manifest();
+        assert!(requesting.is_read_only());
+        requesting.requires.effects.insert(Effect::CreateArtifact);
+        assert!(!requesting.is_read_only());
+    }
 
     fn manifest() -> ExtensionManifest {
         ExtensionManifest {

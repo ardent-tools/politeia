@@ -152,6 +152,10 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "produced per authorization; no consumer reads it off the wire yet",
     },
     WithheldSchema {
+        type_name: "politeia_sdk::DiscoveryProbe",
+        reason: "reconnaissance authoring surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
         type_name: "politeia_core::outbox::DeclaredBoundary",
         reason: "institution boundary declaration; publication waits on the first vertical slice",
     },
