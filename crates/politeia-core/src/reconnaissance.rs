@@ -77,6 +77,15 @@ pub enum ReconnaissanceRefusal {
         /// The effects that mutate.
         effects: BTreeSet<Effect>,
     },
+    /// The observation belongs to another workspace.
+    ///
+    /// The cross-institution case. It is checked before the source and adapter
+    /// because those are questions about *this* institution's scope, and an
+    /// observation from another one is not in scope by any answer to them.
+    ForeignWorkspace {
+        /// The workspace the observation names.
+        workspace: InstitutionWorkspaceId,
+    },
     /// The observation names a source outside the scope.
     SourceOutOfScope {
         /// The source observed.
@@ -118,6 +127,10 @@ impl std::fmt::Display for ReconnaissanceRefusal {
             ReconnaissanceRefusal::NotReadOnly { effects } => write!(
                 formatter,
                 "a reconnaissance delegation may not carry mutating effects: {effects:?}"
+            ),
+            ReconnaissanceRefusal::ForeignWorkspace { workspace } => write!(
+                formatter,
+                "the observation belongs to workspace {workspace:?}, not this scope's"
             ),
             ReconnaissanceRefusal::SourceOutOfScope { source } => {
                 write!(formatter, "source {source} is outside the scope")
@@ -201,6 +214,11 @@ impl ReconnaissanceScope {
     ) -> Result<(), ReconnaissanceRefusal> {
         self.admit_authority(delegation, now)?;
 
+        if observation.workspace != self.workspace {
+            return Err(ReconnaissanceRefusal::ForeignWorkspace {
+                workspace: observation.workspace.clone(),
+            });
+        }
         if observation.observed_at >= self.expires_at {
             return Err(ReconnaissanceRefusal::ObservedAfterExpiry);
         }
@@ -269,10 +287,11 @@ mod tests {
                 external_cost_microunits: Some(1),
             },
         };
+        let workspace = InstitutionWorkspaceId::new();
         Fixture {
             scope: ReconnaissanceScope {
                 institution: InstitutionId::new(),
-                workspace: InstitutionWorkspaceId::new(),
+                workspace: workspace.clone(),
                 commissioner,
                 delegation: delegation_id,
                 sources: BTreeSet::from(["crm".to_string()]),
@@ -282,6 +301,7 @@ mod tests {
             delegation,
             observation: Observation {
                 id: ObservationId::new(),
+                workspace: workspace.clone(),
                 source: "crm".to_string(),
                 adapter,
                 subject: Digest::blake3(b"the institution's billing contact"),
@@ -407,6 +427,20 @@ mod tests {
             f.scope.admit(&f.delegation, &f.observation, now()),
             Err(ReconnaissanceRefusal::ActionNotDelegated)
         );
+    }
+
+    #[test]
+    fn an_observation_from_another_workspace_is_refused() {
+        // The cross-institution case. Every other field is in scope: the source
+        // is named, the adapter is named, the authority is live. The material
+        // simply belongs to somebody else, and `docs/16-DATA_GOVERNANCE.md`
+        // requires an explicit authorized export rather than an inference.
+        let mut f = fixture();
+        f.observation.workspace = InstitutionWorkspaceId::new();
+        assert!(matches!(
+            f.scope.admit(&f.delegation, &f.observation, now()),
+            Err(ReconnaissanceRefusal::ForeignWorkspace { .. })
+        ));
     }
 
     #[test]
