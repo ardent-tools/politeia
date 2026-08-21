@@ -1,0 +1,26 @@
+# WHY the scanning logic is not here: it is a published reusable workflow owned by
+# forkwright/.github, and a copy in this repository would be a second place the rule
+# lives. Only the trigger and the pattern source are local.
+#
+# WHY `edited` is listed: GitHub squashes the PR body into the merge commit, so a
+# marker added by editing the description after the last push reaches main's history.
+# Without this type the check never re-runs on that edit and nothing scans it. The
+# fleet template omits it; aletheia found the hole and closed it the same way.
+name: No AI Attribution
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  no-ai-attribution:
+    uses: forkwright/.github/.github/workflows/no-ai-attribution.yml@main
