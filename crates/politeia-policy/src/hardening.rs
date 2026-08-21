@@ -98,11 +98,10 @@ impl HardeningState {
 
     /// The rungs this one may advance to.
     ///
-    /// NOTE on the two rungs with no retirement edge: `Structural` is terminal
-    /// by construction -- a property made impossible by structure is not
-    /// withdrawn by a policy act -- while `Calibrated`'s absence is asserted by
-    /// no document. It is preserved as the published table had it rather than
-    /// silently widened here; see #40.
+    /// NOTE on the one rung with no exit: `Structural` is terminal by
+    /// construction. A property made impossible by structure is not withdrawn
+    /// by a policy act -- there is nothing to stop doing, because nothing is
+    /// being done. Every other rung can be left, forward or by retirement.
     pub fn successors(self) -> &'static [Self] {
         match self {
             Self::Unknown => &[Self::Observed],
@@ -110,7 +109,7 @@ impl HardeningState {
             Self::Proposed => &[Self::Approved],
             Self::Approved => &[Self::Shadow, Self::Retired],
             Self::Shadow => &[Self::Calibrated, Self::Retired],
-            Self::Calibrated => &[Self::Advisory],
+            Self::Calibrated => &[Self::Advisory, Self::Retired],
             Self::Advisory => &[Self::Enforced, Self::Retired],
             Self::Enforced => &[Self::Structural, Self::Retired],
             Self::Structural | Self::Retired => &[],
@@ -675,6 +674,44 @@ mod tests {
             tokens.len(),
             declared,
             "two rungs share a token or one is listed twice: {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn every_rung_that_can_be_occupied_can_also_be_left() {
+        // A rung with no exit traps whatever reaches it. The ladder enforces
+        // its table now, so an omission is a refusal rather than an oversight:
+        // a binding calibrating badly would have had exactly one legal move,
+        // and it ran *up* -- promote to advisory, or reconstruct the binding.
+        //
+        // `Structural` is the deliberate exception and says why in
+        // `successors`. Requiring a stated reason rather than allowing silence
+        // is the point: the next rung added with no exit fails here.
+        for state in HardeningState::all() {
+            let leavable = !state.successors().is_empty();
+            let expected = !matches!(state, HardeningState::Structural | HardeningState::Retired);
+            assert_eq!(
+                leavable, expected,
+                "{state:?} has no exit and no recorded reason to lack one"
+            );
+        }
+    }
+
+    #[test]
+    fn a_calibrating_binding_can_be_withdrawn_without_being_promoted() {
+        let mut ladder = HardeningLadder::new();
+        for rung in [
+            HardeningState::Observed,
+            HardeningState::Proposed,
+            HardeningState::Approved,
+            HardeningState::Shadow,
+            HardeningState::Calibrated,
+        ] {
+            assert!(ladder.advance(rung).is_ok(), "{rung:?} is a legal rung");
+        }
+        assert!(
+            ladder.advance(HardeningState::Retired).is_ok(),
+            "calibration is not a commitment to enforce"
         );
     }
 
