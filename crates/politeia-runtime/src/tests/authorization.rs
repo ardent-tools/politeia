@@ -273,13 +273,12 @@ async fn lease_binds_every_kernel_contract_axis() {
     reason = "the valid fixture must mint a lease before its claims are substituted"
 )]
 async fn a_substituted_claims_digest_is_refused_at_the_ledger() {
-    // The lease's claims digest is checked here and nowhere else. In process it
-    // cannot be checked at all: the digest and the claims are written together
-    // at the single construction site, both fields are private, and nothing
-    // mutates either -- so a comparison between them returns true by
-    // construction. The ledger is a store, possibly in another process, so the
-    // value it recorded at `reserve` and the value presented at `claim` can
-    // genuinely differ. That is the boundary the digest exists for.
+    // The in-process check `Dispatcher::execute` performs compares two values
+    // this process holds, so it catches an in-crate mutation and nothing else.
+    // The ledger is the other side: a store, possibly in another process, where
+    // the value recorded at `reserve` and the value presented at `claim` can
+    // genuinely differ without either being a bug in this crate. Nothing
+    // covered that boundary.
     let fixture = fixture();
     let lease = fixture
         .dispatcher
