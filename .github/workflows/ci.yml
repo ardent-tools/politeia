@@ -147,6 +147,29 @@ jobs:
       # would pass with an invariant written as TRUE, with a cfg naming no
       # invariant, or with a jar that never executed. This module plants the
       # one transition the workflow invariant forbids and requires a rejection.
+      # A fixture whose configuration omits the invariant it targets can still
+      # be rejected -- by some other invariant -- and would then isolate
+      # nothing while looking correct. This happened once during authoring:
+      # a substring guard matched the invariant's name in a comment and skipped
+      # declaring it, and the fixture went green proving nothing.
+      - name: Require every fixture to declare its model's invariants
+        shell: bash
+        working-directory: formal
+        run: |
+          declared() { grep -E '^[[:space:]]*INVARIANT[[:space:]]' "$1" | awk '{print $2}' | sort; }
+          status=0
+          for module in negative/*.tla; do
+            name="$(basename "${module}" .tla)"
+            parent="$(sed -n 's/^EXTENDS \([A-Za-z]*\).*/\1/p' "${module}" | head -1)"
+            [ -f "${parent}.cfg" ] || continue
+            missing="$(comm -23 <(declared "${parent}.cfg") <(declared "negative/${name}.cfg"))"
+            if [ -n "${missing}" ]; then
+              echo "::error::negative/${name}.cfg does not declare: ${missing//$'\n'/ }"
+              status=1
+            fi
+          done
+          exit "${status}"
+
       - name: Require the checker to reject every planted defect
         shell: bash
         working-directory: formal/negative
