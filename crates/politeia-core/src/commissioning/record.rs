@@ -1,5 +1,6 @@
 //! Validated commissioning approval and provenance assembly.
 
+use crate::canonical::CanonicalError;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jiff::Timestamp;
@@ -262,7 +263,7 @@ impl CommissioningRecord {
     /// # Errors
     ///
     /// Returns the JSON encoding failure if the record cannot be represented.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
         Digest::of(DigestDomain::CommissioningRecord, self)
     }
 

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::{Digest, DigestDomain};
+use crate::{Digest, DigestDomain, domained_bytes};
 
 /// Every domain, in a form that cannot go stale.
 ///
@@ -57,6 +57,11 @@ fn all_domains() -> Vec<DigestDomain> {
 
 /// A payload with nothing domain-specific about it, so the only thing that can
 /// distinguish two digests of it is the domain itself.
+///
+/// WHY the fields are declared out of alphabetical order: canonical encoding
+/// sorts them, and a fixture already in sorted order encodes identically under
+/// a canonicalizer and under plain `serde_json`. It would pass either way and
+/// witness neither.
 #[derive(Serialize)]
 struct Payload {
     name: &'static str,
@@ -163,6 +168,26 @@ fn changing_one_field_changes_the_digest() {
     clippy::expect_used,
     reason = "a payload that cannot encode is a broken fixture, not a finding"
 )]
+fn the_digest_pre_image_is_pinned_so_the_vectors_stay_re_derivable() {
+    // The golden digests below are opaque: a differing hex string says the
+    // encoding moved and nothing about which rule moved it. This pins the bytes
+    // that get hashed, so the same failure names the cause -- a key out of
+    // order, whitespace, a field appearing or vanishing -- and so any reader
+    // can recompute the vectors with a stock blake3 and no politeia code.
+    let bytes = domained_bytes(DigestDomain::EvidenceRecord, &payload())
+        .expect("the fixture payload must encode");
+    assert_eq!(
+        String::from_utf8(bytes).expect("canonical bytes are UTF-8"),
+        r#"{"kind":"evidence_record_v1","value":{"count":1,"name":"politeia"}}"#,
+        "the digest pre-image changed shape"
+    );
+}
+
+#[test]
+#[expect(
+    clippy::expect_used,
+    reason = "a payload that cannot encode is a broken fixture, not a finding"
+)]
 fn golden_vectors_pin_the_envelope_encoding() {
     // These are the published bytes. They change only when the digest envelope
     // changes -- a renamed field, a reordered one, a different encoder -- which
@@ -175,55 +200,55 @@ fn golden_vectors_pin_the_envelope_encoding() {
     let expected: BTreeMap<&'static str, &'static str> = BTreeMap::from([
         (
             "approved_generation_inputs_v1",
-            "7bc7ceb965936bbbcb1e0317241dcc46ca6042aaf071c50ac4c491d0248a4d97",
+            "9401e7a0200dd896265e71af00db2b0c3cc12f28606936e815ef9f7bc3dd81fe",
         ),
         (
             "availability_snapshot_v1",
-            "b4f43e3ddf90230e6e1ea8429b22ca34e6bfc7ba31e1243ff1450a4a81032fcf",
+            "440dc7d52ef2ac4b24628ca41c23a8e8d7f03a838b07902eca680fcba9b493b1",
         ),
         (
             "capability_profile_v1",
-            "afe5f1a279000f6f9c01277795188f3e1c4a1b77399244c4c519b9485e3845eb",
+            "3fc8f6036a41d684456f79d290d61612e66245c07c6cf11b39f786656b0b9ab7",
         ),
         (
             "capability_verification_v1",
-            "d4fbd01dd61ccf68ae0b0d1965ebab8250c4386942e9377226d1fb76dc2f590b",
+            "50f54c1a1ebfa9416f394572442bc594b37bc6626101ec8797c44b3ed0c904cf",
         ),
         (
             "commissioning_record_v1",
-            "5808d5de9a2b36823baf452544b83261fadb84c4b204f7bad0202ecf9fefd97f",
+            "2bae1332172528fa041d04e2804907ac0aefc08a586c6cb5b6beca6aaa27d9b1",
         ),
         (
             "evidence_record_v1",
-            "b7196a02ce671f7af44204d3e8d3b83e4314b633994d39eb57ba079bbc734aeb",
+            "6db9737c968245077bd1e329b664fdc7064b641c63c60e6c69fcab0125e0ae0a",
         ),
         (
             "execution_assignment_v1",
-            "e02a9ba46364ac05e428241e69e22d8ee1b870bd941f4b996d31972687e5a13c",
+            "07e846e089da5434abb26cb335ec1d0e3d9ce8be0cb80d9e5ee2509fcfbc8431",
         ),
         (
             "execution_requirement_v1",
-            "a451cabc0a66e4ae816dee9d7526c4eda81cdd191410ef6b11afede9d4a799c2",
+            "b76b18cf9200fa3bbce33414c506c3851af55192f2481a978edc01293732ecad",
         ),
         (
             "execution_resource_v1",
-            "6e63e3bc9c273067c484b2841b2be681e517f2b02f8dfd4bd6764209d5489d66",
+            "2e00ba444d1321220a1cd988742bc3c34bc885ebea916901d78cd2ed8a516e84",
         ),
         (
             "lease_claims_v1",
-            "037a56021021a8195d73380ece70673ceb470acda98cfbcfb431a84056f6cb0c",
+            "829cbc3e7fdb034b2da4f11649aaaa1b045e70cae696d35c728507bcefff8eef",
         ),
         (
             "operation_intent_v1",
-            "e5fadd59e9d9b38a3f936f56c0b8640eb43fc41d7a1985905a80e9074fc0a8e5",
+            "c33cf344021273b4fe53b8d0c4bfd1da9359fc389f39756a582c6fd74b522e55",
         ),
         (
             "routing_decision_v1",
-            "ac9f98d4aa6dced8c5c11b84972d77235f8cbbb4d3a1e0c66f2da9294c894e54",
+            "d84ab38efeca1e23795ebf20383dee9ccf9634f26a93897971b38787658c7b4a",
         ),
         (
             "runtime_generation_inputs_v1",
-            "2d087b07cccde1ce126575aad94610fb0be4a323d0074f4af0e7162c7c8eb78d",
+            "eb9474a0fb0567cd22293ee474111dc6d66c75776d763277a832901b2aa24d2c",
         ),
     ]);
 

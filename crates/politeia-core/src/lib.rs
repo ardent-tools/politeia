@@ -13,6 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
+pub mod canonical;
 pub mod commissioning;
 pub mod evidence;
 pub mod generation;
@@ -253,6 +254,23 @@ struct Domained<'a, T: Serialize> {
     value: &'a T,
 }
 
+/// The exact bytes [`Digest::of`] hashes.
+///
+/// WHY this is separate from [`Digest::of`]: a golden digest reports that the
+/// envelope encoding moved, but not what it moved to, so the only way to answer
+/// "is the new value correct?" is to trust whatever produced it. Exposing the
+/// pre-image lets a test pin the text itself, which is checkable by hand and by
+/// an implementation sharing no code with this one.
+pub(crate) fn domained_bytes<T: Serialize>(
+    domain: DigestDomain,
+    value: &T,
+) -> Result<Vec<u8>, canonical::CanonicalError> {
+    canonical::to_canonical_bytes(&Domained {
+        kind: domain.tag(),
+        value,
+    })
+}
+
 impl Digest {
     /// Hash bytes with blake3 and return the hex digest.
     ///
@@ -269,13 +287,14 @@ impl Digest {
     ///
     /// # Errors
     ///
-    /// Returns the JSON encoding failure if the record cannot be represented.
-    pub fn of<T: Serialize>(domain: DigestDomain, value: &T) -> Result<Self, serde_json::Error> {
-        serde_json::to_vec(&Domained {
-            kind: domain.tag(),
-            value,
-        })
-        .map(|bytes| Self::blake3(&bytes))
+    /// Returns the canonical-encoding failure if the record cannot be
+    /// represented, including a floating-point value, which has no canonical
+    /// text form.
+    pub fn of<T: Serialize>(
+        domain: DigestDomain,
+        value: &T,
+    ) -> Result<Self, canonical::CanonicalError> {
+        domained_bytes(domain, value).map(|bytes| Self::blake3(&bytes))
     }
 
     /// The canonical lowercase hexadecimal representation.
@@ -533,7 +552,12 @@ pub struct OperationSpec {
     pub evidence_obligations: Vec<String>,
     /// Exact routing requirement that must produce an admitted execution
     /// assignment before this operation may be authorized.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // WHY no `skip_serializing_if`: an omitted field and an absent one encode
+    // alike, so a record that later gains an optional field would digest as it
+    // did before it had one. Absence is encoded as an explicit null so that it
+    // is a fact the digest covers. `default` stays, so records written before
+    // the field existed still decode.
+    #[serde(default)]
     pub execution_requirement: Option<Digest>,
     /// Whether the operation is safe to retry.
     pub retryable: bool,

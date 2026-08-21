@@ -1,5 +1,6 @@
 //! Commissioner grant identity and trusted-registry behavior.
 
+use crate::canonical::{CanonicalError, to_canonical_bytes};
 use std::collections::BTreeMap;
 
 use jiff::Timestamp;
@@ -31,8 +32,8 @@ impl CommissionerGrantRecord {
     /// # Errors
     ///
     /// Returns the JSON encoding failure if the record cannot be represented.
-    pub fn digest(&self) -> Result<Digest, serde_json::Error> {
-        serde_json::to_vec(&CommissionerGrantIdentity {
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
+        to_canonical_bytes(&CommissionerGrantIdentity {
             kind: "commissioner_grant_v1",
             institution: &self.institution,
             workspace: &self.workspace,

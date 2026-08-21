@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::{Digest, EvidenceId, InstitutionId, InstitutionWorkspaceId, evidence::EvidenceRecord};
 
 use super::ApprovedCommissioningSubject;
+use crate::canonical::{CanonicalError, to_canonical_bytes};
 
 #[derive(Serialize)]
 struct ObservationSubject<'a> {
@@ -50,8 +51,8 @@ pub fn commissioning_observation_subject_digest(
     workspace: &InstitutionWorkspaceId,
     commissioner_grant_digest: &Digest,
     payload_digest: &Digest,
-) -> Result<Digest, serde_json::Error> {
-    serde_json::to_vec(&ObservationSubject {
+) -> Result<Digest, CanonicalError> {
+    to_canonical_bytes(&ObservationSubject {
         kind: "commissioning_observation_v1",
         institution,
         workspace,
@@ -71,8 +72,8 @@ pub fn commissioning_approval_subject_digest(
     workspace: &InstitutionWorkspaceId,
     approved: &ApprovedCommissioningSubject,
     observation_set_digest: &Digest,
-) -> Result<Digest, serde_json::Error> {
-    serde_json::to_vec(&ApprovalSubject {
+) -> Result<Digest, CanonicalError> {
+    to_canonical_bytes(&ApprovalSubject {
         kind: "commissioning_approval_v1",
         institution,
         workspace,
@@ -94,8 +95,8 @@ pub fn unresolved_obligations_digest(
     institution: &InstitutionId,
     workspace: &InstitutionWorkspaceId,
     obligations: &BTreeSet<String>,
-) -> Result<Digest, serde_json::Error> {
-    serde_json::to_vec(&UnresolvedObligationsSubject {
+) -> Result<Digest, CanonicalError> {
+    to_canonical_bytes(&UnresolvedObligationsSubject {
         kind: "commissioning_unresolved_obligations_v1",
         institution,
         workspace,
@@ -111,13 +112,13 @@ pub fn unresolved_obligations_digest(
 /// Returns the JSON encoding failure if any record or the set cannot be represented.
 pub fn commissioning_observation_set_digest(
     records: &[EvidenceRecord],
-) -> Result<Digest, serde_json::Error> {
+) -> Result<Digest, CanonicalError> {
     let mut records = records
         .iter()
         .map(|record| record.digest().map(|digest| (record.id.clone(), digest)))
         .collect::<Result<Vec<_>, _>>()?;
     records.sort();
-    serde_json::to_vec(&ObservationSetSubject {
+    to_canonical_bytes(&ObservationSetSubject {
         kind: "commissioning_observation_set_v1",
         records: &records,
     })
