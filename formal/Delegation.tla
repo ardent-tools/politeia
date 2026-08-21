@@ -134,6 +134,24 @@ EveryAxisIsChecked ==
     \* travels through a different arm of `NarrowsCap`.
     /\ ~SubsetGrant([Narrow EXCEPT !.cap = NoCap], Narrow)
 
+\* Root-to-leaf attenuation, obtained by transitivity rather than by exploring
+\* deep chains.
+\*
+\* `Monotonic` relates each grant to its direct parent. The constitutional law
+\* is stronger: a leaf must not exceed the *root*, however many issuances lie
+\* between. That follows from pairwise narrowing exactly when the narrowing
+\* relation is transitive, so this checks the relation instead of lengthening
+\* the trace -- which is what makes the bound below affordable without giving
+\* up the property.
+\*
+\* `SubsetGrant` conjoins `\subseteq`, `<=` and `NarrowsCap`. The first two are
+\* transitive by construction. `NarrowsCap` is the one written here, so it is
+\* the one checked -- exhaustively over the modelled cap domain, which is small
+\* enough to enumerate completely.
+NarrowsCapIsTransitive ==
+    \A a, b, c \in Caps :
+        (NarrowsCap(a, b) /\ NarrowsCap(b, c)) => NarrowsCap(a, c)
+
 \* Exploration bound. The grant set only grows, so the reachable state space is
 \* unbounded and TLC would not terminate.
 \*
@@ -151,5 +169,6 @@ GrantBound == Cardinality(grants) <= 2
 Spec == Init /\ [][Next]_grants
 
 THEOREM Spec => []TypeOK /\ []Monotonic /\ []EveryAxisIsChecked
+            /\ []NarrowsCapIsTransitive
 
 =============================================================================
