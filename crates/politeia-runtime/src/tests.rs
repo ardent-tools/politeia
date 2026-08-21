@@ -334,3 +334,4 @@ include!("tests/successful_execution.rs");
 include!("tests/routing_binding.rs");
 include!("tests/replay.rs");
 include!("tests/wire.rs");
+include!("tests/authority_binding.rs");
