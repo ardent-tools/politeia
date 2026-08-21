@@ -29,6 +29,12 @@ jobs:
         with:
           key: msrv-1.85.0
       - run: cargo +1.85.0 check --workspace --all-targets --locked
+      # WHY: compiling at the MSRV does not prove the ACCEPTED BYTES hold there, and the
+      # canonical vectors exist so a second implementation can reproduce them. politeia-core
+      # carries every test that pins those bytes -- the digest pre-image, the per-domain
+      # envelope, and the golden vectors themselves -- so it is the scope that makes the
+      # claim true rather than the whole workspace, which would roughly double this job.
+      - run: cargo +1.85.0 test -p politeia-core --locked
 
   rust:
     name: rust (1.97.1)
