@@ -497,6 +497,28 @@ pub enum ExecutionLocality {
     Other,
 }
 
+impl ExecutionLocality {
+    /// How close this locality is to client control, lowest first.
+    ///
+    /// WHY the ordering lives with the type rather than with the routing code
+    /// that sorts by it: it is a property of the locality -- how much of the
+    /// environment the client controls -- and not of any one consumer's policy.
+    /// Keeping it here also keeps the match exhaustive. `ExecutionLocality` is
+    /// `#[non_exhaustive]`, so a consumer in another crate cannot match it
+    /// exhaustively and must write a catch-all; a new variant would then take
+    /// whatever rank that arm happened to give it, silently. Here a new variant
+    /// stops the build until someone places it.
+    pub const fn client_control_rank(&self) -> u8 {
+        match self {
+            ExecutionLocality::ClientLocal => 0,
+            ExecutionLocality::ClientRemote => 1,
+            ExecutionLocality::ProviderRemote => 2,
+            ExecutionLocality::CommissionerLocal => 3,
+            ExecutionLocality::Other => 4,
+        }
+    }
+}
+
 /// Bounded consumption limits on a delegation or operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
