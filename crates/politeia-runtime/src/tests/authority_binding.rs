@@ -232,7 +232,7 @@ fn a_registry_child_widening_audience_is_refused() {
 #[test]
 fn a_registry_child_outliving_its_parent_is_refused() {
     assert_registry_refuses("expiry", |child| {
-        child.expires_at = child.expires_at + SignedDuration::from_secs(1);
+        child.expires_at += SignedDuration::from_secs(1);
     });
 }
 
