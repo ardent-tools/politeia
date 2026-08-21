@@ -1,6 +1,7 @@
 //! xtask: repository maintenance tasks (structural checks + spec derivation).
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::Context;
@@ -276,19 +277,20 @@ fn rung_token(state: politeia_policy::hardening::HardeningState) -> anyhow::Resu
 fn render_policy_lifecycle() -> anyhow::Result<DerivedTable> {
     use politeia_policy::hardening::HardeningState;
 
-    let mut text = format!("# {GENERATED_COMMENT}\n");
-    text.push_str(&format!("version: {POLICY_LIFECYCLE_VERSION}\n"));
+    let mut text = String::new();
+    writeln!(text, "# {GENERATED_COMMENT}")?;
+    writeln!(text, "version: {POLICY_LIFECYCLE_VERSION}")?;
 
-    text.push_str("states:\n");
+    writeln!(text, "states:")?;
     for state in HardeningState::all() {
-        text.push_str(&format!("  - {}\n", rung_token(state)?));
+        writeln!(text, "  - {}", rung_token(state)?)?;
     }
 
-    text.push_str("transitions:\n");
+    writeln!(text, "transitions:")?;
     for state in HardeningState::all() {
         let from = rung_token(state)?;
         for next in state.successors() {
-            text.push_str(&format!("  - [{from}, {}]\n", rung_token(*next)?));
+            writeln!(text, "  - [{from}, {}]", rung_token(*next)?)?;
         }
     }
 
@@ -317,6 +319,15 @@ fn derive() -> anyhow::Result<()> {
         println!("derived {} ({})", table.path, table.owner);
     }
     Ok(())
+}
+
+/// A count with its noun, pluralised.
+fn counted(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 /// Check structural invariants and exact generated-schema freshness without mutation.
@@ -356,11 +367,11 @@ fn check() -> anyhow::Result<()> {
     reject_contradictory_population(&specs)?;
 
     println!(
-        "starter structural checks passed; {} published schemas and {} published tables, \
-         none unowned; {} schema-bearing types recorded as withheld",
-        specs.len(),
-        tables.len(),
-        WITHHELD_SCHEMAS.len()
+        "starter structural checks passed; {} and {}, none unowned; \
+         {} recorded as withheld",
+        counted(specs.len(), "published schema"),
+        counted(tables.len(), "published table"),
+        counted(WITHHELD_SCHEMAS.len(), "schema-bearing type")
     );
     Ok(())
 }
