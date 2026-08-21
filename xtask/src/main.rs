@@ -156,6 +156,10 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "reconnaissance authoring surface; publication waits on the first vertical slice",
     },
     WithheldSchema {
+        type_name: "politeia_core::state::StateEntry",
+        reason: "institution operational state; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
         type_name: "politeia_core::outbox::OutboxDeclaration",
         reason: "institution boundary declaration; publication waits on the first vertical slice",
     },
