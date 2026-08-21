@@ -19,6 +19,7 @@ pub mod commissioning;
 pub mod evidence;
 pub mod generation;
 pub mod institution;
+pub mod journal;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod outbox;
@@ -241,6 +242,8 @@ pub enum DigestDomain {
     RoutingDecision,
     /// The exact resource binding admitted for one routed operation.
     ExecutionAssignment,
+    /// One accepted state transition, linked to the entry before it.
+    TransitionJournalEntry,
 }
 
 impl DigestDomain {
@@ -264,7 +267,8 @@ impl DigestDomain {
             | Self::AvailabilitySnapshot
             | Self::ExecutionRequirement
             | Self::RoutingDecision
-            | Self::ExecutionAssignment => (),
+            | Self::ExecutionAssignment
+            | Self::TransitionJournalEntry => (),
         };
 
         let domains = vec![
@@ -281,6 +285,7 @@ impl DigestDomain {
             Self::ExecutionRequirement,
             Self::RoutingDecision,
             Self::ExecutionAssignment,
+            Self::TransitionJournalEntry,
         ];
         for domain in &domains {
             complete(*domain);
@@ -304,6 +309,7 @@ impl DigestDomain {
             DigestDomain::ExecutionRequirement => "execution_requirement_v1",
             DigestDomain::RoutingDecision => "routing_decision_v1",
             DigestDomain::ExecutionAssignment => "execution_assignment_v1",
+            DigestDomain::TransitionJournalEntry => "transition_journal_entry_v1",
         }
     }
 }
