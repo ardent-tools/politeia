@@ -20,6 +20,7 @@ transitions:
   - [shadow, calibrated]
   - [shadow, retired]
   - [calibrated, advisory]
+  - [calibrated, retired]
   - [advisory, enforced]
   - [advisory, retired]
   - [enforced, structural]
