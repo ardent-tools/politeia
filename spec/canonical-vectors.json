@@ -1,0 +1,110 @@
+{
+  "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
+  "accepted": [
+    {
+      "blake3": "2b47970501337a8588423ac67c66229fbbababc8c50da970147d15f5938b5502",
+      "canonical": "{\"A\":2,\"a\":3,\"b\":1,\"á\":4}",
+      "name": "object_keys_sort_by_unicode_scalar",
+      "value": {
+        "A": 2,
+        "a": 3,
+        "b": 1,
+        "á": 4
+      }
+    },
+    {
+      "blake3": "6215212c0334d0e31e1796e49bd6c9af9e6cfc9f0e49f75040a04464105ec143",
+      "canonical": "{\"outer\":{\"a\":[{\"x\":2,\"y\":1}],\"z\":1}}",
+      "name": "nesting_sorts_at_every_depth",
+      "value": {
+        "outer": {
+          "a": [
+            {
+              "x": 2,
+              "y": 1
+            }
+          ],
+          "z": 1
+        }
+      }
+    },
+    {
+      "blake3": "f3f25acf7058a01a79d42688670e66b4a6264317290305aa8bde4b36be322603",
+      "canonical": "{\"sequence\":[3,1,2]}",
+      "name": "arrays_keep_their_order",
+      "value": {
+        "sequence": [
+          3,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "blake3": "7a5929eba54327d5022d491b044c2d57f06dde87eb69f6d32e15d831a80522d0",
+      "canonical": "{\"absent\":null,\"present\":1}",
+      "name": "null_is_encoded_rather_than_omitted",
+      "value": {
+        "absent": null,
+        "present": 1
+      }
+    },
+    {
+      "blake3": "eec62f213fc6eb7cd31af4d7b8973c1667e46a23422aa0b605d90645f0d0d95c",
+      "canonical": "{\"max\":18446744073709551615,\"min\":-9223372036854775808,\"zero\":0}",
+      "name": "integers_at_the_type_boundary",
+      "value": {
+        "max": 18446744073709551615,
+        "min": -9223372036854775808,
+        "zero": 0
+      }
+    },
+    {
+      "blake3": "d8bed26b0fb10d1815ca75dd8fc99fb404df77455bb9d4ce7e5d40e1521976a7",
+      "canonical": "{\"quote\":\"a\\\"b\",\"tab\":\"a\\tb\",\"unicode\":\"😀\"}",
+      "name": "strings_carry_the_encoder_escaping",
+      "value": {
+        "quote": "a\"b",
+        "tab": "a\tb",
+        "unicode": "😀"
+      }
+    },
+    {
+      "blake3": "749261948c0ea97d977d221416a91749b68e0d50af7fde5f2a0719eb71fbfac4",
+      "canonical": "{\"array\":[],\"object\":{}}",
+      "name": "an_empty_object_and_an_empty_array",
+      "value": {
+        "array": [],
+        "object": {}
+      }
+    }
+  ],
+  "digest": "blake3 over the canonical bytes, lowercase hexadecimal",
+  "refused": [
+    {
+      "name": "a_float_has_no_canonical_text",
+      "reason": "floats have several spellings of one value and no single canonical text",
+      "value": {
+        "ratio": 1.5
+      }
+    },
+    {
+      "name": "a_float_nested_in_an_array",
+      "reason": "the refusal reaches every position, not only the top level",
+      "value": {
+        "samples": [
+          1,
+          2.0
+        ]
+      }
+    }
+  ],
+  "rules": [
+    "object members are emitted in ascending order of their keys' Unicode scalar values",
+    "no whitespace appears between tokens",
+    "array order is preserved; arrays are sequences, not sets",
+    "a null member is emitted, not omitted",
+    "numbers are integers; a float is refused rather than given a spelling",
+    "strings use the JSON escaping the accompanying canonical text shows"
+  ]
+}

@@ -228,7 +228,6 @@ pub enum DigestDomain {
 }
 
 impl DigestDomain {
-    /// The stable wire tag mixed into every digest of this domain.
     /// Every domain, in a form that cannot go stale.
     ///
     /// WHY the exhaustive match: a hand-kept list silently omits a variant
@@ -273,6 +272,7 @@ impl DigestDomain {
         domains
     }
 
+    /// The stable wire tag mixed into every digest of this domain.
     pub const fn tag(self) -> &'static str {
         match self {
             DigestDomain::EvidenceRecord => "evidence_record_v1",

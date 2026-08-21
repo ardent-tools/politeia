@@ -499,6 +499,7 @@ mod tests {
         reason = "a fixture that does not refuse is a broken test, not a finding"
     )]
     fn a_retired_version_is_quarantined() {
+        #[derive(Debug)]
         struct Recent;
         impl VersionedRecord for Recent {
             const CLASS: &'static str = "note";
@@ -623,7 +624,7 @@ mod tests {
         // A v1 body missing its own required field fails at v3, after both
         // steps ran -- so the reported version is where decoding was attempted,
         // not where the record came from.
-        let missing = stored("note_v1", r#"{}"#);
+        let missing = stored("note_v1", "{}");
         let refused = read::<Note>(&missing).expect_err("a note needs a title");
         assert!(
             matches!(

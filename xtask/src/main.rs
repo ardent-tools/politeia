@@ -18,6 +18,9 @@ const SCHEMA_SUFFIX: &str = ".schema.json";
 /// Where the progressive-hardening ladder is published.
 const POLICY_LIFECYCLE_PATH: &str = "spec/policy-lifecycle.yaml";
 
+/// Where the canonical-encoding reference vectors are published.
+const CANONICAL_VECTORS_PATH: &str = "spec/canonical-vectors.json";
+
 /// Format version of the published ladder table.
 ///
 /// This versions the *document shape* -- the `states`/`transitions` layout --
@@ -309,9 +312,126 @@ fn render_policy_lifecycle() -> anyhow::Result<DerivedTable> {
     })
 }
 
+/// Inputs whose canonical encoding is worth publishing, one per rule.
+///
+/// WHY the rules rather than the product records: a foreign implementation
+/// needs to know how *this* encoder orders keys, spells integers and escapes
+/// strings, and it can check that without holding any politeia type. A vector
+/// over `OperationIntent` would test the reader's model of that struct at the
+/// same time and fail for either reason.
+fn canonical_vectors() -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        (
+            "object_keys_sort_by_unicode_scalar",
+            serde_json::json!({"b": 1, "A": 2, "a": 3, "\u{00e1}": 4}),
+        ),
+        (
+            "nesting_sorts_at_every_depth",
+            serde_json::json!({"outer": {"z": 1, "a": [{"y": 1, "x": 2}]}}),
+        ),
+        (
+            "arrays_keep_their_order",
+            serde_json::json!({"sequence": [3, 1, 2]}),
+        ),
+        (
+            "null_is_encoded_rather_than_omitted",
+            serde_json::json!({"absent": null, "present": 1}),
+        ),
+        (
+            "integers_at_the_type_boundary",
+            serde_json::json!({"max": u64::MAX, "min": i64::MIN, "zero": 0}),
+        ),
+        (
+            "strings_carry_the_encoder_escaping",
+            serde_json::json!({"quote": "a\"b", "tab": "a\tb", "unicode": "\u{1f600}"}),
+        ),
+        (
+            "an_empty_object_and_an_empty_array",
+            serde_json::json!({"object": {}, "array": []}),
+        ),
+    ]
+}
+
+/// Inputs the canonical encoder must refuse, with the reason.
+///
+/// A vector file listing only what encodes describes half a contract. An
+/// implementation that happily encoded a float would match every accepted
+/// vector and disagree about the one case where two correct encoders can
+/// produce different bytes for one value.
+fn canonical_refusals() -> Vec<(&'static str, serde_json::Value, &'static str)> {
+    vec![
+        (
+            "a_float_has_no_canonical_text",
+            serde_json::json!({"ratio": 1.5}),
+            "floats have several spellings of one value and no single canonical text",
+        ),
+        (
+            "a_float_nested_in_an_array",
+            serde_json::json!({"samples": [1, 2.0]}),
+            "the refusal reaches every position, not only the top level",
+        ),
+    ]
+}
+
+/// Project the canonical-encoding rules as reference vectors.
+fn render_canonical_vectors() -> anyhow::Result<DerivedTable> {
+    let mut accepted = Vec::new();
+    for (name, value) in canonical_vectors() {
+        let bytes = politeia_core::canonical::to_canonical_bytes(&value)
+            .with_context(|| format!("canonical vector {name} must encode"))?;
+        let canonical = String::from_utf8(bytes.clone())
+            .with_context(|| format!("canonical vector {name} must be UTF-8"))?;
+        accepted.push(serde_json::json!({
+            "name": name,
+            "value": value,
+            "canonical": canonical,
+            "blake3": politeia_core::Digest::blake3(&bytes).as_str(),
+        }));
+    }
+
+    let mut refused = Vec::new();
+    for (name, value, reason) in canonical_refusals() {
+        anyhow::ensure!(
+            politeia_core::canonical::to_canonical_bytes(&value).is_err(),
+            "refusal vector {name} was accepted; the published contract would be wrong"
+        );
+        refused.push(serde_json::json!({
+            "name": name,
+            "value": value,
+            "reason": reason,
+        }));
+    }
+
+    let document = serde_json::json!({
+        "$comment": GENERATED_COMMENT,
+        "rules": [
+            "object members are emitted in ascending order of their keys' Unicode scalar values",
+            "no whitespace appears between tokens",
+            "array order is preserved; arrays are sequences, not sets",
+            "a null member is emitted, not omitted",
+            "numbers are integers; a float is refused rather than given a spelling",
+            "strings use the JSON escaping the accompanying canonical text shows",
+        ],
+        "digest": "blake3 over the canonical bytes, lowercase hexadecimal",
+        "accepted": accepted,
+        "refused": refused,
+    });
+    let mut bytes = serde_json::to_vec_pretty(&document)?;
+    bytes.push(b'\n');
+
+    Ok(DerivedTable {
+        path: CANONICAL_VECTORS_PATH,
+        owner: "politeia_core::canonical::to_canonical_bytes",
+        bytes,
+    })
+}
+
 /// Every published projection that is not a JSON Schema.
 fn generated_tables() -> anyhow::Result<Vec<DerivedTable>> {
-    Ok(vec![render_policy_lifecycle()?])
+    Ok(vec![
+        render_policy_lifecycle()?,
+        render_canonical_vectors()?,
+    ])
 }
 
 /// Emit public projections from their authoritative Rust types.
