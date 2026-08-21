@@ -152,6 +152,30 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "produced per authorization; no consumer reads it off the wire yet",
     },
     WithheldSchema {
+        type_name: "politeia_core::knowledge::Observation",
+        reason: "commissioning knowledge surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::knowledge::CandidateClaim",
+        reason: "commissioning knowledge surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::knowledge::FactApproval",
+        reason: "owner-approval surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::knowledge::ClaimStatus",
+        reason: "projected as part of CandidateClaim; no standalone consumer reads it off the wire",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::knowledge::Support",
+        reason: "projected as part of CandidateClaim; no standalone consumer reads it off the wire",
+    },
+    WithheldSchema {
+        type_name: "politeia_core::reconnaissance::ReconnaissanceScope",
+        reason: "commissioning authority surface; publication waits on the first vertical slice",
+    },
+    WithheldSchema {
         type_name: "politeia_evidence::assessment::AssessmentRelation",
         reason: "correction/supersession authoring surface; publication waits on the first vertical slice",
     },
