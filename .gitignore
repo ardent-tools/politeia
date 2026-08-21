@@ -6,3 +6,8 @@
 .env.*
 !.env.example
 .DS_Store
+
+# TLC writes per-run state and fingerprint files into a `states/` directory
+# beside whichever module it checked. They are run output, not source, and one
+# local run produces a few hundred of them.
+formal/**/states/

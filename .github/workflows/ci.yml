@@ -108,3 +108,54 @@ jobs:
           git diff --exit-code
           spec_status="$(git status --porcelain=v1 --untracked-files=all -- spec)"
           test -z "$spec_status"
+
+  formal:
+    name: formal
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Record the toolchain that checks the models
+        shell: bash
+        run: java -version
+      # Pinned by release tag and verified by digest. An unpinned download would
+      # make the assurance argument depend on whatever that URL serves today.
+      - name: Fetch the model checker
+        shell: bash
+        env:
+          TLA_VERSION: v1.7.4
+          TLA_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+        run: |
+          curl --fail --silent --show-error --location \
+            --output tla2tools.jar \
+            "https://github.com/tlaplus/tlaplus/releases/download/${TLA_VERSION}/tla2tools.jar"
+          echo "${TLA_SHA256}  tla2tools.jar" | sha256sum --check --strict
+      - name: Check the models
+        shell: bash
+        working-directory: formal
+        run: |
+          for module in Workflow Delegation; do
+            echo "::group::${module}"
+            java -XX:+UseParallelGC -cp ../tla2tools.jar tlc2.TLC \
+              -nowarning -config "${module}.cfg" "${module}.tla"
+            echo "::endgroup::"
+          done
+      # The load-bearing step. A checker that has only run against specs which
+      # satisfy their invariants has not shown it can report a violation: it
+      # would pass with an invariant written as TRUE, with a cfg naming no
+      # invariant, or with a jar that never executed. This module plants the
+      # one transition the workflow invariant forbids and requires a rejection.
+      - name: Require the checker to reject a planted defect
+        shell: bash
+        working-directory: formal/negative
+        run: |
+          if java -XX:+UseParallelGC -cp ../../tla2tools.jar tlc2.TLC \
+               -nowarning -config UnauthorizedWorkflow.cfg UnauthorizedWorkflow.tla
+          then
+            echo "::error::the planted unauthorized-execution defect was accepted; \
+          the model checker is not reporting violations and every green run above is worthless"
+            exit 1
+          fi
+          echo "the model checker rejected the planted defect, as required"
