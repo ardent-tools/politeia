@@ -23,6 +23,7 @@ pub mod lifecycle;
 pub mod outbox;
 pub mod reconnaissance;
 pub mod records;
+pub mod state;
 
 #[cfg(test)]
 mod attenuation_properties;
