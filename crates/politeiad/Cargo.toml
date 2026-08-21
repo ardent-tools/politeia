@@ -9,6 +9,16 @@ rust-version.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 
+# WHY dev-only: the binary is still a scaffold and does not run the slice. The
+# integration test does, which is the increment that can be honest today --
+# depending on these from the binary would claim the daemon composes them when
+# it does not.
+[dev-dependencies]
+jiff.workspace = true
+politeia-core.workspace = true
+politeia-evidence.workspace = true
+politeia-policy.workspace = true
+
 [lints]
 workspace = true
 
