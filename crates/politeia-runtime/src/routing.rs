@@ -96,22 +96,14 @@ impl CapabilityVerificationRecord {
     }
 }
 
-/// Where an execution resource operates relative to the client trust domain.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
-#[non_exhaustive]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionLocality {
-    /// Runs inside the client-controlled local environment.
-    ClientLocal,
-    /// Runs in a remote environment controlled by the client.
-    ClientRemote,
-    /// Runs in a remote provider-controlled environment.
-    ProviderRemote,
-    /// Runs on commissioner-controlled infrastructure.
-    CommissionerLocal,
-    /// Other explicitly modeled locality.
-    Other,
-}
+// `ExecutionLocality` is re-exported from `politeia_core` rather than defined
+// here. It is a data-governance axis before it is a routing input --
+// `docs/16-DATA_GOVERNANCE.md` makes locality a hard policy axis over the data
+// class, operation, execution resource, trust domain, and sink -- and this
+// crate is downstream of the one governance lives in, so a definition here is
+// out of reach of every consumer that needs it first. Routing consumes it; it
+// does not own it.
+pub use politeia_core::ExecutionLocality;
 
 /// Immutable identity, boundaries, and cost envelope of one execution resource.
 ///

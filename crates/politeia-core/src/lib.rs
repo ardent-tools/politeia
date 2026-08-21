@@ -473,6 +473,30 @@ pub enum DataClass {
     ClientRestricted(String),
 }
 
+/// Where work runs relative to the client trust domain.
+///
+/// WHY this lives beside `DataClass` and `Effect` rather than with routing:
+/// `docs/16-DATA_GOVERNANCE.md` makes locality a hard policy axis over the data
+/// class, operation, execution resource, trust domain, and sink. Routing is one
+/// consumer of that axis and the governance layer is another, and the
+/// governance layer is upstream -- a definition in the routing crate is out of
+/// reach of everything that needs to reason about a boundary crossing.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionLocality {
+    /// Runs inside the client-controlled local environment.
+    ClientLocal,
+    /// Runs in a remote environment controlled by the client.
+    ClientRemote,
+    /// Runs in a remote provider-controlled environment.
+    ProviderRemote,
+    /// Runs on commissioner-controlled infrastructure.
+    CommissionerLocal,
+    /// Other explicitly modeled locality.
+    Other,
+}
+
 /// Bounded consumption limits on a delegation or operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
