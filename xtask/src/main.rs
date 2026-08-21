@@ -515,6 +515,7 @@ fn check() -> anyhow::Result<()> {
         );
     }
 
+    reject_maintainer_notes_in_published_descriptions(&specs)?;
     reject_unowned_publications(&specs, &tables, Path::new(SPEC_DIR))?;
     reject_contradictory_population(&specs)?;
 
@@ -575,6 +576,83 @@ fn reject_contradictory_population(specs: &[DerivedSpec]) -> anyhow::Result<()> 
         );
     }
     Ok(())
+}
+
+/// Structured tags this repository uses to mark maintainer reasoning.
+///
+/// `STANDARDS.md` reserves these for notes to whoever maintains the code. A
+/// schema `description` is read by whoever consumes the wire format, and they
+/// are different audiences with different questions.
+const MAINTAINER_TAGS: &[&str] = &[
+    "WHY ",
+    "WARNING:",
+    "NOTE ",
+    "PERF",
+    "SAFETY",
+    "INVARIANT",
+    "TODO(",
+    "FIXME(",
+];
+
+/// Fail when a published description carries a note meant for a maintainer.
+///
+/// WHY this exists: `schemars` projects a type's doc comment verbatim into
+/// `description`, so a `///` on a schema-bearing type is public API. That is
+/// easy to forget while writing, because the comment reads as ordinary source
+/// commentary right up until it is published -- and this repository's own
+/// convention is to put substantial reasoning in doc comments.
+///
+/// It was found the expensive way: a paragraph explaining which Rust crate a
+/// type should live in was projected into three published schemas, where it
+/// told schema consumers something they cannot act on. The derived-spec check
+/// caught the bytes changing; nothing said the new bytes were wrong.
+///
+/// The rule is narrow on purpose. It does not police prose -- only the tags
+/// this repository already reserves for maintainer notes, which is exactly the
+/// material that has no consumer meaning.
+fn reject_maintainer_notes_in_published_descriptions(specs: &[DerivedSpec]) -> anyhow::Result<()> {
+    for spec in specs {
+        let document: serde_json::Value = serde_json::from_slice(&spec.bytes)
+            .with_context(|| format!("parse derived schema {}", spec.path))?;
+        let mut found = Vec::new();
+        collect_descriptions(&document, &mut found);
+        for description in found {
+            for tag in MAINTAINER_TAGS {
+                anyhow::ensure!(
+                    !description.contains(tag),
+                    "{} publishes a description containing the maintainer tag `{}`; \
+                     a doc comment on a schema-bearing type is read by wire-format \
+                     consumers, so maintainer reasoning belongs in a `//` comment: {}",
+                    spec.path,
+                    tag.trim(),
+                    description.lines().next().unwrap_or(&description)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every `description` string anywhere in a schema document.
+fn collect_descriptions(value: &serde_json::Value, into: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(members) => {
+            for (key, member) in members {
+                if key == "description" {
+                    if let Some(text) = member.as_str() {
+                        into.push(text.to_string());
+                    }
+                }
+                collect_descriptions(member, into);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_descriptions(item, into);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Fail when `spec/` holds a file no Rust owner declares.

@@ -473,14 +473,19 @@ pub enum DataClass {
     ClientRestricted(String),
 }
 
-/// Where work runs relative to the client trust domain.
-///
-/// WHY this lives beside `DataClass` and `Effect` rather than with routing:
-/// `docs/16-DATA_GOVERNANCE.md` makes locality a hard policy axis over the data
-/// class, operation, execution resource, trust domain, and sink. Routing is one
-/// consumer of that axis and the governance layer is another, and the
-/// governance layer is upstream -- a definition in the routing crate is out of
-/// reach of everything that needs to reason about a boundary crossing.
+// WHY this lives beside `DataClass` and `Effect` rather than with routing:
+// `docs/16-DATA_GOVERNANCE.md` makes locality a hard policy axis over the data
+// class, operation, execution resource, trust domain, and sink. Routing is one
+// consumer of that axis and the governance layer is another, and the governance
+// layer is upstream -- a definition in the routing crate is out of reach of
+// everything that needs to reason about a boundary crossing.
+//
+// WARNING: this reasoning is a `//` comment and not a `///` one on purpose. The
+// doc comment below is projected verbatim into `description` in every published
+// schema that references this type, so it is public API for schema consumers.
+// Which Rust crate a type lives in is not something they can act on, and the
+// derived-spec check is what caught it being told to them.
+/// Where an execution resource operates relative to the client trust domain.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
