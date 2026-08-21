@@ -25,7 +25,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: "1.85.0"
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           key: msrv-1.85.0
       - run: cargo +1.85.0 check --workspace --all-targets --locked
@@ -49,7 +49,7 @@ jobs:
         with:
           toolchain: ${{ steps.repository-toolchain.outputs.channel }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       # --locked everywhere: a stale Cargo.lock fails fast at the step that
       # needed it rather than surfacing as a dirty-tree failure at the end.
       - run: cargo fmt --all -- --check
