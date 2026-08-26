@@ -1,0 +1,62 @@
+[meta]
+name = "politeia"
+repo = "ardent-tools/politeia"
+generated = false
+source_docs = [
+  "README.md",
+  "docs/00-CHARTER.md",
+  "docs/03-ONTOLOGY.md",
+  "START_HERE.md",
+]
+
+[architecture]
+summary = "A greenfield, harness-independent institutional control plane for human and machine work: a typed operating model that exposes only authorized operations, binds consequential state transitions to evidence, and improves its own operating projections without granting itself new authority."
+layers = [
+  "kernel",
+  "policy",
+  "evidence",
+  "protocol",
+  "runtime",
+  "sdk",
+  "daemon",
+]
+
+[[architecture.crates]]
+name = "politeia-core"
+path = "crates/politeia-core"
+role = "The typed kernel model: canonical identities, delegations, budgets, effects, data classes, and the epistemic states of institutional claims. Everything here is data and invariant; policy evaluation and dispatch live in sibling crates."
+
+[[architecture.crates]]
+name = "politeia-policy"
+path = "crates/politeia-policy"
+role = "Normative clauses, detector specs, bindings, decisions. A clause is the normative proposition; a detector is an evidence-producing mechanism with declared blind spots; a binding applies a clause to a scope with a consequence. None of the three is interchangeable with another."
+
+[[architecture.crates]]
+name = "politeia-evidence"
+path = "crates/politeia-evidence"
+role = "Evidence, verification, and attestation records. Evidence carries claims; attestation binds a verified subject to the exact policy, runtime, adapter, and delegation identities it was verified under."
+
+[[architecture.crates]]
+name = "politeia-protocol"
+path = "crates/politeia-protocol"
+role = "The transport-independent semantic protocol envelope. MCP, A2A, HTTP/gRPC, CLI, and embedded use are transports over the same operation model. No transport may reinterpret semantic operation meaning."
+
+[[architecture.crates]]
+name = "politeia-runtime"
+path = "crates/politeia-runtime"
+role = "The authorized dispatcher and effect lease. The scaffold models one protected-effect boundary: an operation intent is decided by the policy point, and only an allowed decision mints an unforgeable effect lease. Lease construction is private to this crate."
+
+[[architecture.crates]]
+name = "politeia-sdk"
+path = "crates/politeia-sdk"
+role = "Extension-side types. Extension manifests declare capabilities they require; a manifest is a request for capabilities, never a grant."
+
+[[architecture.crates]]
+name = "politeiad"
+path = "crates/politeiad"
+role = "Binary entry point. Currently a starter scaffold only (\"politeiad starter: semantic kernel scaffold only\") — the composed daemon that will host the kernel, policy, evidence, protocol, and runtime crates has not been assembled yet."
+
+[[architecture.crates]]
+name = "xtask"
+path = "xtask"
+role = "Repository maintenance tasks: structural checks and derivation of the published `spec/*.schema.json` and `spec/*.yaml` projections from the Rust types (`cargo run -p xtask -- derive` / `check`). Generated projections are authoritative once derived; do not hand-edit them."

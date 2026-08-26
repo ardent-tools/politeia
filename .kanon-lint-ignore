@@ -7,3 +7,18 @@
 # technically.
 WRITING/ai-trope:harness:README.md
 WRITING/ai-trope:harness:docs/**
+
+# WHY: the hybrid-gate reusable workflow is called as @main BY FLEET DESIGN —
+# forkwright/.github is operator-owned, so the supply-chain surface the
+# unpinned-action rule guards is the fleet itself, and @main is the deliberate
+# single-update channel that propagates gate fixes to every caller repo.
+# Matches every other adopting repo's suppression (e.g. harmonia).
+SHELL/unpinned-action:.github/workflows/gate-attestation.yml
+
+# WHY: hybrid-gate.yml (forkwright/.github) already declares
+# `concurrency: group: ${{ github.workflow }}-...` and its own comment states
+# a caller must NOT also set a concurrency group with that same key, or the
+# shared group self-cancels every adopting repo's runs against each other.
+# A caller-side concurrency block here would be the bug this rule exists to
+# catch, not the fix for it.
+YAML/missing-concurrency:.github/workflows/gate-attestation.yml
