@@ -1,0 +1,40 @@
+# politeia
+
+> A greenfield, harness-independent institutional control plane for human and machine work. A typed operating model that exposes only authorized operations, binds consequential state transitions to evidence, and improves its own operating projections without granting itself new authority.
+
+This repository is intentionally a *starter architecture*, not a feature-complete product. Read [START_HERE.md](START_HERE.md) before architectural work — it orders the normative doc corpus and states the first implementation objective.
+
+## Architecture
+
+Structured LLM corpus:
+- [_llm/architecture.toml](_llm/architecture.toml): workspace architecture, crate roles, and primary interfaces
+- [_llm/glossary.toml](_llm/glossary.toml): canonical ontology vocabulary, quoted from docs/03-ONTOLOGY.md
+
+`_llm/current_state.toml` and `_llm/decisions.toml` are intentionally absent: this repo's own [AGENTS.md](AGENTS.md) states that project planning (ROADMAP / STATE / vision / phases) lives in the kanon planning registry, not here — a hand-authored copy in this public repo would be a second, drifting source of the same facts. Those two files are meant to be produced by `kanon derive --apply --only llm-corpus-sync` from that registry once wired for this repo.
+
+Workspace of seven Rust crates plus one maintenance binary, in dependency order:
+
+- [crates/politeia-core](crates/politeia-core): The typed kernel model — canonical identities, delegations, budgets, effects, data classes, and the epistemic states of institutional claims.
+- [crates/politeia-policy](crates/politeia-policy): Normative clauses, detector specs, bindings, decisions.
+- [crates/politeia-evidence](crates/politeia-evidence): Evidence, verification, and attestation records.
+- [crates/politeia-protocol](crates/politeia-protocol): The transport-independent semantic protocol envelope (MCP, A2A, HTTP/gRPC, CLI, embedded).
+- [crates/politeia-runtime](crates/politeia-runtime): The authorized dispatcher and effect lease.
+- [crates/politeia-sdk](crates/politeia-sdk): Extension-side types; a manifest is a request for capabilities, never a grant.
+- [crates/politeiad](crates/politeiad): Binary entry point. Currently a starter scaffold only — the composed daemon is not yet assembled.
+- [xtask](xtask): Structural checks and derivation of the published `spec/*.schema.json` / `spec/*.yaml` projections from the Rust types (`cargo run -p xtask -- derive` / `check`).
+
+## Normative doc corpus
+
+`docs/` ships with the code and versions with it — constitution, ontology, contracts, ADRs. Read in the order [START_HERE.md](START_HERE.md) states, starting with [docs/00-CHARTER.md](docs/00-CHARTER.md) (purpose, success criteria, product-level invariant), [docs/01-ANTI_SCOPE.md](docs/01-ANTI_SCOPE.md), [docs/02-CONSTITUTION.md](docs/02-CONSTITUTION.md) (non-negotiable unless the user explicitly changes it), and [docs/03-ONTOLOGY.md](docs/03-ONTOLOGY.md) (the durable semantic center every transport projects but never redefines). Architecture decisions live under [docs/adr/](docs/adr/).
+
+## Agent entry points
+
+- [AGENTS.md](AGENTS.md) - the agent operating contract (required behavior, repository rules)
+- [CLAUDE.md](CLAUDE.md) - pointer to AGENTS.md and to the kanon planning registry
+- Build: `cargo build --workspace`
+- Lint/format/test: see `.kanon-ci.toml` for the exact `[stages.*]` commands this repo's local gate runs
+- Derive published schemas: `cargo run -p xtask -- derive` then `cargo run -p xtask -- check`
+
+## License
+
+Mozilla Public License 2.0. See [LICENSE](LICENSE). Copyright Ardent Works LLC (<https://ardent.tools>).

@@ -1,0 +1,82 @@
+[meta]
+name = "politeia"
+repo = "ardent-tools/politeia"
+generated = false
+source_docs = [
+  "docs/03-ONTOLOGY.md",
+  "README.md",
+  "AGENTS.md",
+]
+
+[glossary]
+description = "Canonical ontology terms for politeia, quoted from docs/03-ONTOLOGY.md (the durable semantic center: transports and UIs project it, they do not redefine it) plus product-level vocabulary from README.md."
+
+[[terms]]
+term = "Institution"
+definition = "Authority domain whose approved model and workspace are distinct from every other institution."
+canonical = true
+
+[[terms]]
+term = "TrustDomain"
+definition = "Boundary that controls data, credentials, execution, evidence, and durable state."
+canonical = true
+
+[[terms]]
+term = "Delegation"
+definition = "Attenuation from one authority context to another. Delegated authority can only narrow (monotonic authority)."
+canonical = true
+
+[[terms]]
+term = "RuntimeGeneration"
+definition = "Immutable, content-bound specialization of canonical source + institution workspace + approved policy + lifecycle profile + deployment topology + exact schemas, packs, adapters, and toolchain inputs."
+canonical = true
+
+[[terms]]
+term = "Commissioner"
+definition = "Temporarily delegated principal that may discover, model, implement, and prepare an institution for operation. Its authority is explicit, scoped, expiring/revocable, and never self-issued."
+canonical = true
+
+[[terms]]
+term = "NormativeClause"
+definition = "Proposition about what must/may/must-not be true."
+canonical = true
+
+[[terms]]
+term = "DetectorSpec"
+definition = "Mechanism that produces evidence relevant to a clause, with declared blind spots."
+canonical = true
+
+[[terms]]
+term = "PolicyBinding"
+definition = "Applicability + detector/evidence semantics + decision consequence, applying a clause to a scope."
+canonical = true
+
+[[terms]]
+term = "EffectSubject"
+definition = "Canonical identity derived from the target, resolved operation, resource set, and effect-defining parameters. Equivalent or uncertainly overlapping effects must not evade replay checks through fresh local identifiers or alternate encodings."
+canonical = true
+
+[[terms]]
+term = "ExecutionEnvelope"
+definition = "Immutable cross-context request/authorization carrier binding the exact request-body and resolved OperationSpec digests, intent, effect subject, authority, policy/runtime identities, intended target audience and resource/adapter identities, operation-specific precondition contract and evaluation, replay contract, expiry, and evidence obligations. Neither an effect lease nor evidence that execution occurred."
+canonical = true
+
+[[terms]]
+term = "ExecutionOutcome"
+definition = "Target-side semantic result value such as succeeded, failed, partially_applied, or not_executed. Carries no confidence or finality; the absence of an outcome is not itself an outcome."
+canonical = true
+
+[[terms]]
+term = "harness independence"
+definition = "MCP/A2A/HTTP/CLI are transports, not the ontology — a core product property (README.md § Core properties). Not an AI-trope filler word in this repo; the repo's own .kanon-lint-ignore scopes WRITING/ai-trope:harness to README.md and docs/ for exactly this reason."
+canonical = true
+
+[[terms]]
+term = "progressive hardening"
+definition = "The enforcement ladder observe -> model -> approve -> shadow -> calibrate -> enforce -> structural, declared by politeia_policy::hardening and published at spec/policy-lifecycle.yaml."
+canonical = true
+
+[[terms]]
+term = "politeiad"
+definition = "The composed daemon binary. Currently a starter scaffold only; not yet the assembled kernel/policy/evidence/protocol/runtime daemon."
+canonical = true

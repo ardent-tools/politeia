@@ -1,0 +1,66 @@
+# WHY(kanon#2522): adopts the fleet hybrid gate (aletheia#6426 generalized in
+# forkwright/.github) so a trailer-stamped commit (local `kanon gate --full
+# --stamp`) takes a fast trailer-verify path, and an off-slot PR carrying no
+# Gate-Passed trailer falls through to a real CI build of the same
+# fmt/check/clippy/nextest[/doctest] stages the trailer would have attested.
+# All gate logic lives in the reusable workflow; this file supplies only
+# politeia's own commands and flags (mirrors the `[stages.*]` cmd strings in
+# .kanon-ci.toml, minus the local-only `--jobs 8`, which a hosted runner does
+# not need).
+#
+# WHY hosted in forkwright/.github, not forkwright/kanon: GitHub cannot
+# resolve a `workflow_call` reference into a repo that is PRIVATE and owned
+# by a personal (non-organization) account for a caller in a separate repo.
+# forkwright/.github is public and already serves this reusable to every
+# other adopting fleet repo (harmonia, thumos, theatron, akroasis).
+#
+# WHY additive alongside the existing `ci`/`msrv`/`formal` jobs rather than
+# replacing them: those cover ground this reusable does not (the MSRV floor,
+# the xtask-derived-schema freshness check, the TLA+ model-checked
+# invariants) and stay as-is. `gate` becomes the one context branch
+# protection can point at without waiting on a local build box.
+#
+# NOTE: this repo has no `git = "https://github.com/forkwright/..."`
+# dependency in any workspace Cargo.toml (grepped directly), so
+# needs_fleet_repo_token stays false. No native/system library dependency
+# either -- every workspace crate (anyhow, blake3, jiff, schemars, serde,
+# snafu, tokio, uuid) is pure Rust, matching the existing `rust` CI job,
+# which installs no apt packages today.
+name: Gate Attestation
+
+on:
+  pull_request:
+    branches: [main]
+  # WHY push-to-main is a trigger and not just pull_request: a squash merge
+  # does not carry the source commits' trailers, so no commit on main has a
+  # Gate-Passed trailer -- check-trailer finds none and routes to
+  # full-gate-build, which is the job that actually compiles the workspace.
+  # Without this nothing ever builds main after a squash merge.
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# WHY no concurrency: block here: hybrid-gate.yml itself already declares
+# `concurrency: group: ${{ github.workflow }}-${{ github.ref }}` and its own
+# comment states callers must NOT also set a concurrency group with that
+# same key, or the shared group self-cancels.
+
+jobs:
+  gate:
+    uses: forkwright/.github/.github/workflows/hybrid-gate.yml@main
+    with:
+      fmt_cmd: "cargo fmt --all -- --check"
+      check_cmd: "cargo check --workspace --all-targets --locked"
+      clippy_cmd: "cargo clippy --workspace --all-targets --locked -- -D warnings"
+      nextest_cmd: "cargo nextest run --workspace --locked"
+      # WHY set: nextest does not execute doctests, and the existing `rust`
+      # job's `cargo test --workspace --locked` does run them by default --
+      # this keeps the gate's coverage a superset, not a regression.
+      doctest_cmd: "cargo test --workspace --locked --doc"
+      needs_fleet_repo_token: false
+      rust_cache_key: "gate-attestation"
+      ai_attribution_check: true
+      docs_only_exemption: true
+    secrets: inherit
