@@ -57,7 +57,7 @@ jobs:
       # WHY: a prebuilt scanner binary decouples the scanner's own MSRV from
       # this repo's toolchain. The scanner version is pinned and deliberately
       # reviewed, never floated.
-      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
           tool: cargo-audit@0.22.2
       - name: cargo audit
