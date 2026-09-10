@@ -43,6 +43,10 @@ use politeiad::{
 };
 
 mod commissioning;
+mod handoff;
+pub(crate) mod learning;
+mod lifecycle;
+pub(crate) mod operational;
 use politeiad::service_generation::CommissioningReceipt;
 
 /// The two intentionally disjoint reference institutions exercised by the package.
@@ -194,7 +198,10 @@ pub(crate) struct GenerationDocuments {
 /// These values are intentionally supplied from an independent test control
 /// path. The fixture cannot synthesize a clean result, its direct grants, or
 /// a proof and call that an activation test.
+#[derive(Clone)]
 pub(crate) struct ActivationDocuments {
+    /// Independent verifier calibration recorded before the producer run.
+    pub(crate) calibration: SignedAdmissionWire<EvidenceRequest>,
     /// Signed run of the exact lifecycle control.
     pub(crate) run: SignedAdmissionWire<ControlRun>,
     /// Durable direct authority for the control-run producer.
@@ -302,6 +309,7 @@ impl ReferenceFixture {
                     AdmissionKind::Delegation,
                     AdmissionKind::Generation,
                     AdmissionKind::LearningContext,
+                    AdmissionKind::OperationIntent,
                 ],
             ),
             anchor(
@@ -318,7 +326,11 @@ impl ReferenceFixture {
             anchor(
                 &identities.control_producer,
                 identities.control_producer_key(),
-                [AdmissionKind::ControlRun],
+                [
+                    AdmissionKind::ControlRun,
+                    AdmissionKind::ActivationProof,
+                    AdmissionKind::Evidence,
+                ],
             ),
             anchor(
                 &identities.verifier,
@@ -903,10 +915,6 @@ impl ReferenceFixture {
     /// Serialize an activation or rollback request around independently
     /// produced assurance. The daemon re-admits all four supplied wires and
     /// performs the durable compare-and-swap.
-    #[expect(
-        dead_code,
-        reason = "the daemon acceptance step consumes this only after a live generation is published"
-    )]
     pub(crate) fn activation_request(
         &self,
         kind: &str,
@@ -924,6 +932,7 @@ impl ReferenceFixture {
                 "expected_revision": expected_revision,
                 "expected_active": expected_active,
                 "assurance": {
+                    "calibration": assurance.calibration,
                     "run": assurance.run,
                     "run_authority": assurance.run_authority,
                     "proof": assurance.proof,

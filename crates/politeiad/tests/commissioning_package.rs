@@ -14,6 +14,9 @@
 #[path = "package_support/mod.rs"]
 mod package_support;
 
+#[path = "package_process/lifecycle.rs"]
+mod lifecycle;
+
 use std::{
     error::Error,
     fs,
@@ -23,10 +26,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+use package_support::operational::OperationalFixture;
 use package_support::{ReferenceFixture, ReferenceInstitutionKind};
 use politeiad::transport::{LocalOutcome, LocalResponse};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+
+fn status_value(database_url: &str, fixture: &ReferenceFixture) -> TestResult<serde_json::Value> {
+    let response = await_status(database_url, fixture)?;
+    match response.outcome {
+        LocalOutcome::Ok {
+            result: politeiad::OperationResult::Coordinated { result, .. },
+        } => Ok(result),
+        outcome => Err(format!("status did not return a durable snapshot: {outcome:?}").into()),
+    }
+}
 
 fn database_url() -> TestResult<String> {
     Ok(std::env::var("POLITEIA_STORAGE_TEST_DATABASE_URL")?)
@@ -208,8 +222,11 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     let database_url = database_url()?;
     assert_ne!(client_binary(), daemon_binary());
     let executable = Path::new(daemon_binary());
-    let software = ReferenceFixture::new(ReferenceInstitutionKind::SoftwareDevelopment, executable);
-    let analytics = ReferenceFixture::new(ReferenceInstitutionKind::Analytics, executable);
+    let mut software =
+        ReferenceFixture::new(ReferenceInstitutionKind::SoftwareDevelopment, executable);
+    let mut analytics = ReferenceFixture::new(ReferenceInstitutionKind::Analytics, executable);
+    let software_operations = OperationalFixture::install(&mut software);
+    let analytics_operations = OperationalFixture::install(&mut analytics);
     assert_ne!(software.kind.directory(), analytics.kind.directory());
     assert_ne!(
         fs::read(&software.source_document)?,
@@ -581,6 +598,20 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         software_generation, analytics_generation,
         "institutional inputs derive disjoint generations"
     );
+    for (fixture, operations, generation) in [
+        (&software, &software_operations, &software_generation),
+        (&analytics, &analytics_operations, &analytics_generation),
+    ] {
+        for (index, document) in operations.admission_requests().iter().enumerate() {
+            submit_commissioning(
+                &database_url,
+                fixture,
+                &format!("operational-evidence-{index}.json"),
+                document,
+            )?;
+        }
+        lifecycle::activate(&database_url, fixture, generation, "activate", true)?;
+    }
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;
     stop(software_daemon)?;
@@ -616,11 +647,11 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     );
     assert_eq!(
         software_result["active_generation"],
-        serde_json::Value::Null
+        serde_json::json!(software_generation)
     );
     assert_eq!(
         analytics_result["active_generation"],
-        serde_json::Value::Null
+        serde_json::json!(analytics_generation)
     );
     Ok(())
 }

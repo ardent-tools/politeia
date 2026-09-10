@@ -1,0 +1,286 @@
+//! Real lifecycle calibration, deliberate failures, and atomic activation.
+
+use jiff::Timestamp;
+use politeia_core::{
+    DelegationId, Digest, EvidenceId,
+    trust::{AdmissionKind, SignedAdmissionWire},
+};
+use politeia_evidence::assurance::ControlResult;
+use politeiad::service_generation_validation::GenerationValidationReport;
+
+use super::{
+    ReferenceFixture, TestResult, require_refusal, run, status_value, submit_commissioning,
+    write_request,
+};
+
+/// Activate or roll back only after independent public validation calls.
+pub(crate) fn activate(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    generation: &Digest,
+    kind: &str,
+    exercise_refusals: bool,
+) -> TestResult {
+    let control = format!("generation:{kind}");
+    let authorities = fixture.lifecycle_authorities(&control);
+    for (role, delegation) in [
+        ("producer", &authorities.run_authority),
+        ("verifier", &authorities.proof_authority),
+    ] {
+        submit_commissioning(
+            database_url,
+            fixture,
+            &format!("{kind}-{role}-authority.json"),
+            &serde_json::json!({"kind": "admit_delegation", "delegation": delegation}),
+        )?;
+    }
+    let verifier = validate(database_url, fixture, generation, &control, "verifier")?;
+    let calibration = fixture.lifecycle_calibration(&verifier, &authorities);
+    let started_at = Timestamp::now();
+    let producer = validate(database_url, fixture, generation, &control, "producer")?;
+    let assurance = fixture.lifecycle_assurance(&producer, &calibration, &authorities, started_at);
+    assert_eq!(producer.known_good_result, ControlResult::Clean);
+    assert_eq!(producer.planted_violation_result, ControlResult::Violation);
+    assert!(producer.coverage.is_complete());
+    let snapshot = status_value(database_url, fixture)?;
+    let revision = snapshot["revision"]
+        .as_i64()
+        .ok_or("status omitted revision")?;
+    let active: Option<Digest> = serde_json::from_value(snapshot["active_generation"].clone())?;
+
+    if exercise_refusals {
+        // Every non-clean state reaches the real lifecycle boundary. A parse
+        // failure or an unreachable detector cannot count as this witness.
+        for result in ControlResult::all()
+            .into_iter()
+            .filter(|value| *value != ControlResult::Clean)
+        {
+            let mut altered = assurance.clone();
+            altered.run.payload.result = result;
+            altered.run = SignedAdmissionWire::sign(
+                AdmissionKind::ControlRun,
+                fixture.host_trust.workspace.institution.clone(),
+                fixture.host_trust.workspace.id.clone(),
+                fixture.identities.control_producer.clone(),
+                altered.run.payload,
+                fixture.identities.control_producer_key(),
+            )?;
+            refuse(
+                database_url,
+                fixture,
+                "lifecycle-non-clean.json",
+                &fixture.activation_request(
+                    kind,
+                    generation.clone(),
+                    revision,
+                    active.clone(),
+                    altered,
+                ),
+                "signed lifecycle assurance differs from freshly calibrated artifact validation",
+            )?;
+        }
+        let mut wrong_grant = assurance.clone();
+        wrong_grant.run.payload.authorization = Digest::blake3(b"another otherwise-adequate grant");
+        wrong_grant.run = SignedAdmissionWire::sign(
+            AdmissionKind::ControlRun,
+            fixture.host_trust.workspace.institution.clone(),
+            fixture.host_trust.workspace.id.clone(),
+            fixture.identities.control_producer.clone(),
+            wrong_grant.run.payload,
+            fixture.identities.control_producer_key(),
+        )?;
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-substituted-grant.json",
+            &fixture.activation_request(
+                kind,
+                generation.clone(),
+                revision,
+                active.clone(),
+                wrong_grant,
+            ),
+            "control run authorization digest differs from its admitted direct grant",
+        )?;
+        let mut dangling = assurance.clone();
+        dangling.proof.payload.retained_evidence = EvidenceId::new();
+        dangling.proof = SignedAdmissionWire::sign(
+            AdmissionKind::ActivationProof,
+            fixture.host_trust.workspace.institution.clone(),
+            fixture.host_trust.workspace.id.clone(),
+            fixture.identities.verifier.clone(),
+            dangling.proof.payload,
+            fixture.identities.verifier_key(),
+        )?;
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-dangling-evidence.json",
+            &fixture.activation_request(
+                kind,
+                generation.clone(),
+                revision,
+                active.clone(),
+                dangling,
+            ),
+            "activation proof lacks exact verifier-signed lifecycle calibration evidence",
+        )?;
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-stale-revision.json",
+            &fixture.activation_request(
+                kind,
+                generation.clone(),
+                revision - 1,
+                active.clone(),
+                assurance.clone(),
+            ),
+            "generation activation compare-and-swap is stale",
+        )?;
+
+        // Give the producer an otherwise valid verification grant so this
+        // failure establishes independence, rather than a missing permission.
+        let mut self_grant = authorities.proof_authority.payload.clone();
+        self_grant.id = DelegationId::new();
+        self_grant.subject = fixture.identities.control_producer.clone();
+        let self_grant = fixture.signed_commissioner_delegation(self_grant);
+        submit_commissioning(
+            database_url,
+            fixture,
+            "self-verifier-grant.json",
+            &serde_json::json!({
+                "kind": "admit_delegation", "delegation": self_grant,
+            }),
+        )?;
+        let snapshot = status_value(database_url, fixture)?;
+        let revision = snapshot["revision"]
+            .as_i64()
+            .ok_or("status omitted revision")?;
+        let mut self_proof = assurance.clone();
+        self_proof.proof_authority = self_grant;
+        let self_report = validate(
+            database_url,
+            fixture,
+            generation,
+            &control,
+            "self-calibration",
+        )?;
+        assert_eq!(self_report, producer);
+        self_proof.calibration.payload.producer_delegation =
+            self_proof.proof_authority.payload.id.clone();
+        self_proof.calibration.payload.observed_at = Timestamp::now();
+        self_proof.calibration = SignedAdmissionWire::sign(
+            AdmissionKind::Evidence,
+            fixture.host_trust.workspace.institution.clone(),
+            fixture.host_trust.workspace.id.clone(),
+            fixture.identities.control_producer.clone(),
+            self_proof.calibration.payload,
+            fixture.identities.control_producer_key(),
+        )?;
+        self_proof.proof.payload.proved_at = Timestamp::now();
+        self_proof.proof = SignedAdmissionWire::sign(
+            AdmissionKind::ActivationProof,
+            fixture.host_trust.workspace.institution.clone(),
+            fixture.host_trust.workspace.id.clone(),
+            fixture.identities.control_producer.clone(),
+            self_proof.proof.payload,
+            fixture.identities.control_producer_key(),
+        )?;
+        self_proof.run.payload.started_at = Timestamp::now();
+        assert_eq!(
+            validate(database_url, fixture, generation, &control, "self-producer")?,
+            producer
+        );
+        self_proof.run.payload.finished_at = Timestamp::now();
+        self_proof.run = SignedAdmissionWire::sign(
+            AdmissionKind::ControlRun,
+            fixture.host_trust.workspace.institution.clone(),
+            fixture.host_trust.workspace.id.clone(),
+            fixture.identities.control_producer.clone(),
+            self_proof.run.payload,
+            fixture.identities.control_producer_key(),
+        )?;
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-self-verification.json",
+            &fixture.activation_request(
+                kind,
+                generation.clone(),
+                revision,
+                active.clone(),
+                self_proof,
+            ),
+            "the control producer also signed its activation proof",
+        )?;
+    }
+    let snapshot = status_value(database_url, fixture)?;
+    let revision = snapshot["revision"]
+        .as_i64()
+        .ok_or("status omitted revision")?;
+    let active = serde_json::from_value(snapshot["active_generation"].clone())?;
+    submit_commissioning(
+        database_url,
+        fixture,
+        &format!("{kind}-generation.json"),
+        &fixture.activation_request(kind, generation.clone(), revision, active, assurance),
+    )?;
+    assert_eq!(
+        status_value(database_url, fixture)?["active_generation"],
+        serde_json::json!(generation)
+    );
+    let verified = submit_commissioning(
+        database_url,
+        fixture,
+        "verify-after-activation.json",
+        &serde_json::json!({
+            "kind": "generation", "request": {"kind": "verify", "generation": generation},
+        }),
+    )?;
+    assert_eq!(
+        verified["verified"], true,
+        "typed assurance rows preserve commissioning provenance"
+    );
+    Ok(())
+}
+
+fn validate(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    generation: &Digest,
+    control: &str,
+    role: &str,
+) -> TestResult<GenerationValidationReport> {
+    let response = submit_commissioning(
+        database_url,
+        fixture,
+        &format!("{role}-validation.json"),
+        &serde_json::json!({
+            "kind": "generation", "request": {"kind": "validate", "generation": generation, "control": control},
+        }),
+    )?;
+    Ok(serde_json::from_value(response["validation"].clone())?)
+}
+
+fn refuse(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    name: &str,
+    document: &serde_json::Value,
+    expected: &str,
+) -> TestResult {
+    let path = write_request(fixture, name, document)?;
+    require_refusal(
+        run(
+            database_url,
+            &[
+                std::path::Path::new("commissioning"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &path,
+            ],
+        )?,
+        name,
+        expected,
+    )
+}
