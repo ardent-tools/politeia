@@ -366,6 +366,7 @@ mod tests {
             Effect::ReadFilesystem,
             Effect::ReadSecret,
             Effect::ReadExternalSystem,
+            Effect::ReadInstitutionalContext,
             Effect::WriteFilesystem,
             Effect::SpawnProcess,
             Effect::NetworkEgress,

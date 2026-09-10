@@ -427,6 +427,8 @@ pub enum Effect {
     WriteSecret,
     /// Read from an external system.
     ReadExternalSystem,
+    /// Read approved institutional context through the coordinator.
+    ReadInstitutionalContext,
     /// Write to an external system.
     WriteExternalSystem,
     /// Create an artifact.
@@ -458,7 +460,10 @@ impl Effect {
     /// document, and a delegation naming the effect has done that naming.
     pub const fn mutates(&self) -> bool {
         match self {
-            Effect::ReadFilesystem | Effect::ReadSecret | Effect::ReadExternalSystem => false,
+            Effect::ReadFilesystem
+            | Effect::ReadSecret
+            | Effect::ReadExternalSystem
+            | Effect::ReadInstitutionalContext => false,
             Effect::WriteFilesystem
             | Effect::SpawnProcess
             | Effect::NetworkEgress

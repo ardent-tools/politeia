@@ -9,9 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use politeia_core::{
-    AdapterId, DataClass, Delegation, Digest, EvidenceId, ExecutionResourceId, InstitutionId,
-    InstitutionWorkspaceId, ObservationId, OperationId, PrincipalId, RuntimeGenerationId,
-    institution::TrustDomainId, knowledge::ApprovedFact,
+    AdapterId, DataClass, Delegation, Digest, Effect, EvidenceId, ExecutionResourceId,
+    InstitutionId, InstitutionWorkspaceId, ObservationId, OperationId, PrincipalId,
+    RuntimeGenerationId, institution::TrustDomainId, knowledge::ApprovedFact,
 };
 use politeia_evidence::{
     TrustedEvidenceRegistry,
@@ -22,6 +22,26 @@ use serde::{Deserialize, Serialize};
 
 /// Delegated action required to compile context.
 pub const COMPILE_CONTEXT_ACTION: &str = "context.compile";
+/// Delegated action required to inspect active-generation capability labels.
+pub const DISCOVER_CAPABILITIES_ACTION: &str = "context.discover-capabilities";
+/// Delegated action required to submit inert feedback about an admitted source.
+pub const RECORD_FEEDBACK_ACTION: &str = "context.record-feedback";
+/// Effect required for any coordinator-mediated institutional context read.
+pub const CONTEXT_READ_EFFECT: Effect = Effect::ReadInstitutionalContext;
+
+/// Deterministic delegation resource for all context in one workspace.
+pub fn context_workspace_resource(workspace: &InstitutionWorkspaceId) -> String {
+    format!("politeia:context:workspace:{}", workspace.0.hyphenated())
+}
+
+/// Deterministic delegation resource for one admitted context source.
+pub fn context_source_resource(workspace: &InstitutionWorkspaceId, source: &EvidenceId) -> String {
+    format!(
+        "{}:source:{}",
+        context_workspace_resource(workspace),
+        source.0.hyphenated()
+    )
+}
 
 /// A source's status in the approved institutional model.
 #[derive(
@@ -115,6 +135,18 @@ pub struct ContextRequest {
     pub limit: usize,
 }
 
+/// Immutable reference to approved content; never caller-supplied content bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovedContentReference {
+    /// Approved claim identity.
+    pub claim: politeia_core::ClaimId,
+    /// Exact subject digest.
+    pub subject: Digest,
+    /// Exact approved proposition digest used to verify coordinator retrieval.
+    pub proposition: Digest,
+}
+
 /// One context item selected only after authorization filtering.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -123,12 +155,8 @@ pub struct ContextItem {
     pub source: EvidenceId,
     /// Adapter that produced the admitted source observation.
     pub adapter: AdapterId,
-    /// Approved claim identity.
-    pub claim: politeia_core::ClaimId,
-    /// Exact subject digest.
-    pub subject: Digest,
-    /// Exact approved proposition digest.
-    pub proposition: Digest,
+    /// Content may be hydrated only by resolving this approved reference.
+    pub content: ApprovedContentReference,
     /// Evidence identities supporting the selected fact.
     pub evidence: BTreeSet<EvidenceId>,
     /// Observation identities supporting the selected fact.
@@ -159,8 +187,14 @@ pub enum ContextRefusal {
     CompilerVersionMismatch,
     /// The requester is not the delegation subject.
     RequesterMismatch,
-    /// Context compilation was not delegated.
+    /// Required semantic action was not delegated.
     ActionNotDelegated,
+    /// The delegation lacks the coordinator context-read effect.
+    ContextReadNotDelegated,
+    /// The delegation does not reach the requested workspace context.
+    WorkspaceResourceNotDelegated,
+    /// A supplied approved fact belongs to another workspace.
+    ForeignFactWorkspace,
     /// The delegation is expired at the supplied coordinator time.
     StaleDelegation,
 }
@@ -178,9 +212,18 @@ impl std::fmt::Display for ContextRefusal {
                 formatter.write_str("context requester differs from delegation subject")
             }
             Self::ActionNotDelegated => {
-                formatter.write_str("context compilation was not delegated")
+                formatter.write_str("required learning action was not delegated")
             }
-            Self::StaleDelegation => formatter.write_str("context delegation was expired"),
+            Self::ContextReadNotDelegated => {
+                formatter.write_str("institutional context read effect was not delegated")
+            }
+            Self::WorkspaceResourceNotDelegated => {
+                formatter.write_str("workspace context resource was not delegated")
+            }
+            Self::ForeignFactWorkspace => {
+                formatter.write_str("learning snapshot contains a fact from another workspace")
+            }
+            Self::StaleDelegation => formatter.write_str("learning delegation was expired"),
         }
     }
 }
@@ -189,14 +232,18 @@ impl std::error::Error for ContextRefusal {}
 
 /// Compile bounded context after all authority and data filters have run.
 ///
-/// Sources that fail an eligibility predicate do not enter the ranking vector,
-/// the returned IDs, or any refusal diagnostic. Ranking is deterministic:
-/// canonical sources outrank archives, then relevance descends, then source ID.
+/// The coordinator must resolve `ContextItem::content` against durable approved
+/// content and verify the returned bytes against `proposition`; raw transport
+/// content is never an input to this compiler. Sources that fail an eligibility
+/// predicate do not enter the ranking vector, returned IDs, or diagnostics.
+/// Ranking is deterministic: canonical sources outrank archives, then relevance
+/// descends, then source ID.
 ///
 /// # Errors
 ///
-/// Returns [`ContextRefusal`] when the snapshot, compiler, or delegation is
-/// not exact. An eligible-empty result is valid and contains no source details.
+/// Returns [`ContextRefusal`] when the snapshot, compiler, or workspace-level
+/// delegation is not exact. An eligible-empty result is valid and contains no
+/// source details.
 pub fn compile_context(
     snapshot: &LearningSnapshot,
     requester: &PrincipalId,
@@ -204,31 +251,18 @@ pub fn compile_context(
     request: &ContextRequest,
     now: jiff::Timestamp,
 ) -> Result<CompiledContext, ContextRefusal> {
-    if request.institution != snapshot.institution
-        || request.workspace != snapshot.workspace
-        || request.generation != snapshot.generation
-        || request.trust_domain != snapshot.trust_domain
-    {
-        return Err(ContextRefusal::SnapshotMismatch);
-    }
-    if request.compiler_version != snapshot.compiler_version {
-        return Err(ContextRefusal::CompilerVersionMismatch);
-    }
-    if delegation.subject != *requester {
-        return Err(ContextRefusal::RequesterMismatch);
-    }
-    if !delegation.actions.contains(COMPILE_CONTEXT_ACTION) {
-        return Err(ContextRefusal::ActionNotDelegated);
-    }
-    if delegation.is_expired(now) {
-        return Err(ContextRefusal::StaleDelegation);
-    }
+    validate_context_request(snapshot, request)?;
+    authorize_workspace_context(snapshot, requester, delegation, COMPILE_CONTEXT_ACTION, now)?;
+    validate_source_workspaces(snapshot)?;
 
     let mut eligible: Vec<&ContextSource> = snapshot
         .sources
         .iter()
         .filter(|source| {
-            source.trust_domain == request.trust_domain
+            delegation
+                .resources
+                .contains(&context_source_resource(&snapshot.workspace, &source.id))
+                && source.trust_domain == request.trust_domain
                 && source.audiences.contains(&request.audience)
                 && source.sinks.contains(&request.sink)
                 && source.data_classes.is_subset(&delegation.data_classes)
@@ -248,9 +282,11 @@ pub fn compile_context(
         .map(|source| ContextItem {
             source: source.id.clone(),
             adapter: source.adapter.clone(),
-            claim: source.fact.claim().clone(),
-            subject: source.fact.subject().clone(),
-            proposition: source.fact.proposition().clone(),
+            content: ApprovedContentReference {
+                claim: source.fact.claim().clone(),
+                subject: source.fact.subject().clone(),
+                proposition: source.fact.proposition().clone(),
+            },
             evidence: source.evidence.clone(),
             observations: source.observations.clone(),
         })
@@ -261,6 +297,63 @@ pub fn compile_context(
         input_ids: items.iter().map(|item| item.source.clone()).collect(),
         items,
     })
+}
+
+fn validate_context_request(
+    snapshot: &LearningSnapshot,
+    request: &ContextRequest,
+) -> Result<(), ContextRefusal> {
+    if request.institution != snapshot.institution
+        || request.workspace != snapshot.workspace
+        || request.generation != snapshot.generation
+        || request.trust_domain != snapshot.trust_domain
+    {
+        return Err(ContextRefusal::SnapshotMismatch);
+    }
+    if request.compiler_version != snapshot.compiler_version {
+        return Err(ContextRefusal::CompilerVersionMismatch);
+    }
+    Ok(())
+}
+
+fn authorize_workspace_context(
+    snapshot: &LearningSnapshot,
+    requester: &PrincipalId,
+    delegation: &Delegation,
+    action: &str,
+    now: jiff::Timestamp,
+) -> Result<(), ContextRefusal> {
+    if delegation.subject != *requester {
+        return Err(ContextRefusal::RequesterMismatch);
+    }
+    if !delegation.actions.contains(action) {
+        return Err(ContextRefusal::ActionNotDelegated);
+    }
+    if !delegation.effects.contains(&CONTEXT_READ_EFFECT) {
+        return Err(ContextRefusal::ContextReadNotDelegated);
+    }
+    if !delegation
+        .resources
+        .contains(&context_workspace_resource(&snapshot.workspace))
+    {
+        return Err(ContextRefusal::WorkspaceResourceNotDelegated);
+    }
+    if delegation.is_expired(now) {
+        return Err(ContextRefusal::StaleDelegation);
+    }
+    Ok(())
+}
+
+fn validate_source_workspaces(snapshot: &LearningSnapshot) -> Result<(), ContextRefusal> {
+    if snapshot
+        .sources
+        .iter()
+        .all(|source| source.fact.workspace() == &snapshot.workspace)
+    {
+        Ok(())
+    } else {
+        Err(ContextRefusal::ForeignFactWorkspace)
+    }
 }
 
 /// Inert request to discover only active-generation capability identities.
@@ -289,16 +382,22 @@ pub struct CapabilityDiscovery {
 
 /// Discover capability labels from the approved active generation.
 ///
-/// The result is descriptive. It is not a delegation, policy decision, effect
-/// lease, or permission to exercise any listed capability.
+/// The coordinator must first authenticate the requester and delegation chain.
+/// This function additionally requires `DISCOVER_CAPABILITIES_ACTION`,
+/// [`CONTEXT_READ_EFFECT`], and [`context_workspace_resource`] for the exact
+/// workspace. The result is descriptive: it is not a delegation, policy
+/// decision, effect lease, or permission to exercise any listed capability.
 ///
 /// # Errors
 ///
-/// Returns [`ContextRefusal::SnapshotMismatch`] for a request outside the
-/// exact active generation.
+/// Returns [`ContextRefusal`] for a request or delegated authority outside the
+/// exact active generation and workspace.
 pub fn discover_capabilities(
     snapshot: &LearningSnapshot,
+    requester: &PrincipalId,
+    delegation: &Delegation,
     request: &CapabilityRequest,
+    now: jiff::Timestamp,
 ) -> Result<CapabilityDiscovery, ContextRefusal> {
     if request.institution != snapshot.institution
         || request.workspace != snapshot.workspace
@@ -306,6 +405,13 @@ pub fn discover_capabilities(
     {
         return Err(ContextRefusal::SnapshotMismatch);
     }
+    authorize_workspace_context(
+        snapshot,
+        requester,
+        delegation,
+        DISCOVER_CAPABILITIES_ACTION,
+        now,
+    )?;
     Ok(CapabilityDiscovery {
         generation: snapshot.generation.clone(),
         operations: snapshot.capabilities.operations.clone(),
@@ -314,6 +420,9 @@ pub fn discover_capabilities(
 }
 
 /// Inert feedback submitted about a selected context item.
+///
+/// The coordinator authenticates the surrounding transport record; this value
+/// alone grants no authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackRequest {
@@ -353,8 +462,14 @@ pub struct CorrectionProposal {
 pub enum FeedbackRefusal {
     /// The feedback belongs to another snapshot.
     SnapshotMismatch,
+    /// Caller authority failed before source details were considered.
+    Authority(ContextRefusal),
     /// The named source is absent from the authenticated snapshot.
     MissingSource,
+    /// The named source's approved fact belongs to another workspace.
+    ForeignFactWorkspace,
+    /// The delegation does not reach the named source.
+    SourceResourceNotDelegated,
     /// The named observation is not provenance of that source.
     MissingObservation,
     /// The named evidence is not provenance of that source.
@@ -367,7 +482,14 @@ impl std::fmt::Display for FeedbackRefusal {
             Self::SnapshotMismatch => {
                 formatter.write_str("feedback does not match learning snapshot")
             }
+            Self::Authority(refusal) => write!(formatter, "feedback authority refused: {refusal}"),
             Self::MissingSource => formatter.write_str("feedback names no approved context source"),
+            Self::ForeignFactWorkspace => {
+                formatter.write_str("feedback source fact belongs to another workspace")
+            }
+            Self::SourceResourceNotDelegated => {
+                formatter.write_str("feedback source resource was not delegated")
+            }
             Self::MissingObservation => {
                 formatter.write_str("feedback observation is not source provenance")
             }
@@ -380,9 +502,12 @@ impl std::fmt::Display for FeedbackRefusal {
 
 impl std::error::Error for FeedbackRefusal {}
 
-/// Turn feedback into an inert correction proposal.
+/// Turn authenticated feedback into an inert correction proposal.
 ///
-/// This function does not approve a fact, create an assessment relation, or
+/// The coordinator must verify the caller identity and delegation provenance
+/// before calling this function. This function independently checks the exact
+/// subject, action, context-read effect, workspace resource, and source
+/// resource. It does not approve a fact, create an assessment relation, or
 /// alter the snapshot. The coordinator must separately authenticate a later
 /// owner-authorized correction using the evidence relation machinery.
 ///
@@ -392,7 +517,10 @@ impl std::error::Error for FeedbackRefusal {}
 /// source provenance.
 pub fn record_feedback(
     snapshot: &LearningSnapshot,
+    requester: &PrincipalId,
+    delegation: &Delegation,
     feedback: &FeedbackRequest,
+    now: jiff::Timestamp,
 ) -> Result<CorrectionProposal, FeedbackRefusal> {
     if feedback.institution != snapshot.institution
         || feedback.workspace != snapshot.workspace
@@ -400,11 +528,22 @@ pub fn record_feedback(
     {
         return Err(FeedbackRefusal::SnapshotMismatch);
     }
+    authorize_workspace_context(snapshot, requester, delegation, RECORD_FEEDBACK_ACTION, now)
+        .map_err(FeedbackRefusal::Authority)?;
     let source = snapshot
         .sources
         .iter()
         .find(|source| source.id == feedback.source)
         .ok_or(FeedbackRefusal::MissingSource)?;
+    if source.fact.workspace() != &snapshot.workspace {
+        return Err(FeedbackRefusal::ForeignFactWorkspace);
+    }
+    if !delegation
+        .resources
+        .contains(&context_source_resource(&snapshot.workspace, &source.id))
+    {
+        return Err(FeedbackRefusal::SourceResourceNotDelegated);
+    }
     if !source.observations.contains(&feedback.observation) {
         return Err(FeedbackRefusal::MissingObservation);
     }

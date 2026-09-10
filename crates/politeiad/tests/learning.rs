@@ -162,15 +162,26 @@ fn approved_fact(
     .expect("approved fact")
 }
 
-fn context_delegation(owner: &PrincipalId) -> Delegation {
+fn learning_delegation(
+    owner: &PrincipalId,
+    workspace: &InstitutionWorkspace,
+    action: &str,
+    sources: impl IntoIterator<Item = EvidenceId>,
+) -> Delegation {
+    let mut resources = BTreeSet::from([context_workspace_resource(&workspace.id)]);
+    resources.extend(
+        sources
+            .into_iter()
+            .map(|source| context_source_resource(&workspace.id, &source)),
+    );
     Delegation {
         id: DelegationId::new(),
         issuer: owner.clone(),
         subject: owner.clone(),
         parent: None,
-        actions: BTreeSet::from([COMPILE_CONTEXT_ACTION.to_string()]),
-        resources: BTreeSet::new(),
-        effects: BTreeSet::new(),
+        actions: BTreeSet::from([action.to_string()]),
+        resources,
+        effects: BTreeSet::from([CONTEXT_READ_EFFECT]),
         data_classes: BTreeSet::from([DataClass::Public]),
         audience: BTreeSet::from(["operator".to_string()]),
         expires_at: "2026-09-10T00:00:00Z".parse().expect("valid expiry"),
@@ -254,13 +265,102 @@ fn authorization_precedes_ranking_and_archive_cannot_displace_canonical_truth() 
     let compiled = compile_context(
         &snapshot,
         &workspace.owner,
-        &context_delegation(&workspace.owner),
+        &learning_delegation(
+            &workspace.owner,
+            &workspace,
+            COMPILE_CONTEXT_ACTION,
+            [canonical_id.clone(), archive_id.clone()],
+        ),
         &request,
         at(),
     )
     .expect("authorized public sources compile");
     assert_eq!(compiled.input_ids, vec![canonical_id, archive_id]);
     assert!(!compiled.input_ids.contains(&forbidden_id));
+}
+
+#[test]
+fn ungranted_or_foreign_context_sources_never_reach_ranking() {
+    let workspace = workspace();
+    let source_id = EvidenceId::new();
+    let snapshot = LearningSnapshot {
+        institution: workspace.institution.clone(),
+        workspace: workspace.id.clone(),
+        generation: RuntimeGenerationId::derive(b"active"),
+        trust_domain: workspace.trust_domain.clone(),
+        compiler_version: "learning-v1".to_string(),
+        sources: vec![source(
+            &workspace,
+            approved_fact(&workspace, "scoped"),
+            source_id.clone(),
+            KnowledgeCurrency::Canonical,
+            1,
+            DataClass::Public,
+        )],
+        capabilities: ActiveCapabilities::default(),
+    };
+    let request = ContextRequest {
+        institution: workspace.institution.clone(),
+        workspace: workspace.id.clone(),
+        generation: snapshot.generation.clone(),
+        compiler_version: snapshot.compiler_version.clone(),
+        audience: "operator".to_string(),
+        sink: "local".to_string(),
+        trust_domain: workspace.trust_domain.clone(),
+        limit: 1,
+    };
+    let empty_resource = Delegation {
+        resources: BTreeSet::new(),
+        ..learning_delegation(&workspace.owner, &workspace, COMPILE_CONTEXT_ACTION, [])
+    };
+    assert!(matches!(
+        compile_context(&snapshot, &workspace.owner, &empty_resource, &request, at()),
+        Err(ContextRefusal::WorkspaceResourceNotDelegated)
+    ));
+    let wrong_source = learning_delegation(
+        &workspace.owner,
+        &workspace,
+        COMPILE_CONTEXT_ACTION,
+        [EvidenceId::new()],
+    );
+    assert!(
+        compile_context(&snapshot, &workspace.owner, &wrong_source, &request, at())
+            .expect("workspace grant remains valid")
+            .items
+            .is_empty()
+    );
+
+    let mut foreign = workspace.clone();
+    foreign.id = InstitutionWorkspaceId::new();
+    let foreign_snapshot = LearningSnapshot {
+        sources: vec![source(
+            &workspace,
+            approved_fact(&foreign, "foreign"),
+            source_id,
+            KnowledgeCurrency::Canonical,
+            1,
+            DataClass::Public,
+        )],
+        ..snapshot
+    };
+    assert!(matches!(
+        compile_context(
+            &foreign_snapshot,
+            &workspace.owner,
+            &learning_delegation(
+                &workspace.owner,
+                &workspace,
+                COMPILE_CONTEXT_ACTION,
+                foreign_snapshot
+                    .sources
+                    .iter()
+                    .map(|source| source.id.clone()),
+            ),
+            &request,
+            at(),
+        ),
+        Err(ContextRefusal::ForeignFactWorkspace)
+    ));
 }
 
 #[test]
@@ -301,8 +401,20 @@ fn feedback_cannot_self_promote_or_mutate_context() {
             .clone(),
         feedback_digest: Digest::blake3(b"incorrect"),
     };
-    let proposal =
-        record_feedback(&snapshot, &feedback).expect("exact provenance creates only proposal");
+    let feedback_delegation = learning_delegation(
+        &workspace.owner,
+        &workspace,
+        RECORD_FEEDBACK_ACTION,
+        [context_source.id.clone()],
+    );
+    let proposal = record_feedback(
+        &snapshot,
+        &workspace.owner,
+        &feedback_delegation,
+        &feedback,
+        at(),
+    )
+    .expect("exact provenance creates only proposal");
     assert_eq!(proposal.feedback_digest, feedback.feedback_digest);
     assert_eq!(snapshot.sources.len(), 1, "feedback has no mutation path");
     let capability_request = CapabilityRequest {
@@ -311,11 +423,49 @@ fn feedback_cannot_self_promote_or_mutate_context() {
         generation: snapshot.generation.clone(),
     };
     assert!(
-        discover_capabilities(&snapshot, &capability_request)
-            .expect("active generation matches")
-            .operations
-            .is_empty()
+        discover_capabilities(
+            &snapshot,
+            &workspace.owner,
+            &learning_delegation(
+                &workspace.owner,
+                &workspace,
+                DISCOVER_CAPABILITIES_ACTION,
+                [],
+            ),
+            &capability_request,
+            at(),
+        )
+        .expect("active generation matches")
+        .operations
+        .is_empty()
     );
+    assert!(matches!(
+        discover_capabilities(
+            &snapshot,
+            &workspace.owner,
+            &learning_delegation(&workspace.owner, &workspace, COMPILE_CONTEXT_ACTION, [],),
+            &capability_request,
+            at(),
+        ),
+        Err(ContextRefusal::ActionNotDelegated)
+    ));
+    assert!(matches!(
+        record_feedback(
+            &snapshot,
+            &workspace.owner,
+            &learning_delegation(
+                &workspace.owner,
+                &workspace,
+                COMPILE_CONTEXT_ACTION,
+                [context_source.id.clone()],
+            ),
+            &feedback,
+            at(),
+        ),
+        Err(FeedbackRefusal::Authority(
+            ContextRefusal::ActionNotDelegated
+        ))
+    ));
 }
 
 fn assessment_record(id: EvidenceId, subject: Digest) -> EvidenceRecord {
