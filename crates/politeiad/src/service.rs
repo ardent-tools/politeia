@@ -437,8 +437,7 @@ impl PoliteiadService {
             };
             let dispatcher = admitted.dispatcher(
                 port,
-                PostgresAuthorizationLedger::new(self.storage.clone(), self.scope.clone())
-                    .with_workspace_revision(admitted.admission_revision()),
+                PostgresAuthorizationLedger::new(self.storage.clone(), self.scope.clone()),
             )?;
             let lease = dispatcher
                 .authorize(admitted.intent())
