@@ -72,6 +72,11 @@ impl ReferenceFixture {
             &to_canonical_bytes(&authority_wires.run_authority.payload)
                 .expect("owner-signed direct grant canonically encodes"),
         );
+        let completed_at = Timestamp::now();
+        assert!(
+            completed_at >= started_at,
+            "the producer control run cannot finish before the caller observed it starting"
+        );
         let run = ControlRun {
             id: EvidenceId::new(),
             control: report.control.clone(),
@@ -84,11 +89,12 @@ impl ReferenceFixture {
             population: report.population.clone(),
             authorization,
             mediation_path: report.mediation_path.clone(),
-            started_at: started_at.clone(),
-            finished_at: started_at.clone(),
+            started_at,
+            finished_at: completed_at,
             result: report.known_good_result,
             coverage: report.coverage,
         };
+        let retained_evidence = run.id.clone();
         let proof = ActivationProof {
             id: EvidenceId::new(),
             control: report.control.clone(),
@@ -102,8 +108,8 @@ impl ReferenceFixture {
             planted_violation_result: report.planted_violation_result,
             known_good: report.known_good.clone(),
             known_good_result: report.known_good_result,
-            retained_evidence: EvidenceId::new(),
-            proved_at: started_at,
+            retained_evidence,
+            proved_at: completed_at,
         };
         ActivationDocuments {
             run: SignedAdmissionWire::sign(
