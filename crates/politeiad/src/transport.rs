@@ -135,8 +135,13 @@ impl Drop for BoundSocket {
         let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
             return;
         };
+        #[expect(
+            clippy::verbose_bit_mask,
+            reason = "the octal mask states the group and other permission boundary directly"
+        )]
+        let no_group_or_other_access = metadata.mode() & 0o077 == 0;
         if metadata.file_type().is_socket()
-            && metadata.mode() & 0o077 == 0
+            && no_group_or_other_access
             && metadata.dev() == self.device
             && metadata.ino() == self.inode
         {

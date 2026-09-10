@@ -1158,10 +1158,9 @@ mod tests {
     #[test]
     fn artifact_inputs_are_relative_to_the_installed_workspace() {
         let root = Path::new("/installed/workspace");
-        assert_eq!(
+        assert!(
             confined(root, Path::new("approved/policy.json"))
-                .expect("relative input is installed below the workspace"),
-            root.join("approved/policy.json")
+                .is_ok_and(|path| path == root.join("approved/policy.json"))
         );
         assert!(confined(root, Path::new("../outside")).is_err());
         assert!(confined(root, Path::new("/outside")).is_err());

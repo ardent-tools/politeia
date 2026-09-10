@@ -124,7 +124,7 @@ pub enum CapabilityQualificationProbe {
     /// and refused an input just beyond its declared resource-count bound.
     ResourceManifest {
         /// Exact registered handler contract exercised by the probe.
-        operation: RegisteredOperation,
+        operation: Box<RegisteredOperation>,
         /// Public known-good input supplied to the real manifest algorithm.
         known_good_resources: BTreeSet<String>,
         /// Actual deterministic output observed for the known-good input.
@@ -426,19 +426,16 @@ impl CapabilityQualificationEvidence {
             let planted_resources = (0..planted_count)
                 .map(|index| format!("public:capability-probe:{index:04}"))
                 .collect();
-            let planted_refusal = match derive_resource_manifest(
+            let Err(planted_refusal) = derive_resource_manifest(
                 &operation.spec,
                 &planted_resources,
                 *maximum_resources,
                 *maximum_resource_bytes,
-            ) {
-                Err(refusal) => refusal,
-                Ok(_) => {
-                    return Err(CapabilityQualificationRefusal::ManifestOperationMismatch);
-                }
+            ) else {
+                return Err(CapabilityQualificationRefusal::ManifestOperationMismatch);
             };
             CapabilityQualificationProbe::ResourceManifest {
-                operation: operation.clone(),
+                operation: Box::new(operation.clone()),
                 known_good_resources,
                 known_good_manifest,
                 planted_resources,
@@ -962,7 +959,9 @@ impl PoliteiadService {
             &submission.qualification.resource,
             &submission.qualification.profile,
             match &submission.qualification.probe {
-                CapabilityQualificationProbe::ResourceManifest { operation, .. } => Some(operation),
+                CapabilityQualificationProbe::ResourceManifest { operation, .. } => {
+                    Some(operation.as_ref())
+                }
                 CapabilityQualificationProbe::NoExecutableClaims => None,
             },
         )
