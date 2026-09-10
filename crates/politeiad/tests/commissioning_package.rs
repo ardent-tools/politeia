@@ -69,6 +69,27 @@ impl Drop for Daemon {
     }
 }
 
+fn write_request(
+    fixture: &ReferenceFixture,
+    name: &str,
+    value: serde_json::Value,
+) -> TestResult<std::path::PathBuf> {
+    let path = fixture.root.join(name);
+    fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
+    Ok(path)
+}
+
+fn require_coordinated(output: Output, phase: &str) -> TestResult<serde_json::Value> {
+    let response: LocalResponse = serde_json::from_str(&require_success(output, phase)?)?;
+    let LocalOutcome::Ok {
+        result: politeiad::OperationResult::Coordinated { result, .. },
+    } = response.outcome
+    else {
+        return Err(format!("{phase} did not return a coordinated result").into());
+    };
+    Ok(result)
+}
+
 fn serve(database_url: &str, fixture: &ReferenceFixture) -> TestResult<Daemon> {
     Ok(Daemon(
         command(database_url, &[Path::new("serve"), &fixture.prefix()]).spawn()?,
@@ -147,6 +168,60 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
 
     let software_daemon = serve(&database_url, &software)?;
     let analytics_daemon = serve(&database_url, &analytics)?;
+    let software_delegation = software.commissioner_delegation();
+    let analytics_delegation = analytics.commissioner_delegation();
+    let software_delegation_request = write_request(
+        &software,
+        "software-delegation.json",
+        serde_json::json!({
+            "kind": "admit_delegation",
+            "delegation": software.signed_commissioner_delegation(software_delegation.clone()),
+        }),
+    )?;
+    let analytics_delegation_request = write_request(
+        &analytics,
+        "analytics-delegation.json",
+        serde_json::json!({
+            "kind": "admit_delegation",
+            "delegation": analytics.signed_commissioner_delegation(analytics_delegation.clone()),
+        }),
+    )?;
+    let software_socket = software.prefix().join("run/politeiad.sock");
+    let analytics_socket = analytics.prefix().join("run/politeiad.sock");
+    let software_admission = require_coordinated(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &software_socket,
+                &software_delegation_request,
+            ],
+        )?,
+        "software commissioner delegation admission",
+    )?;
+    let analytics_admission = require_coordinated(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &analytics_socket,
+                &analytics_delegation_request,
+            ],
+        )?,
+        "analytics commissioner delegation admission",
+    )?;
+    assert_eq!(
+        software_admission["admitted"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        analytics_admission["admitted"],
+        serde_json::Value::Bool(true)
+    );
+    assert_ne!(
+        software_admission["delegation"],
+        analytics_admission["delegation"]
+    );
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;
     stop(software_daemon)?;

@@ -12,12 +12,14 @@ use std::{
 };
 
 use ed25519_dalek::SigningKey;
+use jiff::{SignedDuration, Timestamp};
 use politeia_core::{
-    AdapterId, DelegationId, Digest, InstitutionId, InstitutionWorkspaceId, PolicyBundleId,
-    PrincipalId,
+    AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, InstitutionId,
+    InstitutionWorkspaceId, PolicyBundleId, PrincipalId, ResourceBudget,
     generation::{ApprovedGenerationInputs, ReproducibilityContract},
     institution::{InstitutionWorkspace, TrustDomainId},
     lifecycle::{DeploymentTopology, LifecycleProfile},
+    reconnaissance::RECONNOITRE_ACTION,
     trust::{AdmissionKind, SignedAdmissionWire, WorkspaceBootstrapRequest},
 };
 use politeiad::config::{HostTrustConfiguration, InstalledTrustAnchor};
@@ -229,6 +231,7 @@ impl ReferenceFixture {
                 [
                     AdmissionKind::SourceCapture,
                     AdmissionKind::Evidence,
+                    AdmissionKind::Observation,
                     AdmissionKind::Delegation,
                 ],
             ),
@@ -275,6 +278,46 @@ impl ReferenceFixture {
     /// Return this installation's private prefix.
     pub(crate) fn prefix(&self) -> PathBuf {
         self.root.join("installation")
+    }
+
+    /// Produce the temporary, read-only delegation required before source capture.
+    pub(crate) fn commissioner_delegation(&self) -> Delegation {
+        Delegation {
+            id: DelegationId::new(),
+            issuer: self.identities.owner.clone(),
+            subject: self.identities.commissioner.clone(),
+            parent: None,
+            actions: BTreeSet::from([RECONNOITRE_ACTION.to_owned()]),
+            resources: BTreeSet::from([format!("reference:{}:source", self.kind.directory())]),
+            effects: BTreeSet::from([Effect::ReadExternalSystem]),
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audience: BTreeSet::from(["commissioning".to_owned()]),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+            budget: ResourceBudget {
+                wall_ms: Some(60_000),
+                cpu_ms: Some(10_000),
+                memory_bytes: Some(64 * 1024 * 1024),
+                io_bytes: Some(1024 * 1024),
+                network_bytes: Some(1024 * 1024),
+                external_cost_microunits: Some(0),
+            },
+        }
+    }
+
+    /// Sign the temporary delegation as raw input to the commissioning socket operation.
+    pub(crate) fn signed_commissioner_delegation(
+        &self,
+        delegation: Delegation,
+    ) -> SignedAdmissionWire<Delegation> {
+        SignedAdmissionWire::sign(
+            AdmissionKind::Delegation,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.owner.clone(),
+            delegation,
+            self.identities.owner_key(),
+        )
+        .expect("owner signs temporary commissioner delegation")
     }
 
     /// Write inert installed public-key configuration for the administrative CLI.
