@@ -10,7 +10,7 @@ use std::{
     collections::BTreeSet,
     error::Error,
     path::Path,
-    process::Child,
+    process::{Child, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -67,7 +67,7 @@ pub(super) fn exercise(
     let reservation = barrier.wait_for_claim_and_block()?;
     let crash_barrier = barrier.observation(&reservation)?;
     stop(daemon)?;
-    let crashed_output = crashed_operation.wait()?;
+    let crashed_output = crashed_operation.wait_with_output()?;
     assert!(
         !crashed_output.status.success(),
         "the killed daemon cannot report a completion from its blocked transaction"
@@ -174,7 +174,7 @@ fn concurrent_one_winner(
     let observation = barrier.observation(&reservation)?;
     let loser = spawn_operate(database_url, fixture, &loser_request)?;
     require_refusal(
-        loser.wait()?,
+        loser.wait_with_output()?,
         "fresh authority operation overlapping a claimed effect",
         UNRESOLVED_OVERLAP,
     )?;
@@ -182,7 +182,7 @@ fn concurrent_one_winner(
 
     barrier.release()?;
     let completed = require_coordinated(
-        winner.wait()?,
+        winner.wait_with_output()?,
         "winner of overlapping identical operation request",
     )?;
     assert_completion_ids(&completed)?;
@@ -223,16 +223,39 @@ fn spawn_operate(
     database_url: &str,
     fixture: &ReferenceFixture,
     request: &Path,
-) -> TestResult<Child> {
-    Ok(command(
+) -> TestResult<RunningChild> {
+    let mut command = command(
         database_url,
         &[
             Path::new("operate"),
             &fixture.prefix().join("run/politeiad.sock"),
             request,
         ],
-    )
-    .spawn()?)
+    );
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    Ok(RunningChild(Some(command.spawn()?)))
+}
+
+/// A CLI child that is killed and reaped when an assertion returns early.
+struct RunningChild(Option<Child>);
+
+impl RunningChild {
+    fn wait_with_output(mut self) -> TestResult<Output> {
+        let child = self
+            .0
+            .take()
+            .ok_or("operation child was already consumed")?;
+        Ok(child.wait_with_output()?)
+    }
+}
+
+impl Drop for RunningChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// Create a new owner grant and a new signed request for one semantic manifest
