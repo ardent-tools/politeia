@@ -144,10 +144,9 @@ impl PostgresStorage {
                 return Err(StorageError::AdmissionMismatch);
             }
             let micros: i64 = delegation_row.get(7);
-            let admitted_at = Timestamp::new(
-                micros.div_euclid(1_000_000),
-                (micros.rem_euclid(1_000_000) * 1_000) as i32,
-            )
+            let nanos = i32::try_from(micros.rem_euclid(1_000_000) * 1_000)
+                .map_err(|_| StorageError::AdmissionMismatch)?;
+            let admitted_at = Timestamp::new(micros.div_euclid(1_000_000), nanos)
                 .map_err(|_| StorageError::AdmissionMismatch)?;
             delegations.insert(id, PersistedDelegation {
                 wire,

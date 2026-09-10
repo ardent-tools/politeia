@@ -36,7 +36,7 @@ impl AssuranceFixture {
         }
     }
 
-    fn subject(&self) -> Digest {
+    fn subject() -> Digest {
         Digest::blake3(b"subject under judgement")
     }
 
@@ -49,7 +49,7 @@ impl AssuranceFixture {
             policy: self.policy.clone(),
             policy_digest: self.policy_digest.clone(),
             input_digest: Digest::blake3(b"admitted input"),
-            subject: self.subject(),
+            subject: Self::subject(),
             population: self.population.clone(),
             authorization: Digest::blake3(b"decision receipt"),
             mediation_path: PATH.to_string(),
@@ -120,7 +120,7 @@ fn a_clean_run_needs_authorized_run_and_separate_verified_activation() {
     let activation = VerifiedActivation::admit(&activation, &activation_grant, &context)
         .expect("activation has exact verifier authority");
     assert_eq!(
-        clean_claim(&[run], CONTROL, &fixture.subject(), &activation)
+        clean_claim(&[run], CONTROL, &AssuranceFixture::subject(), &activation)
             .expect("the exact clean claim is supported")
             .result,
         ControlResult::Clean,
@@ -214,7 +214,7 @@ fn every_nonclean_state_remains_a_distinct_refusal() {
         );
         let run = AuthorizedControlRun::admit(&admitted, &run_grant, &context)
             .expect("each typed result can be admitted without changing its meaning");
-        match clean_claim(&[run], CONTROL, &fixture.subject(), &activation) {
+        match clean_claim(&[run], CONTROL, &AssuranceFixture::subject(), &activation) {
             Ok(_) => clean_count += 1,
             Err(ClaimRefusal::ResultNotClean(found)) => assert_eq!(
                 found, state,
@@ -263,7 +263,7 @@ fn self_attested_activation_is_refused() {
         .expect("activation signer has a verification grant");
     assert!(
         matches!(
-            clean_claim(&[run], CONTROL, &fixture.subject(), &activation),
+            clean_claim(&[run], CONTROL, &AssuranceFixture::subject(), &activation),
             Err(ClaimRefusal::SelfAttestedActivation)
         ),
         "a producer cannot satisfy its own activation obligation"
