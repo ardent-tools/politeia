@@ -26,13 +26,14 @@ async fn main() -> anyhow::Result<()> {
 async fn serve(arguments: &[String]) -> anyhow::Result<()> {
     let prefix = required_path(arguments, 2, "serve requires an installation prefix")?;
     let layout = InstallationLayout::load(&prefix)?;
-    let listener = bind(&layout.socket).await?;
     let installed = HostTrustConfiguration::load(&layout)?;
     let database_url = env::var("POLITEIA_DATABASE_URL")
         .map_err(|_| anyhow::anyhow!("POLITEIA_DATABASE_URL is required to run politeiad"))?;
     let anchors = installed.anchors()?;
+    // Validate all installed trust and durable connectivity before publishing a
+    // listener. A failed start must not masquerade as a running daemon.
     let coordinator = PoliteiadService::connect(
-        layout,
+        layout.clone(),
         installed.workspace,
         anchors,
         installed.bootstrap,
@@ -40,6 +41,7 @@ async fn serve(arguments: &[String]) -> anyhow::Result<()> {
     )
     .await
     .map_err(anyhow::Error::msg)?;
+    let listener = bind(&layout.socket).await?;
     loop {
         serve_once(&listener, &coordinator).await?;
     }

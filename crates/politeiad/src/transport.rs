@@ -3,7 +3,7 @@
 use std::{
     io,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use politeia_protocol::{CURRENT_PROTOCOL_VERSION, ProtocolVersion, negotiate};
@@ -106,20 +106,58 @@ impl From<io::Error> for TransportError {
     }
 }
 
+/// A private Unix listener that unlinks its owned endpoint when dropped.
+///
+/// Abrupt termination may still leave a stale endpoint; [`bind`] proves it is
+/// private and unreachable before removing it on the next start.
+pub struct BoundSocket {
+    listener: UnixListener,
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl std::ops::Deref for BoundSocket {
+    type Target = UnixListener;
+
+    fn deref(&self) -> &Self::Target {
+        &self.listener
+    }
+}
+
+impl Drop for BoundSocket {
+    fn drop(&mut self) {
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if metadata.file_type().is_socket()
+            && metadata.mode() & 0o077 == 0
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Bind a new private local socket, removing only a proved-stale owned endpoint.
-pub async fn bind(socket: &Path) -> Result<UnixListener, TransportError> {
+pub async fn bind(socket: &Path) -> Result<BoundSocket, TransportError> {
     let parent = socket.parent().ok_or_else(|| {
         TransportError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
             "local socket has no parent directory",
         ))
     })?;
-    if parent.metadata()?.mode() & 0o077 != 0 {
+    let parent_metadata = parent.metadata()?;
+    if parent_metadata.mode() & 0o077 != 0 {
         return Err(TransportError::InsecureSocketDirectory);
     }
     if socket.exists() {
         let metadata = std::fs::symlink_metadata(socket)?;
-        if !metadata.file_type().is_socket() || metadata.mode() & 0o077 != 0 {
+        if !metadata.file_type().is_socket()
+            || metadata.mode() & 0o077 != 0
+            || metadata.uid() != parent_metadata.uid()
+        {
             return Err(TransportError::Io(io::Error::new(
                 io::ErrorKind::AddrInUse,
                 "existing local socket path is not a private owned socket",
@@ -145,7 +183,13 @@ pub async fn bind(socket: &Path) -> Result<UnixListener, TransportError> {
     }
     let listener = UnixListener::bind(socket)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
+    let metadata = std::fs::symlink_metadata(socket)?;
+    Ok(BoundSocket {
+        listener,
+        path: socket.to_path_buf(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 /// Serve one connection through the shared semantic executor.
@@ -339,6 +383,27 @@ mod tests {
         .expect("local semantic request succeeds");
         server.await.expect("server task finishes");
         assert!(matches!(response.outcome, LocalOutcome::Ok { .. }));
+        fs::remove_dir_all(root).expect("fixture is removable");
+    }
+
+    #[tokio::test]
+    async fn bound_socket_removes_only_its_own_endpoint_on_drop() {
+        let root = std::env::temp_dir().join(format!(
+            "politeiad-transport-cleanup-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let run = root.join("run");
+        fs::create_dir_all(&run).expect("fixture run directory is creatable");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700))
+            .expect("fixture run directory becomes private");
+        let socket = run.join("politeiad.sock");
+        let listener = bind(&socket).await.expect("fixture socket binds");
+        assert!(socket.exists(), "bound socket exists");
+        drop(listener);
+        assert!(
+            !socket.exists(),
+            "normal daemon shutdown removes its endpoint"
+        );
         fs::remove_dir_all(root).expect("fixture is removable");
     }
 

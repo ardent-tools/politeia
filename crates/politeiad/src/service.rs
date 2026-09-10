@@ -3,7 +3,12 @@
 //! Transport passes opaque documents here. This module is the only place that
 //! may admit them, select an internal adapter, or attach durable authority.
 
-use std::{collections::BTreeSet, future::Future, path::PathBuf, pin::Pin};
+use std::{
+    collections::{BTreeSet, HashSet},
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+};
 
 use politeia_core::{
     Delegation,
@@ -179,6 +184,26 @@ impl PoliteiadService {
     /// Return the host-installed key set used for every signed admission.
     pub fn anchors(&self) -> &InstitutionTrustAnchors {
         &self.anchors
+    }
+
+    /// Return the installed workspace configuration for adjacent lifecycle coordination.
+    pub(crate) fn workspace(&self) -> &InstitutionWorkspace {
+        &self.workspace
+    }
+
+    /// Return the PostgreSQL authority for adjacent lifecycle coordination.
+    pub(crate) fn storage(&self) -> &PostgresStorage {
+        &self.storage
+    }
+
+    /// Recover one coherent inert durable snapshot for adjacent lifecycle coordination.
+    pub(crate) async fn durable_snapshot(
+        &self,
+    ) -> Result<politeia_storage::WorkspaceSnapshot, CoordinatorError> {
+        self.storage
+            .load_workspace(&self.scope)
+            .await
+            .map_err(|error| storage_refusal(&error))
     }
 
     async fn handle(
@@ -371,6 +396,80 @@ impl PoliteiadService {
         })
     }
 
+    /// Verify that a newly admitted delegation is signed by its semantic issuer
+    /// and reaches the installed owner through an unrevoked durable chain.
+    ///
+    /// Installed-key admission establishes that a recognized key signed the
+    /// envelope. It does not itself prove that the signer may issue this grant;
+    /// that relationship is checked here before the immutable wire is stored.
+    fn validate_delegation_authority(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        admitted: &politeia_core::trust::Admitted<Delegation>,
+    ) -> Result<(), CoordinatorError> {
+        let delegation = admitted.payload();
+        if admitted.signer() != &delegation.issuer {
+            return Err(CoordinatorError::Refused(
+                "delegation envelope signer is not its semantic issuer".to_string(),
+            ));
+        }
+        if durable.owner != self.workspace.owner
+            || durable.owner_delegation != self.workspace.owner_delegation
+        {
+            return Err(CoordinatorError::Refused(
+                "durable workspace owner differs from installed workspace skeleton".to_string(),
+            ));
+        }
+
+        let mut current = delegation.clone();
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current.id.clone()) {
+                return Err(CoordinatorError::Refused(
+                    "delegation authority chain contains a cycle".to_string(),
+                ));
+            }
+            match current.parent.as_ref() {
+                None => {
+                    if current.id != self.workspace.owner_delegation
+                        || current.issuer != self.workspace.owner
+                    {
+                        return Err(CoordinatorError::Refused(
+                            "delegation chain is not rooted in the installed owner grant"
+                                .to_string(),
+                        ));
+                    }
+                    return Ok(());
+                }
+                Some(parent_id) => {
+                    let persisted = durable.delegations.get(parent_id).ok_or_else(|| {
+                        CoordinatorError::Refused(
+                            "delegation parent is not durably admitted".to_string(),
+                        )
+                    })?;
+                    if persisted.revoked {
+                        return Err(CoordinatorError::Refused(
+                            "delegation parent is revoked".to_string(),
+                        ));
+                    }
+                    let parent = self
+                        .anchors
+                        .admit_expected(AdmissionKind::Delegation, persisted.wire.clone())
+                        .map_err(refusal)?;
+                    if parent.signer() != &parent.payload().issuer
+                        || current.issuer != parent.payload().subject
+                        || !current.is_attenuation_of(parent.payload())
+                    {
+                        return Err(CoordinatorError::Refused(
+                            "delegation does not attenuate a signed durable parent".to_string(),
+                        ));
+                    }
+                    current = parent.into_payload();
+                }
+            }
+        }
+    }
+
     async fn commission(&self, value: Value) -> Result<OperationResult, CoordinatorError> {
         let request: CommissioningRequest = serde_json::from_value(value).map_err(|error| {
             CoordinatorError::Refused(format!("commissioning input is not typed JSON: {error}"))
@@ -381,6 +480,8 @@ impl PoliteiadService {
                     .anchors
                     .admit_expected(AdmissionKind::Delegation, delegation.clone())
                     .map_err(refusal)?;
+                let durable = self.durable_snapshot().await?;
+                self.validate_delegation_authority(&durable, &admitted)?;
                 self.storage
                     .admit_delegation(&self.scope, &admitted, &delegation)
                     .await
