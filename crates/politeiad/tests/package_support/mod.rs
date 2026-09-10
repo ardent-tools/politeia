@@ -620,6 +620,29 @@ impl ReferenceFixture {
         }
     }
 
+    /// Construct an envelope that falsely names the owner while using the
+    /// commissioner's private key. It is raw adversarial transport input and
+    /// must fail installed-owner signature admission before fact approval.
+    pub(crate) fn forged_candidate_approval(
+        &self,
+        candidate: &CandidateDocuments,
+    ) -> serde_json::Value {
+        let forged = SignedAdmissionWire::sign(
+            AdmissionKind::FactApproval,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.owner.clone(),
+            candidate.approval.payload.clone(),
+            self.identities.commissioner_key(),
+        )
+        .expect("commissioner can construct an intentionally invalid owner envelope");
+        serde_json::json!({
+            "kind": "approve_claim",
+            "candidate": candidate.candidate.clone(),
+            "approval": forged,
+        })
+    }
+
     /// Bind the exact owner-approved fact to public content for later learning.
     ///
     /// This may be sent only after the candidate and its owner approval have

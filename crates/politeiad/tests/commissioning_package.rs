@@ -94,6 +94,21 @@ fn require_coordinated(output: Output, phase: &str) -> TestResult<serde_json::Va
     Ok(result)
 }
 
+fn require_refusal(output: Output, phase: &str, expected: &str) -> TestResult {
+    if output.status.success() {
+        return Err(format!("{phase} unexpectedly succeeded").into());
+    }
+    let detail = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if detail.contains(expected) {
+        return Ok(());
+    }
+    Err(format!("{phase} did not report `{expected}`: {detail}").into())
+}
+
 fn require_source_capture(output: Output, phase: &str) -> TestResult<serde_json::Value> {
     let response: LocalResponse = serde_json::from_str(&require_success(output, phase)?)?;
     match response.outcome {
@@ -360,6 +375,44 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         software_candidate.approval.payload.candidate_digest,
         analytics_candidate.approval.payload.candidate_digest
     );
+    let forged_software_approval = write_request(
+        &software,
+        "software-forged-candidate-approval.json",
+        &software.forged_candidate_approval(&software_candidate),
+    )?;
+    require_refusal(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &software_socket,
+                &forged_software_approval,
+            ],
+        )?,
+        "forged software owner approval",
+        "Ed25519 signature does not verify",
+    )?;
+    let cross_institution_approval = write_request(
+        &analytics,
+        "foreign-candidate-approval.json",
+        &serde_json::json!({
+            "kind": "approve_claim",
+            "candidate": software_candidate.candidate.clone(),
+            "approval": software_candidate.approval.clone(),
+        }),
+    )?;
+    require_refusal(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &analytics_socket,
+                &cross_institution_approval,
+            ],
+        )?,
+        "foreign institution candidate approval",
+        "statement names another institution",
+    )?;
     let software_learning =
         software.learning_source_documents(&software_capture_documents, &software_candidate);
     let analytics_learning =
@@ -369,8 +422,8 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         "software-candidate-approval.json",
         &serde_json::json!({
             "kind": "approve_claim",
-            "candidate": software_candidate.candidate,
-            "approval": software_candidate.approval,
+            "candidate": software_candidate.candidate.clone(),
+            "approval": software_candidate.approval.clone(),
         }),
     )?;
     let analytics_approval = write_request(
@@ -378,8 +431,8 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         "analytics-candidate-approval.json",
         &serde_json::json!({
             "kind": "approve_claim",
-            "candidate": analytics_candidate.candidate,
-            "approval": analytics_candidate.approval,
+            "candidate": analytics_candidate.candidate.clone(),
+            "approval": analytics_candidate.approval.clone(),
         }),
     )?;
     assert_eq!(
