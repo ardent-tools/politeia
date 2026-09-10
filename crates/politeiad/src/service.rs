@@ -654,12 +654,9 @@ impl PoliteiadService {
             }
             match current.parent.as_ref() {
                 None => {
-                    if current.id != self.workspace.owner_delegation
-                        || current.issuer != self.workspace.owner
-                    {
+                    if current.issuer != self.workspace.owner {
                         return Err(CoordinatorError::Refused(
-                            "delegation chain is not rooted in the installed owner grant"
-                                .to_string(),
+                            "delegation chain is not rooted in the installed owner".to_string(),
                         ));
                     }
                     return Ok(());
