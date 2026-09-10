@@ -3,8 +3,8 @@
 
 CI supplies POLITEIA_STORAGE_TEST_DATABASE_URL. Local source-only installations
 can use Podman or Docker; the temporary database and container are removed even
-when a test fails. These tests prove the storage/dispatcher boundary, not a
-commissioned institution or daemon deployment.
+when a test fails. The suites exercise the storage/dispatcher boundary and
+the public CLI/daemon package against the same PostgreSQL version.
 """
 
 from __future__ import annotations
@@ -20,12 +20,20 @@ import uuid
 
 def run_tests(database_url: str) -> int:
     environment = dict(os.environ, POLITEIA_STORAGE_TEST_DATABASE_URL=database_url)
-    return subprocess.run(
-        ["cargo", "test", "-p", "politeia-storage", "--locked", "--", "--ignored", "--test-threads=1"],
-        cwd=Path(__file__).resolve().parent.parent,
-        env=environment,
-        check=False,
-    ).returncode
+    suites = [
+        ["-p", "politeia-storage"],
+        ["-p", "politeiad", "--test", "commissioning_package"],
+    ]
+    for suite in suites:
+        result = subprocess.run(
+            ["cargo", "test", *suite, "--locked", "--", "--ignored", "--test-threads=1"],
+            cwd=Path(__file__).resolve().parent.parent,
+            env=environment,
+            check=False,
+        )
+        if result.returncode:
+            return result.returncode
+    return 0
 
 
 def main() -> int:
