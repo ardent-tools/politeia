@@ -510,7 +510,20 @@ struct ObservationEvidencePayload<'a> {
     observed_at: Timestamp,
 }
 
-fn observation_evidence_payload_digest(
+/// Derive the canonical payload digest required by an observation's evidence.
+///
+/// Service and acceptance adapters must call this while constructing the
+/// signed [`crate::evidence::EvidenceRequest`] for the exact [`ObservationRequest`] they will
+/// admit. The digest binds the workspace, source-capture identity and manifest,
+/// source, adapter, subject, statement, and asserted observation time. It does
+/// not authenticate either request; installed-key admission remains required
+/// before either evidence or observation becomes trusted.
+///
+/// # Errors
+///
+/// Returns an error when the fixed observation-evidence payload cannot be
+/// canonically encoded.
+pub fn observation_evidence_payload_digest(
     workspace: &InstitutionWorkspaceId,
     request: &ObservationRequest,
 ) -> Result<Digest, crate::canonical::CanonicalError> {
