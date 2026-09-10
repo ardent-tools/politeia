@@ -424,6 +424,13 @@ impl PoliteiadService {
                     "active routing assignment selects a different source adapter".to_string(),
                 ));
             }
+            let resources = bootstrap_capture_resources(request);
+            if !capture_resources_match(&resources, &admitted.intent().resources) {
+                return Err(CoordinatorError::Refused(
+                    "active operation resources differ from the signed capture descriptor"
+                        .to_string(),
+                ));
+            }
             let authority_chain = self.admit_durable_delegation_chain(
                 &durable,
                 &admitted.intent().delegation_chain,
@@ -432,7 +439,7 @@ impl PoliteiadService {
             let port = InstalledCapturePort {
                 root: self.layout.workspace_dir.clone(),
                 request: request.clone(),
-                resources: admitted.intent().resources.clone(),
+                resources,
                 audience: format!("institution:{}", self.workspace.institution.0),
             };
             let dispatcher = admitted.dispatcher(
@@ -449,6 +456,12 @@ impl PoliteiadService {
                 .map_err(|error| runtime_refusal(&error))?;
             (lease, snapshot, authority_chain)
         } else {
+            if submission.operation.is_some() {
+                return Err(CoordinatorError::Refused(
+                    "bootstrap source capture does not accept active operational admission"
+                        .to_string(),
+                ));
+            }
             let bootstrap = self
                 .storage
                 .load_bootstrap(&self.scope)
@@ -1237,4 +1250,32 @@ pub(crate) fn capture_operation_input_digest(
     ))
     .map(|bytes| politeia_core::Digest::blake3(&bytes))
     .map_err(refusal)
+}
+
+fn capture_resources_match(
+    descriptor_resources: &BTreeSet<String>,
+    intent_resources: &BTreeSet<String>,
+) -> bool {
+    descriptor_resources == intent_resources
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use std::collections::BTreeSet;
+
+    use super::capture_resources_match;
+
+    #[test]
+    fn refuses_a_granted_resource_substituted_for_capture_descriptor_resources() {
+        let descriptor = BTreeSet::from([
+            "capture-descriptor:expected".to_string(),
+            "source:institution-crm".to_string(),
+        ]);
+        let granted_but_unrelated =
+            BTreeSet::from(["source:approved-but-not-captured".to_string()]);
+        assert!(!capture_resources_match(
+            &descriptor,
+            &granted_but_unrelated
+        ));
+    }
 }
