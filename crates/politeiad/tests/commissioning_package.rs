@@ -24,6 +24,7 @@ use std::{
 };
 
 use package_support::{ReferenceFixture, ReferenceInstitutionKind};
+use politeia_core::{CommissioningRecordId, Digest, EvidenceId};
 use politeiad::transport::{LocalOutcome, LocalResponse};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -90,6 +91,18 @@ fn require_coordinated(output: Output, phase: &str) -> TestResult<serde_json::Va
     Ok(result)
 }
 
+fn require_source_capture(output: Output, phase: &str) -> TestResult<serde_json::Value> {
+    let response: LocalResponse = serde_json::from_str(&require_success(output, phase)?)?;
+    match response.outcome {
+        LocalOutcome::Ok {
+            result: politeiad::OperationResult::Coordinated { result, .. },
+        } => Ok(result),
+        outcome => {
+            Err(format!("{phase} did not return a mediated source capture: {outcome:?}").into())
+        }
+    }
+}
+
 fn serve(database_url: &str, fixture: &ReferenceFixture) -> TestResult<Daemon> {
     Ok(Daemon(
         command(database_url, &[Path::new("serve"), &fixture.prefix()]).spawn()?,
@@ -117,6 +130,81 @@ fn stop(mut daemon: Daemon) -> TestResult {
     Ok(())
 }
 
+/// Stage every byte required by an operational generation before any daemon
+/// call. The synthetic commissioning receipt below is intentionally never
+/// submitted: it demonstrates only that the public client can serialize a
+/// complete request once the daemon has returned real admitted evidence.
+#[test]
+fn staged_generation_inputs_bind_complete_public_artifacts() -> TestResult {
+    let fixture = ReferenceFixture::new(
+        ReferenceInstitutionKind::SoftwareDevelopment,
+        Path::new(binary()),
+    );
+    fs::create_dir_all(fixture.prefix().join("workspace"))?;
+    let owner = fixture.owner_root_delegation();
+    let commissioner = fixture.commissioner_delegation(&owner);
+    let documents = fixture.generation_documents(
+        &commissioner,
+        package_support::CommissioningReceipt {
+            record: CommissioningRecordId::new(),
+            record_digest: Digest::blake3(b"unsubmitted transport receipt"),
+            observations: std::collections::BTreeSet::from([EvidenceId::new()]),
+            approvals: std::collections::BTreeSet::from([
+                EvidenceId::new(),
+                EvidenceId::new(),
+                EvidenceId::new(),
+                EvidenceId::new(),
+            ]),
+            unresolved_obligations: std::collections::BTreeSet::new(),
+        },
+    );
+    let generation = fixture.prefix().join("workspace/generation");
+    for path in [
+        "public-source.tar",
+        "policy/constitution.md",
+        "specializer/artifacts.rs",
+        "toolchain/rust-toolchain.toml",
+        "schemas/semantic-operation.schema.json",
+        "adapters/source.rs",
+        "packs/reference-institution.md",
+        "components/executable",
+        "components/migrations.tar",
+        "components/execution_registry.rs",
+        "components/projections.json",
+        "components/compatibility.md",
+        "components/sbom.cargo-metadata.json",
+        "components/provenance.json",
+        "components/update-metadata.cargo-lock",
+    ] {
+        assert!(generation.join(path).is_file(), "staged {path}");
+    }
+    assert_eq!(
+        documents.inputs.payload.approved.component_digests.len(),
+        8,
+        "the generation plan names every mandatory component role"
+    );
+    assert_eq!(
+        documents.publish["kind"],
+        serde_json::Value::String("generation".to_owned())
+    );
+    assert_eq!(
+        documents.publish["request"]["kind"],
+        serde_json::Value::String("publish".to_owned())
+    );
+    assert!(
+        documents.publish["request"]["sources"]["public_source"]
+            .as_str()
+            .is_some_and(|path| !path.starts_with('/') && !path.contains("..")),
+        "artifact inputs are confined workspace-relative paths"
+    );
+    let recommission = fixture.recommission_request(fixture.replacement_delegation(&owner));
+    assert_eq!(
+        recommission["request"]["kind"],
+        serde_json::Value::String("recommission".to_owned())
+    );
+    Ok(())
+}
+
 /// Prove two fresh local installations do not share identity or active state.
 ///
 /// This is deliberately an ignored integration test because PostgreSQL is an
@@ -127,8 +215,9 @@ fn stop(mut daemon: Daemon) -> TestResult {
 #[ignore = "requires POLITEIA_STORAGE_TEST_DATABASE_URL and a disposable PostgreSQL instance"]
 fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     let database_url = database_url()?;
-    let software = ReferenceFixture::new(ReferenceInstitutionKind::SoftwareDevelopment);
-    let analytics = ReferenceFixture::new(ReferenceInstitutionKind::Analytics);
+    let executable = Path::new(binary());
+    let software = ReferenceFixture::new(ReferenceInstitutionKind::SoftwareDevelopment, executable);
+    let analytics = ReferenceFixture::new(ReferenceInstitutionKind::Analytics, executable);
     assert_ne!(software.kind.directory(), analytics.kind.directory());
     assert_ne!(
         fs::read(&software.source_document)?,
@@ -170,71 +259,46 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         )?,
         "analytics installation",
     )?;
+    software.stage_generation_artifacts();
+    analytics.stage_generation_artifacts();
+    assert!(
+        software
+            .prefix()
+            .join("workspace/generation/components/executable")
+            .is_file()
+    );
+    assert!(
+        analytics
+            .prefix()
+            .join("workspace/generation/components/migrations.tar")
+            .is_file()
+    );
 
     let software_daemon = serve(&database_url, &software)?;
     let analytics_daemon = serve(&database_url, &analytics)?;
     let _ = await_status(&database_url, &software)?;
     let _ = await_status(&database_url, &analytics)?;
-    let software_owner_grant = software.owner_root_delegation();
-    let analytics_owner_grant = analytics.owner_root_delegation();
-    let software_delegation = software.commissioner_delegation(&software_owner_grant);
-    let analytics_delegation = analytics.commissioner_delegation(&analytics_owner_grant);
-    let software_owner_request = write_request(
-        &software,
-        "software-owner-grant.json",
-        &serde_json::json!({
-            "kind": "admit_delegation",
-            "delegation": software.signed_commissioner_delegation(software_owner_grant),
-        }),
-    )?;
-    let analytics_owner_request = write_request(
-        &analytics,
-        "analytics-owner-grant.json",
-        &serde_json::json!({
-            "kind": "admit_delegation",
-            "delegation": analytics.signed_commissioner_delegation(analytics_owner_grant),
-        }),
-    )?;
+    let (software_delegation, software_capture_documents) = software.bootstrap_capture_documents();
+    let (analytics_delegation, analytics_capture_documents) =
+        analytics.bootstrap_capture_documents();
     let software_delegation_request = write_request(
         &software,
-        "software-delegation.json",
-        serde_json::json!({
+        "software-bootstrap-delegation.json",
+        &serde_json::json!({
             "kind": "admit_delegation",
             "delegation": software.signed_commissioner_delegation(software_delegation.clone()),
         }),
     )?;
     let analytics_delegation_request = write_request(
         &analytics,
-        "analytics-delegation.json",
-        serde_json::json!({
+        "analytics-bootstrap-delegation.json",
+        &serde_json::json!({
             "kind": "admit_delegation",
             "delegation": analytics.signed_commissioner_delegation(analytics_delegation.clone()),
         }),
     )?;
     let software_socket = software.prefix().join("run/politeiad.sock");
     let analytics_socket = analytics.prefix().join("run/politeiad.sock");
-    require_coordinated(
-        run(
-            &database_url,
-            &[
-                Path::new("commissioning"),
-                &software_socket,
-                &software_owner_request,
-            ],
-        )?,
-        "software owner-root delegation admission",
-    )?;
-    require_coordinated(
-        run(
-            &database_url,
-            &[
-                Path::new("commissioning"),
-                &analytics_socket,
-                &analytics_owner_request,
-            ],
-        )?,
-        "analytics owner-root delegation admission",
-    )?;
     let software_admission = require_coordinated(
         run(
             &database_url,
@@ -244,7 +308,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
                 &software_delegation_request,
             ],
         )?,
-        "software commissioner delegation admission",
+        "software direct bootstrap delegation admission",
     )?;
     let analytics_admission = require_coordinated(
         run(
@@ -255,7 +319,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
                 &analytics_delegation_request,
             ],
         )?,
-        "analytics commissioner delegation admission",
+        "analytics direct bootstrap delegation admission",
     )?;
     assert_eq!(
         software_admission["admitted"],
@@ -277,8 +341,6 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         &analytics.source_document,
         analytics.prefix().join("workspace/institution.md"),
     )?;
-    let software_capture_documents = software.source_capture_submission(&software_delegation);
-    let analytics_capture_documents = analytics.source_capture_submission(&analytics_delegation);
     let software_capture = write_request(
         &software,
         "software-capture.json",
@@ -289,6 +351,24 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         "analytics-capture.json",
         &analytics_capture_documents.document,
     )?;
+    let software_capture_result = require_source_capture(
+        run(
+            &database_url,
+            &[Path::new("snapshot"), &software_socket, &software_capture],
+        )?,
+        "software bootstrap source capture",
+    )?;
+    let analytics_capture_result = require_source_capture(
+        run(
+            &database_url,
+            &[Path::new("snapshot"), &analytics_socket, &analytics_capture],
+        )?,
+        "analytics bootstrap source capture",
+    )?;
+    assert_ne!(
+        software_capture_result["snapshot_manifest"],
+        analytics_capture_result["snapshot_manifest"]
+    );
     let software_candidate =
         software.candidate_documents(&software_delegation, &software_capture_documents);
     let analytics_candidate =
@@ -302,6 +382,52 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     assert_ne!(
         software_candidate.approval.payload.candidate_digest,
         analytics_candidate.approval.payload.candidate_digest
+    );
+    let software_approval = write_request(
+        &software,
+        "software-candidate-approval.json",
+        &serde_json::json!({
+            "kind": "approve_claim",
+            "candidate": software_candidate.candidate,
+            "approval": software_candidate.approval,
+        }),
+    )?;
+    let analytics_approval = write_request(
+        &analytics,
+        "analytics-candidate-approval.json",
+        &serde_json::json!({
+            "kind": "approve_claim",
+            "candidate": analytics_candidate.candidate,
+            "approval": analytics_candidate.approval,
+        }),
+    )?;
+    assert_eq!(
+        require_coordinated(
+            run(
+                &database_url,
+                &[
+                    Path::new("commissioning"),
+                    &software_socket,
+                    &software_approval
+                ],
+            )?,
+            "software owner candidate approval",
+        )?["approved"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        require_coordinated(
+            run(
+                &database_url,
+                &[
+                    Path::new("commissioning"),
+                    &analytics_socket,
+                    &analytics_approval
+                ],
+            )?,
+            "analytics owner candidate approval",
+        )?["approved"],
+        serde_json::Value::Bool(true)
     );
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;

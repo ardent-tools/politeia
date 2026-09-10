@@ -9,16 +9,20 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use ed25519_dalek::SigningKey;
 use jiff::{SignedDuration, Timestamp};
 use politeia_core::{
-    AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, EvidenceId, InstitutionId,
-    InstitutionWorkspaceId, ObservationId, PolicyBundleId, PrincipalId, ResourceBudget,
-    SourceCaptureId,
+    AdapterId, CommissioningRecordId, DataClass, Delegation, DelegationId, Digest, Effect,
+    EvidenceId, InstitutionId, InstitutionWorkspaceId, ObservationId, PolicyBundleId, PrincipalId,
+    ResourceBudget, SourceCaptureId,
     evidence::{EvidenceRequest, IndependenceClass},
-    generation::{ApprovedGenerationInputs, ReproducibilityContract},
+    generation::{
+        ApprovedGenerationInputs, CommissioningCapability, ReproducibilityContract,
+        RuntimeGenerationInputs,
+    },
     institution::{InstitutionWorkspace, TrustDomainId},
     knowledge::{
         CandidateClaimRequest, ClaimStatus, FactApprovalRequest, ObservationRequest,
@@ -28,6 +32,7 @@ use politeia_core::{
     reconnaissance::{RECONNOITRE_ACTION, ReconnaissanceScope},
     trust::{AdmissionKind, SignedAdmissionWire, WorkspaceBootstrapRequest},
 };
+use politeia_evidence::assurance::{ActivationProof, ControlRun};
 use politeiad::config::{HostTrustConfiguration, InstalledTrustAnchor};
 
 /// The two intentionally disjoint reference institutions exercised by the package.
@@ -119,6 +124,8 @@ pub(crate) struct ReferenceFixture {
     pub(crate) root: PathBuf,
     /// Actual checked-in synthetic source document copied into the source root.
     pub(crate) source_document: PathBuf,
+    /// Complete actual public artifact input directory, outside the installation.
+    generation_material: PathBuf,
     /// Installed read-only adapter identity used by capture documents.
     adapter: AdapterId,
     /// Inert host configuration passed to `politeiad initialize`.
@@ -131,6 +138,8 @@ pub(crate) struct ReferenceFixture {
 pub(crate) struct CaptureDocuments {
     /// JSON supplied to the daemon snapshot operation.
     pub(crate) document: serde_json::Value,
+    /// Authenticated capture shape used to derive the bootstrap's exact grant resources.
+    capture: SourceCaptureRequest,
     /// Observation identity a later candidate may cite.
     observation: ObservationRequest,
 }
@@ -143,6 +152,49 @@ pub(crate) struct CandidateDocuments {
     pub(crate) approval: SignedAdmissionWire<FactApprovalRequest>,
 }
 
+/// Durable commissioning evidence selected by the host before publication.
+///
+/// The fixture deliberately cannot create this from arbitrary text: callers
+/// must supply identities returned by admitted service work. The resulting
+/// signed input remains subject to the daemon's durable re-admission.
+pub(crate) struct CommissioningReceipt {
+    /// Rebuilt durable record identity.
+    pub(crate) record: CommissioningRecordId,
+    /// Canonical digest of that exact rebuilt record.
+    pub(crate) record_digest: Digest,
+    /// Discovery evidence already admitted by the daemon.
+    pub(crate) observations: BTreeSet<EvidenceId>,
+    /// Owner approval evidence already admitted by the daemon.
+    pub(crate) approvals: BTreeSet<EvidenceId>,
+    /// Exact owner-approved unresolved obligations.
+    pub(crate) unresolved_obligations: BTreeSet<String>,
+}
+
+/// Complete staged artifact paths and a signed publish request.
+pub(crate) struct GenerationDocuments {
+    /// Inputs signed by the selected commissioner. The service must still
+    /// re-admit this wire and reconstruct the supplied receipt.
+    pub(crate) inputs: SignedAdmissionWire<RuntimeGenerationInputs>,
+    /// Transport JSON for `commissioning { kind: generation, ... }`.
+    pub(crate) publish: serde_json::Value,
+}
+
+/// Real assurance wires required for an activation or rollback call.
+///
+/// These values are intentionally supplied from an independent test control
+/// path. The fixture cannot synthesize a clean result, its direct grants, or
+/// a proof and call that an activation test.
+pub(crate) struct ActivationDocuments {
+    /// Signed run of the exact lifecycle control.
+    pub(crate) run: SignedAdmissionWire<ControlRun>,
+    /// Durable direct authority for the control-run producer.
+    pub(crate) run_authority: SignedAdmissionWire<Delegation>,
+    /// Signed proof from an independent verifier.
+    pub(crate) proof: SignedAdmissionWire<ActivationProof>,
+    /// Durable direct authority for the verifier.
+    pub(crate) proof_authority: SignedAdmissionWire<Delegation>,
+}
+
 impl ReferenceFixture {
     /// Create one synthetic institution fixture under a fresh temporary directory.
     ///
@@ -153,7 +205,7 @@ impl ReferenceFixture {
         clippy::expect_used,
         reason = "the acceptance fixture must fail loudly when public test inputs are absent"
     )]
-    pub(crate) fn new(kind: ReferenceInstitutionKind) -> Self {
+    pub(crate) fn new(kind: ReferenceInstitutionKind, executable: &Path) -> Self {
         let root = std::env::temp_dir().join(format!(
             "plp-{}-{}",
             kind.short_label(),
@@ -171,6 +223,15 @@ impl ReferenceFixture {
             &source_document,
         )
         .expect("public synthetic fixture source copies");
+        let adapter = AdapterId::new();
+        let generation_material = root.join("generation-material");
+        fs::create_dir(&generation_material).expect("generation material root creates");
+        let approved_generation = stage_public_generation_material(
+            &generation_material,
+            &source_document,
+            executable,
+            &adapter,
+        );
 
         let identities = SigningIdentities {
             owner: PrincipalId::new(),
@@ -186,43 +247,8 @@ impl ReferenceFixture {
         };
         let institution = InstitutionId::new();
         let workspace_id = InstitutionWorkspaceId::new();
-        let adapter = AdapterId::new();
-        let approved_generation = ApprovedGenerationInputs {
-            source_digest: Digest::blake3(
-                &fs::read(&source_document).expect("copied source is readable"),
-            ),
-            lifecycle: LifecycleProfile::Commissioning,
-            topology: DeploymentTopology::ClientControlledSingleTenant,
-            schema_digests: BTreeMap::from([(
-                "public-contract".to_owned(),
-                Digest::blake3(
-                    &fs::read(repository_root().join("spec/semantic-operation.schema.json"))
-                        .expect("public protocol schema is readable"),
-                ),
-            )]),
-            adapter_digests: BTreeMap::from([(
-                adapter.clone(),
-                Digest::blake3(
-                    &fs::read(repository_root().join("crates/politeiad/src/source.rs"))
-                        .expect("public source adapter is readable"),
-                ),
-            )]),
-            pack_digests: BTreeMap::from([(
-                "reference-institution".to_owned(),
-                Digest::blake3(&fs::read(&source_document).expect("source remains readable")),
-            )]),
-            component_digests: BTreeMap::new(),
-            excluded_commissioning_capabilities: BTreeSet::new(),
-            specializer_digest: Digest::blake3(
-                &fs::read(repository_root().join("crates/politeiad/src/artifacts.rs"))
-                    .expect("public artifact specializer is readable"),
-            ),
-            toolchain_digest: Digest::blake3(
-                &fs::read(repository_root().join("rust-toolchain.toml"))
-                    .expect("public toolchain declaration is readable"),
-            ),
-            reproducibility: ReproducibilityContract::Deterministic,
-        };
+        let policy_bytes = fs::read(generation_material.join("policy/constitution.md"))
+            .expect("staged policy is readable");
         let workspace = InstitutionWorkspace {
             id: workspace_id,
             institution,
@@ -234,7 +260,7 @@ impl ReferenceFixture {
             owner_delegation: DelegationId::new(),
             approved_model_digest: Digest::blake3(b"synthetic broad institutional model"),
             policy_bundle: PolicyBundleId::new(),
-            policy_digest: Digest::blake3(b"synthetic owner-approved policy"),
+            policy_digest: Digest::blake3(&policy_bytes),
             approved_generation,
             secret_references: BTreeSet::new(),
         };
@@ -259,6 +285,7 @@ impl ReferenceFixture {
                     AdmissionKind::Observation,
                     AdmissionKind::CandidateClaim,
                     AdmissionKind::Delegation,
+                    AdmissionKind::Generation,
                 ],
             ),
             anchor(
@@ -292,6 +319,7 @@ impl ReferenceFixture {
             kind,
             root,
             source_document,
+            generation_material,
             adapter,
             host_trust: HostTrustConfiguration {
                 workspace,
@@ -353,6 +381,52 @@ impl ReferenceFixture {
                 external_cost_microunits: Some(0),
             },
         }
+    }
+
+    /// Construct the one direct, descriptor-bound pre-generation capture grant
+    /// and its matching signed capture documents.
+    ///
+    /// This is intentionally separate from the nested general-purpose grant:
+    /// the bootstrap dispatcher admits only a direct owner grant with the five
+    /// capture-derived resources. The caller must durably admit it through the
+    /// service's dedicated bootstrap path before sending `document` to
+    /// `snapshot`.
+    pub(crate) fn bootstrap_capture_documents(&self) -> (Delegation, CaptureDocuments) {
+        let mut delegation = Delegation {
+            id: DelegationId::new(),
+            issuer: self.identities.owner.clone(),
+            subject: self.identities.commissioner.clone(),
+            parent: None,
+            actions: BTreeSet::from([RECONNOITRE_ACTION.to_owned()]),
+            resources: BTreeSet::new(),
+            effects: BTreeSet::from([Effect::ReadExternalSystem]),
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audience: BTreeSet::from([format!(
+                "institution:{}",
+                self.host_trust.workspace.institution.0
+            )]),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+            budget: ResourceBudget {
+                wall_ms: Some(60_000),
+                cpu_ms: Some(10_000),
+                memory_bytes: Some(64 * 1024 * 1024),
+                io_bytes: Some(1024 * 1024),
+                network_bytes: Some(1024 * 1024),
+                external_cost_microunits: Some(0),
+            },
+        };
+        let documents = self.source_capture_submission(&delegation);
+        delegation.resources =
+            politeia_policy::bootstrap::bootstrap_capture_resources(&documents.capture);
+        (delegation, documents)
+    }
+
+    /// Produce a fresh owner-rooted grant for the named replacement maintainer.
+    pub(crate) fn replacement_delegation(&self, owner_grant: &Delegation) -> Delegation {
+        let mut replacement = self.commissioner_delegation(owner_grant);
+        replacement.id = DelegationId::new();
+        replacement.subject = self.identities.replacement.clone();
+        replacement
     }
 
     /// Sign the temporary delegation as raw input to the commissioning socket operation.
@@ -469,6 +543,7 @@ impl ReferenceFixture {
                 "observation": observation,
                 "reconnaissance": scope,
             }),
+            capture: capture.payload.clone(),
             observation: observation.payload,
         }
     }
@@ -528,6 +603,122 @@ impl ReferenceFixture {
         }
     }
 
+    /// Copy the approved public bytes under the installed workspace and build
+    /// the exact signed generation publication request.
+    ///
+    /// `receipt` is deliberately supplied by the caller because only the
+    /// daemon's admitted evidence and reconstructed commissioning record can
+    /// make it authoritative. This helper creates transport input; it never
+    /// treats the receipt as admitted state.
+    pub(crate) fn generation_documents(
+        &self,
+        commissioner: &Delegation,
+        receipt: CommissioningReceipt,
+    ) -> GenerationDocuments {
+        self.stage_generation_artifacts();
+        let workspace = &self.host_trust.workspace;
+        let inputs = RuntimeGenerationInputs {
+            institution: workspace.institution.clone(),
+            workspace: workspace.id.clone(),
+            workspace_digest: workspace
+                .digest()
+                .expect("installed workspace canonically digests"),
+            trust_domain: workspace.trust_domain.clone(),
+            policy_bundle: workspace.policy_bundle.clone(),
+            policy_digest: workspace.policy_digest.clone(),
+            commissioning_record: receipt.record,
+            commissioning_record_digest: receipt.record_digest,
+            approved: workspace.approved_generation.clone(),
+        };
+        let inputs = SignedAdmissionWire::sign(
+            AdmissionKind::Generation,
+            workspace.institution.clone(),
+            workspace.id.clone(),
+            self.identities.commissioner.clone(),
+            inputs,
+            self.identities.commissioner_key(),
+        )
+        .expect("selected commissioner signs generation inputs");
+        assert_eq!(commissioner.subject, self.identities.commissioner);
+        let sources = artifact_source_paths(&self.adapter);
+        let publish = serde_json::json!({
+            "kind": "generation",
+            "request": {
+                "kind": "publish",
+                "inputs": inputs,
+                "commissioning": {
+                    "delegation": commissioner.id,
+                    "observations": receipt.observations,
+                    "approvals": receipt.approvals,
+                    "unresolved_obligations": receipt.unresolved_obligations,
+                },
+                "sources": sources,
+            },
+        });
+        GenerationDocuments { inputs, publish }
+    }
+
+    /// Stage the complete approved artifact byte set under the installed
+    /// workspace without creating a lifecycle request.
+    pub(crate) fn stage_generation_artifacts(&self) {
+        let target = self.prefix().join("workspace/generation");
+        copy_tree(&self.generation_material, &target);
+    }
+
+    /// Construct a request that asks the daemon to admit a replacement grant.
+    ///
+    /// The caller must submit this only after the old grant's durable
+    /// revocation. The daemon checks the fresh owner-rooted chain itself.
+    pub(crate) fn recommission_request(&self, replacement: Delegation) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "generation",
+            "request": {
+                "kind": "recommission",
+                "delegation": SignedAdmissionWire::sign(
+                    AdmissionKind::Delegation,
+                    self.host_trust.workspace.institution.clone(),
+                    self.host_trust.workspace.id.clone(),
+                    self.identities.owner.clone(),
+                    replacement,
+                    self.identities.owner_key(),
+                ).expect("owner signs replacement delegation"),
+            },
+        })
+    }
+
+    /// Serialize an activation or rollback request around independently
+    /// produced assurance. The daemon re-admits all four supplied wires and
+    /// performs the durable compare-and-swap.
+    #[expect(
+        dead_code,
+        reason = "the daemon acceptance step consumes this only after a live generation is published"
+    )]
+    pub(crate) fn activation_request(
+        &self,
+        kind: &str,
+        generation: Digest,
+        expected_revision: i64,
+        expected_active: Option<Digest>,
+        assurance: ActivationDocuments,
+    ) -> serde_json::Value {
+        assert!(matches!(kind, "activate" | "rollback"));
+        serde_json::json!({
+            "kind": "generation",
+            "request": {
+                "kind": kind,
+                "generation": generation,
+                "expected_revision": expected_revision,
+                "expected_active": expected_active,
+                "assurance": {
+                    "run": assurance.run,
+                    "run_authority": assurance.run_authority,
+                    "proof": assurance.proof,
+                    "proof_authority": assurance.proof_authority,
+                },
+            },
+        })
+    }
+
     /// Write inert installed public-key configuration for the administrative CLI.
     pub(crate) fn write_host_trust(&self) -> PathBuf {
         let path = self.root.join("host-trust.json");
@@ -565,6 +756,266 @@ fn anchor(
         public_key: key.verifying_key().to_bytes(),
         permitted: permitted.into_iter().collect(),
     }
+}
+
+/// Materialize every byte named by the operational generation plan.
+///
+/// The archive and binary are copied from the checked-out public source and
+/// the compiled test executable. The fixture verifies their identity, but it
+/// does not run a second build and makes no executable-build reproducibility
+/// claim; that limitation is explicit in the signed nondeterminism contract.
+#[expect(
+    clippy::expect_used,
+    reason = "the acceptance fixture must fail loudly when public artifacts cannot be staged"
+)]
+fn stage_public_generation_material(
+    root: &Path,
+    source_document: &Path,
+    executable: &Path,
+    adapter: &AdapterId,
+) -> ApprovedGenerationInputs {
+    let repository = repository_root();
+    let public_source = root.join("public-source.tar");
+    git_archive(&repository, &public_source, None);
+    let migrations = root.join("components/migrations.tar");
+    git_archive(
+        &repository,
+        &migrations,
+        Some("crates/politeia-storage/migrations"),
+    );
+    copy_public(executable, &root.join("components/executable"));
+    copy_public(
+        &repository.join("crates/politeiad/src/service.rs"),
+        &root.join("components/execution_registry.rs"),
+    );
+    copy_public(
+        &repository.join("spec/canonical-vectors.json"),
+        &root.join("components/projections.json"),
+    );
+    copy_public(
+        &repository.join("docs/22-DEPLOYMENT_PROFILES.md"),
+        &root.join("components/compatibility.md"),
+    );
+    copy_public(
+        &repository.join("Cargo.lock"),
+        &root.join("components/update-metadata.cargo-lock"),
+    );
+    copy_public(
+        &repository.join("docs/02-CONSTITUTION.md"),
+        &root.join("policy/constitution.md"),
+    );
+    copy_public(
+        &repository.join("crates/politeiad/src/artifacts.rs"),
+        &root.join("specializer/artifacts.rs"),
+    );
+    copy_public(
+        &repository.join("rust-toolchain.toml"),
+        &root.join("toolchain/rust-toolchain.toml"),
+    );
+    copy_public(
+        &repository.join("spec/semantic-operation.schema.json"),
+        &root.join("schemas/semantic-operation.schema.json"),
+    );
+    copy_public(
+        &repository.join("crates/politeiad/src/source.rs"),
+        &root.join("adapters/source.rs"),
+    );
+    copy_public(
+        source_document,
+        &root.join("packs/reference-institution.md"),
+    );
+
+    let sbom = root.join("components/sbom.cargo-metadata.json");
+    let metadata = Command::new("cargo")
+        .current_dir(&repository)
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .output()
+        .expect("cargo metadata starts for public dependency metadata");
+    assert!(
+        metadata.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let parsed_metadata: serde_json::Value =
+        serde_json::from_slice(&metadata.stdout).expect("cargo metadata is JSON");
+    fs::write(
+        &sbom,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "kind": "cargo_metadata_v1",
+            "metadata": parsed_metadata,
+        }))
+        .expect("dependency metadata serializes"),
+    )
+    .expect("dependency metadata writes");
+
+    let revision = Command::new("git")
+        .current_dir(&repository)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git revision lookup starts");
+    assert!(
+        revision.status.success(),
+        "public source revision is available"
+    );
+    let provenance = root.join("components/provenance.json");
+    fs::write(
+        &provenance,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "kind": "fixture_public_artifact_provenance_v1",
+            "source_revision": String::from_utf8(revision.stdout)
+                .expect("revision is UTF-8")
+                .trim(),
+            "source_archive_digest": Digest::blake3(&fs::read(&public_source).expect("archive reads")),
+            "executable_digest": Digest::blake3(&fs::read(root.join("components/executable")).expect("executable reads")),
+            "claim": "exact bytes are verified; executable build reproducibility is not claimed",
+        }))
+        .expect("provenance serializes"),
+    )
+    .expect("provenance writes");
+    let reproducibility = root.join("reproducibility-contract.md");
+    fs::write(
+        &reproducibility,
+        "This fixture verifies immutable staged artifact bytes. It does not rebuild the copied politeia executable, so executable build reproducibility is not claimed.\n",
+    )
+    .expect("reproducibility limitation writes");
+
+    ApprovedGenerationInputs {
+        source_digest: digest_file(&public_source),
+        lifecycle: LifecycleProfile::Operational,
+        topology: DeploymentTopology::ClientControlledSingleTenant,
+        schema_digests: BTreeMap::from([(
+            "semantic-operation".to_owned(),
+            digest_file(&root.join("schemas/semantic-operation.schema.json")),
+        )]),
+        adapter_digests: BTreeMap::from([(
+            adapter.clone(),
+            digest_file(&root.join("adapters/source.rs")),
+        )]),
+        pack_digests: BTreeMap::from([(
+            "reference-institution".to_owned(),
+            digest_file(&root.join("packs/reference-institution.md")),
+        )]),
+        component_digests: BTreeMap::from([
+            (
+                "executable".to_owned(),
+                digest_file(&root.join("components/executable")),
+            ),
+            ("migrations".to_owned(), digest_file(&migrations)),
+            (
+                "execution_registry".to_owned(),
+                digest_file(&root.join("components/execution_registry.rs")),
+            ),
+            (
+                "projections".to_owned(),
+                digest_file(&root.join("components/projections.json")),
+            ),
+            (
+                "compatibility".to_owned(),
+                digest_file(&root.join("components/compatibility.md")),
+            ),
+            ("sbom".to_owned(), digest_file(&sbom)),
+            ("provenance".to_owned(), digest_file(&provenance)),
+            (
+                "update_metadata".to_owned(),
+                digest_file(&root.join("components/update-metadata.cargo-lock")),
+            ),
+        ]),
+        excluded_commissioning_capabilities: BTreeSet::from([
+            CommissioningCapability::GenericReconnaissance,
+            CommissioningCapability::InstitutionAuthoring,
+            CommissioningCapability::AdapterDevelopment,
+            CommissioningCapability::PolicyAuthoring,
+            CommissioningCapability::GenerationDerivation,
+        ]),
+        specializer_digest: digest_file(&root.join("specializer/artifacts.rs")),
+        toolchain_digest: digest_file(&root.join("toolchain/rust-toolchain.toml")),
+        reproducibility: ReproducibilityContract::DeclaredNondeterminism {
+            fields: BTreeSet::from(["components.executable".to_owned()]),
+            contract_digest: digest_file(&reproducibility),
+        },
+    }
+}
+
+fn git_archive(repository: &Path, destination: &Path, path: Option<&str>) {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).expect("archive parent creates");
+    }
+    let mut command = Command::new("git");
+    command
+        .current_dir(repository)
+        .args(["archive", "--format=tar", "--output"])
+        .arg(destination)
+        .arg("HEAD");
+    if let Some(path) = path {
+        command.arg(path);
+    }
+    let output = command.output().expect("git archive starts");
+    assert!(
+        output.status.success(),
+        "git archive failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn copy_public(source: &Path, destination: &Path) {
+    let parent = destination
+        .parent()
+        .expect("fixture destination has parent");
+    fs::create_dir_all(parent).expect("fixture artifact parent creates");
+    fs::copy(source, destination).expect("public artifact copies");
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    assert!(
+        !destination.exists(),
+        "artifact staging never overwrites a workspace path"
+    );
+    fs::create_dir_all(destination).expect("artifact staging root creates");
+    for entry in fs::read_dir(source).expect("artifact source directory reads") {
+        let entry = entry.expect("artifact source directory entry reads");
+        let target = destination.join(entry.file_name());
+        let file_type = entry.file_type().expect("artifact source file type reads");
+        if file_type.is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            assert!(
+                file_type.is_file(),
+                "artifact input cannot be a symlink or special file"
+            );
+            fs::copy(entry.path(), target).expect("artifact input copies");
+        }
+    }
+}
+
+fn digest_file(path: &Path) -> Digest {
+    Digest::blake3(&fs::read(path).expect("staged public artifact is readable"))
+}
+
+fn artifact_source_paths(adapter: &AdapterId) -> serde_json::Value {
+    let mut adapters = serde_json::Map::new();
+    adapters.insert(
+        adapter.0.to_string(),
+        serde_json::json!("generation/adapters/source.rs"),
+    );
+    serde_json::json!({
+        "public_source": "generation/public-source.tar",
+        "policy": "generation/policy/constitution.md",
+        "specializer": "generation/specializer/artifacts.rs",
+        "toolchain": "generation/toolchain/rust-toolchain.toml",
+        "schemas": {"semantic-operation": "generation/schemas/semantic-operation.schema.json"},
+        "adapters": adapters,
+        "packs": {"reference-institution": "generation/packs/reference-institution.md"},
+        "components": {
+            "executable": "generation/components/executable",
+            "migrations": "generation/components/migrations.tar",
+            "execution_registry": "generation/components/execution_registry.rs",
+            "projections": "generation/components/projections.json",
+            "compatibility": "generation/components/compatibility.md",
+            "sbom": "generation/components/sbom.cargo-metadata.json",
+            "provenance": "generation/components/provenance.json",
+            "update_metadata": "generation/components/update-metadata.cargo-lock",
+        },
+    })
 }
 
 fn repository_root() -> PathBuf {
