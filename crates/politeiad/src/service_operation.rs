@@ -1119,7 +1119,7 @@ impl PoliteiadService {
                 admitted_intent.signer(),
             )?
             .into_iter()
-            .map(|delegation| delegation.into_payload())
+            .map(Admitted::into_payload)
             .collect();
         let policy = self.admit_operational_decision(
             durable,
