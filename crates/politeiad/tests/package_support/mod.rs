@@ -44,6 +44,7 @@ use politeiad::{
 
 mod commissioning;
 mod handoff;
+mod handoff_receipt;
 pub(crate) mod learning;
 mod lifecycle;
 pub(crate) mod operational;
@@ -904,17 +905,17 @@ impl ReferenceFixture {
         generation: Digest,
         expected_revision: i64,
         expected_active: Option<Digest>,
-        assurance: ActivationDocuments,
+        assurance: &ActivationDocuments,
     ) -> serde_json::Value {
         let action = transition_action(kind);
         let transition = self.generation_transition_authorization(
             action,
-            generation.clone(),
+            generation,
             expected_revision,
-            expected_active.clone(),
-            &assurance,
+            expected_active,
+            assurance,
         );
-        self.activation_request_with_transition(assurance, transition)
+        Self::activation_request_with_transition(assurance, &transition)
     }
 
     /// Sign the installed owner's exact active-generation decision for a
@@ -960,9 +961,8 @@ impl ReferenceFixture {
     /// signature over different action, target, or assurance bytes still
     /// refuses at the service boundary.
     pub(crate) fn activation_request_with_transition(
-        &self,
-        assurance: ActivationDocuments,
-        transition: SignedAdmissionWire<GenerationTransitionRequest>,
+        assurance: &ActivationDocuments,
+        transition: &SignedAdmissionWire<GenerationTransitionRequest>,
     ) -> serde_json::Value {
         serde_json::json!({
             "kind": "generation",

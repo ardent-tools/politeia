@@ -115,6 +115,10 @@ impl ReferenceFixture {
     /// principal. The caller first passes [`ActiveContextDraft::input_digest`]
     /// and [`ActiveContextDraft::resources`] to the operational fixture, then
     /// attaches its resulting separately signed submission with `document`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fixture names each independently authenticated context and provenance input"
+    )]
     pub(crate) fn active_context_draft(
         &self,
         requester: PrincipalId,
@@ -178,7 +182,7 @@ impl ReferenceFixture {
         requester_key: &SigningKey,
         delegation: &Delegation,
         generation: RuntimeGenerationId,
-        population: Digest,
+        population: &Digest,
     ) -> ActiveDiscoveryDraft {
         let resources = BTreeSet::from([context_workspace_resource(&self.host_trust.workspace.id)]);
         let request = LearningDisclosureIngress {
@@ -201,7 +205,7 @@ impl ReferenceFixture {
             requester_key,
         )
         .expect("active requester signs primary discovery wire");
-        let input_digest = disclosure_input_digest(&request, &population);
+        let input_digest = disclosure_input_digest(&request, population);
         ActiveDiscoveryDraft {
             request,
             input_digest,
@@ -214,6 +218,10 @@ impl ReferenceFixture {
     /// The feedback remains inert until the daemon validates its current
     /// authority and source provenance, then appends the proposal under the
     /// returned `id` for a later owner correction.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fixture keeps feedback authority and each historical provenance input explicit"
+    )]
     pub(crate) fn feedback_documents(
         &self,
         requester: PrincipalId,

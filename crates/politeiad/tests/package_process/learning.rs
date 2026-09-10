@@ -30,6 +30,12 @@ use super::{
     TestResult, require_coordinated, require_refusal, run, submit_commissioning, write_request,
 };
 
+pub(super) struct LearningExercise {
+    pub(super) temporary_grants: Vec<Delegation>,
+    pub(super) completion: serde_json::Value,
+    pub(super) durable_completion: serde_json::Value,
+}
+
 /// Exercise active context, discovery, feedback, source correction, and the
 /// resulting current projection through the real daemon and CLI.
 #[expect(
@@ -44,7 +50,7 @@ pub(crate) fn exercise(
     original_source: &LearningSourceDocuments,
     original_candidate: &CandidateDocuments,
     original_capture: &CaptureDocuments,
-) -> TestResult<Vec<Delegation>> {
+) -> TestResult<LearningExercise> {
     let runtime = politeia_core::RuntimeGenerationId::from_digest(generation.clone());
     let now = Timestamp::now();
 
@@ -134,7 +140,7 @@ pub(crate) fn exercise(
         fixture.identities.worker_key(),
         &discovery_grant,
         runtime.clone(),
-        operations.capability_population_digest(),
+        &operations.capability_population_digest(),
     );
     let discovery_submission = operations.submission(
         fixture,
@@ -232,7 +238,7 @@ pub(crate) fn exercise(
         "corrected-source-capture-grant.json",
         &delegation_admission(fixture, capture_grant.clone()),
     )?;
-    let capture_documents = fixture.capture_after_admission(capture_documents);
+    let capture_documents = fixture.capture_after_admission(&capture_documents);
     let replacement_capture =
         active_capture_document(fixture, operations, &capture_grant, capture_documents, now)?;
     let replacement_capture_result = require_coordinated(
@@ -252,7 +258,14 @@ pub(crate) fn exercise(
     )?;
     assert!(replacement_capture_result["snapshot_manifest"].is_string());
     let replacement_candidate = fixture.candidate_documents(&capture_grant, &replacement_capture);
-    let prior_approval_bytes = serde_json::to_vec(&original_candidate.approval)?;
+    let approval_key = format!(
+        "fact_approval:{}",
+        original_candidate.approval.payload.claim.0
+    );
+    let prior_approval =
+        super::continuity::observe_signed_state(database_url, fixture, &approval_key)?;
+    let prior_context_receipt =
+        super::continuity::observe_completed_disclosure(database_url, fixture, &original_context)?;
     submit_commissioning(
         database_url,
         fixture,
@@ -410,18 +423,34 @@ pub(crate) fn exercise(
         replacement_result["content"][replacement_source.source.0.to_string()].clone(),
     )?;
     assert_eq!(disclosed_replacement, replacement_bytes);
+    let preserved_context_receipt =
+        super::continuity::observe_completed_disclosure(database_url, fixture, &original_context)?;
     assert_eq!(
-        prior_bytes,
-        original_context_bytes(&original_context, original_source)?
+        prior_context_receipt, preserved_context_receipt,
+        "correction preserves the exact delivered context receipt"
     );
+    let preserved_approval =
+        super::continuity::observe_signed_state(database_url, fixture, &approval_key)?;
     assert_eq!(
-        prior_approval_bytes,
-        serde_json::to_vec(&original_candidate.approval)?
+        prior_approval, preserved_approval,
+        "correction preserves the original signed approval bytes in durable state"
     );
+    super::evidence::record_observation("preserved_approval", &preserved_approval)?;
+    super::evidence::record_observation("preserved_context_receipt", &preserved_context_receipt)?;
+    let durable_completion = super::continuity::observe_completed_disclosure(
+        database_url,
+        fixture,
+        &replacement_result,
+    )?;
+    super::evidence::record_observation("corrected_context_completion", &durable_completion)?;
     // Root revokes this temporary commissioner authority during the handoff
     // witness. Worker, owner, producer, and verifier grants remain live so
     // their distinct durable records can be tested separately.
-    Ok(vec![capture_grant])
+    Ok(LearningExercise {
+        temporary_grants: vec![capture_grant],
+        completion: replacement_result["completion"].clone(),
+        durable_completion,
+    })
 }
 
 fn commissioning(
@@ -579,13 +608,4 @@ fn lower_source_relevance(
         "request": LearningRequest::RegisterSource { source: signed },
     });
     Ok(())
-}
-
-fn original_context_bytes(
-    context: &serde_json::Value,
-    source: &LearningSourceDocuments,
-) -> TestResult<Vec<u8>> {
-    Ok(serde_json::from_value(
-        context["content"][source.source.0.to_string()].clone(),
-    )?)
 }

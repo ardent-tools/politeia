@@ -98,7 +98,7 @@ impl ReferenceFixture {
     pub(crate) fn replacement_derive_record_request(
         &self,
         replacement: &Delegation,
-        observation: EvidenceId,
+        observation: &EvidenceId,
         approvals: impl IntoIterator<Item = EvidenceId>,
     ) -> serde_json::Value {
         self.assert_replacement(replacement);

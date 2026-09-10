@@ -2,9 +2,9 @@
 //!
 //! The test starts the compiled administrative CLI and daemon against the same
 //! disposable PostgreSQL service used by the durable-storage acceptance tests.
-//! It intentionally crosses only process and Unix-socket boundaries: raw
-//! fixture documents are written to disk, and no service/coordinator/storage
-//! object is constructed in this process.
+//! Protected work crosses the CLI and Unix socket. Test-only PostgreSQL
+//! administration observes durable records and pauses completion to force an
+//! exact interruption; it never admits product state or invokes an effect.
 
 #![expect(
     clippy::expect_used,
@@ -14,6 +14,8 @@
 #[path = "package_support/mod.rs"]
 mod package_support;
 
+#[path = "package_process/continuity.rs"]
+mod continuity;
 #[path = "package_process/evidence.rs"]
 mod evidence;
 #[path = "package_process/handoff.rs"]
@@ -132,8 +134,8 @@ fn require_refusal(output: Output, phase: &str, expected: &str) -> TestResult {
     }
     let detail = format!(
         "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8(output.stdout)?,
+        String::from_utf8(output.stderr)?
     );
     if detail.contains(expected) {
         return Ok(());
@@ -368,9 +370,9 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         software_admission["delegation"],
         analytics_admission["delegation"]
     );
-    let software_capture_documents = software.capture_after_admission(software_capture_documents);
+    let software_capture_documents = software.capture_after_admission(&software_capture_documents);
     let analytics_capture_documents =
-        analytics.capture_after_admission(analytics_capture_documents);
+        analytics.capture_after_admission(&analytics_capture_documents);
     fs::copy(
         &software.source_document,
         software.prefix().join("workspace/institution.md"),
@@ -646,7 +648,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     }
 
     let mut software_temporary_grants = vec![software_delegation, software_context_delegation];
-    software_temporary_grants.extend(learning::exercise(
+    let software_learned = learning::exercise(
         &database_url,
         &software,
         &software_operations,
@@ -654,9 +656,10 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         &software_learning,
         &software_candidate,
         &software_capture_documents,
-    )?);
+    )?;
+    software_temporary_grants.extend(software_learned.temporary_grants);
     let mut analytics_temporary_grants = vec![analytics_delegation];
-    analytics_temporary_grants.extend(learning::exercise(
+    let analytics_learned = learning::exercise(
         &database_url,
         &analytics,
         &analytics_operations,
@@ -664,7 +667,8 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         &analytics_learning,
         &analytics_candidate,
         &analytics_capture_documents,
-    )?);
+    )?;
+    analytics_temporary_grants.extend(analytics_learned.temporary_grants);
 
     // Kill the actual daemon processes after learning has committed. New
     // processes must recover their active generation and durable replay state.
@@ -672,9 +676,19 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     stop(analytics_daemon)?;
     let software_daemon = serve(&database_url, &software)?;
     let analytics_daemon = serve(&database_url, &analytics)?;
-    for (fixture, generation) in [
-        (&software, &software_generation.generation),
-        (&analytics, &analytics_generation.generation),
+    for (fixture, generation, completion, before_restart) in [
+        (
+            &software,
+            &software_generation.generation,
+            &software_learned.completion,
+            &software_learned.durable_completion,
+        ),
+        (
+            &analytics,
+            &analytics_generation.generation,
+            &analytics_learned.completion,
+            &analytics_learned.durable_completion,
+        ),
     ] {
         assert_eq!(
             status_value(&database_url, fixture)?["active_generation"],
@@ -692,7 +706,36 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
             "committed active context replay after process restart",
             "replay",
         )?;
+        let after_restart =
+            continuity::observe_completed_disclosure(&database_url, fixture, completion)?;
+        assert_eq!(
+            &after_restart, before_restart,
+            "completed disclosure evidence survives an actual daemon restart unchanged"
+        );
+        evidence::record_observation("disclosure_after_restart", &after_restart)?;
     }
+    let software_continuity = continuity::exercise(
+        &database_url,
+        &software,
+        &software_operations,
+        software_daemon,
+    )?;
+    evidence::record_observation(
+        "software_effect_continuity",
+        &software_continuity.observations,
+    )?;
+    let software_daemon = software_continuity.daemon;
+    let analytics_continuity = continuity::exercise(
+        &database_url,
+        &analytics,
+        &analytics_operations,
+        analytics_daemon,
+    )?;
+    evidence::record_observation(
+        "analytics_effect_continuity",
+        &analytics_continuity.observations,
+    )?;
+    let analytics_daemon = analytics_continuity.daemon;
     let software_replacement = handoff::exercise(
         &database_url,
         &software,

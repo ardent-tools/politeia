@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, path::Path};
 
 use jiff::Timestamp;
-use politeia_core::{Delegation, Digest};
+use politeia_core::{BudgetReservationId, Delegation, Digest};
 use politeiad::service_generation::CommissioningReceipt;
 
 use super::{
@@ -24,14 +24,48 @@ pub(super) fn exercise(
     commissioned: &CommissionedGeneration,
     temporary_grants: &[Delegation],
 ) -> TestResult<Digest> {
-    positive_canary(database_url, fixture, operations, "pre-revocation")?;
+    let prior_canary = positive_canary(database_url, fixture, operations, "pre-revocation")?;
     negative_canary(database_url, fixture, operations)?;
+    let prior_reservation: BudgetReservationId =
+        serde_json::from_value(prior_canary["reservation"].clone())?;
+    let prior_receipt: Digest = serde_json::from_value(prior_canary["receipt_digest"].clone())?;
+    let premature_handoff = fixture
+        .handoff_revocation_evidence(&commissioned.generation, &commissioned.receipt)
+        .submission(fixture, prior_reservation.clone(), prior_receipt.clone());
+    refuse_handoff(
+        database_url,
+        fixture,
+        "handoff-with-active-commissioner.json",
+        &premature_handoff,
+        "commissioner authority remains active for the workspace",
+    )?;
 
     revoke_commissioner_authority(
         database_url,
         fixture,
         &commissioned.commissioner,
         temporary_grants,
+    )?;
+    require_refusal(
+        run(
+            database_url,
+            &[
+                Path::new("snapshot"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &fixture.root.join("corrected-active-capture.json"),
+            ],
+        )?,
+        "revoked commissioner reconnaissance credential",
+        "capture delegation is revoked before source access",
+    )?;
+    let ended_authority =
+        fixture.handoff_revocation_evidence(&commissioned.generation, &commissioned.receipt);
+    refuse_handoff(
+        database_url,
+        fixture,
+        "handoff-with-pre-revocation-canary.json",
+        &ended_authority.submission(fixture, prior_reservation, prior_receipt),
+        "handoff canary receipt is not a completed active-generation local operation",
     )?;
 
     let verified = submit_commissioning(
@@ -72,12 +106,44 @@ pub(super) fn exercise(
         "revoked commissioner publication credential",
         "delegation is revoked",
     )?;
-    positive_canary(
+    let continuity = positive_canary(
         database_url,
         fixture,
         operations,
         "after-commissioner-revocation",
     )?;
+    let reservation: BudgetReservationId =
+        serde_json::from_value(continuity["reservation"].clone())?;
+    let receipt: Digest = serde_json::from_value(continuity["receipt_digest"].clone())?;
+    refuse_handoff(
+        database_url,
+        fixture,
+        "handoff-without-owner-evidence.json",
+        &ReferenceFixture::handoff_without_evidence(&commissioned.generation, &reservation),
+        "missing field `revocation_evidence`",
+    )?;
+    let handed_off = submit_commissioning(
+        database_url,
+        fixture,
+        "accept-operational-handoff.json",
+        &ended_authority.submission(fixture, reservation.clone(), receipt.clone()),
+    )?;
+    assert_eq!(handed_off["completed"], true);
+    assert_eq!(
+        handed_off["generation"],
+        serde_json::json!(commissioned.generation)
+    );
+    assert_eq!(
+        handed_off["continuity_reservation"],
+        serde_json::json!(reservation)
+    );
+    assert_eq!(
+        handed_off["continuity_receipt_digest"],
+        serde_json::json!(receipt)
+    );
+    let durable_handoff =
+        super::continuity::observe_handoff_receipt(database_url, fixture, &handed_off)?;
+    super::evidence::record_observation("accepted_operational_handoff", &durable_handoff)?;
 
     let replacement = fixture.replacement_delegation(&commissioned.owner_root);
     let unauthorized_publication =
@@ -129,7 +195,7 @@ pub(super) fn exercise(
         "replacement-derive-record.json",
         &fixture.replacement_derive_record_request(
             &replacement,
-            observation,
+            &observation,
             commissioned.receipt.approvals.clone(),
         ),
     )?)?;
@@ -205,6 +271,27 @@ pub(super) fn exercise(
     Ok(replacement_generation)
 }
 
+fn refuse_handoff(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    name: &str,
+    document: &serde_json::Value,
+    reason: &str,
+) -> TestResult {
+    require_refusal(
+        run(
+            database_url,
+            &[
+                Path::new("commissioning"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &write_request(fixture, name, document)?,
+            ],
+        )?,
+        name,
+        reason,
+    )
+}
+
 fn revoke_commissioner_authority(
     database_url: &str,
     fixture: &ReferenceFixture,
@@ -244,7 +331,7 @@ fn positive_canary(
     fixture: &ReferenceFixture,
     operations: &OperationalFixture,
     stage: &str,
-) -> TestResult {
+) -> TestResult<serde_json::Value> {
     let routed_at = Timestamp::now();
     let prepared = operations.positive_manifest(fixture, routed_at);
     let expected_remote_rejections = serde_json::to_value(operations.remote_rejections(routed_at))?;
@@ -308,7 +395,7 @@ fn positive_canary(
             "the completed protected operation returns a nonempty canonical {field} identity"
         );
     }
-    Ok(())
+    Ok(response)
 }
 
 fn negative_canary(

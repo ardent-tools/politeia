@@ -18,7 +18,7 @@ impl ReferenceFixture {
     /// Finish a prepared capture after its exact descriptor grant was admitted.
     /// The descriptor, source, manifest, and evidence identities stay fixed;
     /// source access is never represented as predating durable authority.
-    pub(crate) fn capture_after_admission(&self, prepared: CaptureDocuments) -> CaptureDocuments {
+    pub(crate) fn capture_after_admission(&self, prepared: &CaptureDocuments) -> CaptureDocuments {
         let mut capture: SignedAdmissionWire<SourceCaptureRequest> =
             serde_json::from_value(prepared.document["capture"].clone())
                 .expect("capture wire decodes");

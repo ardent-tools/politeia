@@ -66,7 +66,7 @@ pub(crate) fn activate(
             generation.clone(),
             revision,
             active.clone(),
-            assurance.clone(),
+            &assurance,
         );
         missing_transition["request"]
             .as_object_mut()
@@ -99,7 +99,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-wrong-owner-transition.json",
-            &fixture.activation_request_with_transition(assurance.clone(), wrong_owner),
+            &ReferenceFixture::activation_request_with_transition(&assurance, &wrong_owner),
             "only the installed institution owner may authorize a generation transition",
         )?;
 
@@ -114,7 +114,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-swapped-action-transition.json",
-            &fixture.activation_request_with_transition(assurance.clone(), wrong_action),
+            &ReferenceFixture::activation_request_with_transition(&assurance, &wrong_action),
             "signed lifecycle assurance control differs from owner transition action",
         )?;
 
@@ -129,7 +129,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-swapped-target-transition.json",
-            &fixture.activation_request_with_transition(assurance.clone(), wrong_target),
+            &ReferenceFixture::activation_request_with_transition(&assurance, &wrong_target),
             "signed lifecycle assurance target differs from owner transition target",
         )?;
 
@@ -154,7 +154,10 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-swapped-assurance-transition.json",
-            &fixture.activation_request_with_transition(altered_assurance, owner_transition),
+            &ReferenceFixture::activation_request_with_transition(
+                &altered_assurance,
+                &owner_transition,
+            ),
             "owner generation transition assurance digest differs from supplied assurance",
         )?;
 
@@ -183,7 +186,7 @@ pub(crate) fn activate(
                     generation.clone(),
                     revision,
                     active.clone(),
-                    altered,
+                    &altered,
                 ),
                 "signed lifecycle assurance differs from freshly calibrated artifact validation",
             )?;
@@ -207,7 +210,7 @@ pub(crate) fn activate(
                 generation.clone(),
                 revision,
                 active.clone(),
-                wrong_grant,
+                &wrong_grant,
             ),
             "control run authorization digest differs from its admitted direct grant",
         )?;
@@ -230,7 +233,7 @@ pub(crate) fn activate(
                 generation.clone(),
                 revision,
                 active.clone(),
-                dangling,
+                &dangling,
             ),
             "activation proof lacks exact verifier-signed lifecycle calibration evidence",
         )?;
@@ -243,7 +246,7 @@ pub(crate) fn activate(
                 generation.clone(),
                 revision - 1,
                 active.clone(),
-                assurance.clone(),
+                &assurance,
             ),
             "generation activation compare-and-swap is stale",
         )?;
@@ -319,7 +322,7 @@ pub(crate) fn activate(
                 generation.clone(),
                 revision,
                 active.clone(),
-                self_proof,
+                &self_proof,
             ),
             "the control producer also signed its activation proof",
         )?;
@@ -333,7 +336,7 @@ pub(crate) fn activate(
         database_url,
         fixture,
         &format!("{kind}-generation.json"),
-        &fixture.activation_request(kind, generation.clone(), revision, active, assurance),
+        &fixture.activation_request(kind, generation.clone(), revision, active, &assurance),
     )?;
     assert_eq!(
         status_value(database_url, fixture)?["active_generation"],
