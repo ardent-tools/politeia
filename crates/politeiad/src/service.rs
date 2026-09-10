@@ -71,6 +71,11 @@ pub struct SourceCaptureSubmission {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CommissioningRequest {
+    /// Atomically revoke exact authority under the installed owner's signature.
+    RevokeDelegation {
+        /// Signed revocation retained as the decision evidence.
+        request: SignedAdmissionWire<crate::service_revocation::DelegationRevocationRequest>,
+    },
     /// Persist a signed delegation after installed-key admission.
     AdmitDelegation {
         /// Exact signed delegation wire, retained for restart re-admission.
@@ -527,6 +532,9 @@ impl PoliteiadService {
             CoordinatorError::Refused(format!("commissioning input is not typed JSON: {error}"))
         })?;
         match request {
+            CommissioningRequest::RevokeDelegation { request } => {
+                self.revoke_delegation_request(request).await
+            }
             CommissioningRequest::Generation { request } => self.handle_generation(request).await,
             CommissioningRequest::Learning { request } => self.handle_learning(request).await,
             CommissioningRequest::AdmitDelegation { delegation } => {

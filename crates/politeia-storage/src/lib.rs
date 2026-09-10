@@ -6,6 +6,7 @@
 #![deny(missing_docs)]
 
 mod read;
+mod revocation;
 pub use read::{PersistedDelegation, StoredPayload, WorkspaceSnapshot};
 
 use std::str::FromStr;
