@@ -6,14 +6,14 @@ use politeiad::{
     SemanticOperation,
     config::{HostTrustConfiguration, InstallationLayout},
     service::PoliteiadService,
-    transport::{bind, current_request, request, serve_once},
+    transport::{LocalOutcome, bind, current_request, request, serve_once},
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let arguments: Vec<String> = env::args().collect();
     match arguments.get(1).map(String::as_str) {
-        Some("initialize") => initialize_host(&arguments),
+        Some("initialize") => initialize_host(&arguments).await,
         Some("serve") => serve(&arguments).await,
         Some("snapshot") => send_request_document(&arguments, "snapshot").await,
         Some("status") => send(&arguments, SemanticOperation::Status).await,
@@ -31,16 +31,21 @@ async fn serve(arguments: &[String]) -> anyhow::Result<()> {
     let database_url = env::var("POLITEIA_DATABASE_URL")
         .map_err(|_| anyhow::anyhow!("POLITEIA_DATABASE_URL is required to run politeiad"))?;
     let anchors = installed.anchors()?;
-    let coordinator =
-        PoliteiadService::connect(layout, installed.workspace, anchors, &database_url)
-            .await
-            .map_err(anyhow::Error::msg)?;
+    let coordinator = PoliteiadService::connect(
+        layout,
+        installed.workspace,
+        anchors,
+        installed.bootstrap,
+        &database_url,
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     loop {
         serve_once(&listener, &coordinator).await?;
     }
 }
 
-fn initialize_host(arguments: &[String]) -> anyhow::Result<()> {
+async fn initialize_host(arguments: &[String]) -> anyhow::Result<()> {
     let prefix = required_path(arguments, 2, "initialize requires an installation prefix")?;
     let configuration_path = required_path(
         arguments,
@@ -50,6 +55,23 @@ fn initialize_host(arguments: &[String]) -> anyhow::Result<()> {
     let configuration: HostTrustConfiguration =
         serde_json::from_slice(&fs::read(configuration_path)?)?;
     let layout = configuration.install(prefix)?;
+    let database_url = env::var("POLITEIA_DATABASE_URL").map_err(|_| {
+        anyhow::anyhow!("POLITEIA_DATABASE_URL is required to initialize politeiad")
+    })?;
+    let anchors = configuration.anchors()?;
+    let coordinator = PoliteiadService::connect(
+        layout.clone(),
+        configuration.workspace,
+        anchors,
+        configuration.bootstrap,
+        &database_url,
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
+    coordinator
+        .initialize_storage()
+        .await
+        .map_err(anyhow::Error::msg)?;
     println!("{}", serde_json::to_string_pretty(&layout)?);
     Ok(())
 }
@@ -85,6 +107,9 @@ async fn send_to_socket(socket: PathBuf, operation: SemanticOperation) -> anyhow
     )
     .await?;
     println!("{}", serde_json::to_string_pretty(&response)?);
+    if let LocalOutcome::Error { code, message } = response.outcome {
+        return Err(anyhow::anyhow!("{code}: {message}"));
+    }
     Ok(())
 }
 

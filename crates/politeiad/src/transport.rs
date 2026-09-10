@@ -2,14 +2,14 @@
 
 use std::{
     io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::Path,
 };
 
 use politeia_protocol::{CURRENT_PROTOCOL_VERSION, ProtocolVersion, negotiate};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
 };
 
@@ -106,7 +106,7 @@ impl From<io::Error> for TransportError {
     }
 }
 
-/// Bind a new private local socket without unlinking a prior endpoint.
+/// Bind a new private local socket, removing only a proved-stale owned endpoint.
 pub async fn bind(socket: &Path) -> Result<UnixListener, TransportError> {
     let parent = socket.parent().ok_or_else(|| {
         TransportError::Io(io::Error::new(
@@ -116,6 +116,32 @@ pub async fn bind(socket: &Path) -> Result<UnixListener, TransportError> {
     })?;
     if parent.metadata()?.mode() & 0o077 != 0 {
         return Err(TransportError::InsecureSocketDirectory);
+    }
+    if socket.exists() {
+        let metadata = std::fs::symlink_metadata(socket)?;
+        if !metadata.file_type().is_socket() || metadata.mode() & 0o077 != 0 {
+            return Err(TransportError::Io(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "existing local socket path is not a private owned socket",
+            )));
+        }
+        match UnixStream::connect(socket).await {
+            Ok(_) => {
+                return Err(TransportError::Io(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "an existing local daemon owns this socket",
+                )));
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) =>
+            {
+                std::fs::remove_file(socket)?;
+            }
+            Err(error) => return Err(TransportError::Io(error)),
+        }
     }
     let listener = UnixListener::bind(socket)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
@@ -129,10 +155,16 @@ pub async fn serve_once(
 ) -> Result<(), TransportError> {
     let (mut stream, _) = listener.accept().await?;
     let response = match read_request(&mut stream).await {
-        Ok(request) => handle(coordinator, request).await,
-        Err(error) => Err(error),
+        Ok(request) => {
+            let request_id = request.request_id.clone();
+            match handle(coordinator, request).await {
+                Ok(response) => response,
+                Err(error) => error_response(request_id, error),
+            }
+        }
+        Err(error) => error_response(String::new(), error),
     };
-    let bytes = serde_json::to_vec(&response?)
+    let bytes = serde_json::to_vec(&response)
         .map_err(|error| TransportError::Encoding(error.to_string()))?;
     stream.write_all(&bytes).await?;
     stream.write_all(b"\n").await?;
@@ -157,12 +189,30 @@ pub async fn request(
 }
 
 async fn read_request(stream: &mut UnixStream) -> Result<LocalRequest, TransportError> {
-    let mut line = String::new();
-    let bytes = BufReader::new(stream).read_line(&mut line).await?;
-    if bytes > MAX_REQUEST_BYTES {
-        return Err(TransportError::RequestTooLarge);
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = stream.read(&mut buffer).await?;
+        if count == 0 {
+            return Err(TransportError::InvalidRequest(
+                "local request ended before its newline-delimited frame".to_string(),
+            ));
+        }
+        if bytes.len().saturating_add(count) > MAX_REQUEST_BYTES {
+            return Err(TransportError::RequestTooLarge);
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        if bytes.contains(&b'\n') {
+            break;
+        }
     }
-    serde_json::from_str(&line).map_err(|error| TransportError::InvalidRequest(error.to_string()))
+    if bytes.last() != Some(&b'\n') || bytes[..bytes.len() - 1].contains(&b'\n') {
+        return Err(TransportError::InvalidRequest(
+            "local request must end with one newline-delimited frame".to_string(),
+        ));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| TransportError::InvalidRequest(error.to_string()))
 }
 
 async fn handle(
@@ -185,6 +235,25 @@ async fn handle(
         request_id: request.request_id,
         outcome,
     })
+}
+
+fn error_response(request_id: String, error: TransportError) -> LocalResponse {
+    let code = match error {
+        TransportError::RequestTooLarge => "request_too_large",
+        TransportError::InsecureSocketDirectory => "insecure_socket_directory",
+        TransportError::InvalidRequest(_) => "invalid_request",
+        TransportError::IncompatibleProtocol => "incompatible_protocol",
+        TransportError::Encoding(_) => "response_encoding_failed",
+        TransportError::Io(_) => "transport_io_failure",
+    };
+    LocalResponse {
+        version: CURRENT_PROTOCOL_VERSION,
+        request_id,
+        outcome: LocalOutcome::Error {
+            code: code.to_string(),
+            message: error.to_string(),
+        },
+    }
 }
 
 /// Build a current-version request for CLI callers.

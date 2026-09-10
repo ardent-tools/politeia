@@ -13,7 +13,9 @@ use politeia_core::{
         TrustedSourceCaptureRegistry,
     },
     reconnaissance::ReconnaissanceScope,
-    trust::{AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire},
+    trust::{
+        AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire, WorkspaceBootstrapRequest,
+    },
 };
 use politeia_runtime::{AuthorizationLedger, RuntimeError};
 use politeia_storage::{
@@ -39,6 +41,7 @@ pub struct PoliteiadService {
     anchors: InstitutionTrustAnchors,
     storage: PostgresStorage,
     scope: Scope,
+    bootstrap: SignedAdmissionWire<WorkspaceBootstrapRequest>,
 }
 
 /// Signed source-capture material submitted through the semantic coordinator.
@@ -67,6 +70,7 @@ impl PoliteiadService {
         layout: InstallationLayout,
         workspace: InstitutionWorkspace,
         anchors: InstitutionTrustAnchors,
+        bootstrap: SignedAdmissionWire<WorkspaceBootstrapRequest>,
         database_url: &str,
     ) -> Result<Self, CoordinatorError> {
         if layout.institution != workspace.institution
@@ -77,6 +81,14 @@ impl PoliteiadService {
             return Err(CoordinatorError::Refused(
                 "installed layout, workspace, and trust anchors must name the same scope"
                     .to_string(),
+            ));
+        }
+        let admitted_bootstrap = anchors
+            .admit_workspace_bootstrap(bootstrap.clone())
+            .map_err(refusal)?;
+        if admitted_bootstrap.payload().workspace != workspace {
+            return Err(CoordinatorError::Refused(
+                "owner-signed bootstrap differs from installed workspace configuration".to_string(),
             ));
         }
         let scope = Scope::new(
@@ -93,12 +105,50 @@ impl PoliteiadService {
             anchors,
             storage,
             scope,
+            bootstrap,
         })
     }
 
     /// Apply PostgreSQL migrations as part of an explicit host setup action.
     pub async fn migrate(&self) -> Result<(), CoordinatorError> {
         self.storage.migrate().await.map_err(storage_refusal)
+    }
+
+    /// Create or verify the owner-signed workspace skeleton in PostgreSQL.
+    ///
+    /// The skeleton only establishes durable host scope. It is not an approved
+    /// model revision and does not make later knowledge or policy true.
+    pub async fn initialize_storage(&self) -> Result<(), CoordinatorError> {
+        self.migrate().await?;
+        let admitted = self
+            .anchors
+            .admit_workspace_bootstrap(self.bootstrap.clone())
+            .map_err(refusal)?;
+        let record = signed_wire_record(&self.bootstrap)?;
+        match self.storage.load_workspace(&self.scope).await {
+            Ok(existing) => {
+                if existing.owner != self.workspace.owner
+                    || existing.owner_delegation != self.workspace.owner_delegation
+                    || existing.model.digest() != record.digest()
+                {
+                    return Err(CoordinatorError::Refused(
+                        "existing durable workspace differs from installed bootstrap".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            Err(politeia_storage::StorageError::NotFound) => self
+                .storage
+                .bootstrap_workspace(&politeia_storage::WorkspaceBootstrap {
+                    scope: self.scope.clone(),
+                    owner: admitted.payload().workspace.owner.clone(),
+                    owner_delegation: admitted.payload().workspace.owner_delegation.clone(),
+                    model: record,
+                })
+                .await
+                .map_err(storage_refusal),
+            Err(error) => Err(storage_refusal(error)),
+        }
     }
 
     /// Return the installed non-secret filesystem layout.

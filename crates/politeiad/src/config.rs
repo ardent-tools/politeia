@@ -8,7 +8,10 @@ use std::{
 use politeia_core::{
     InstitutionId, InstitutionWorkspaceId, PrincipalId,
     institution::InstitutionWorkspace,
-    trust::{AdmissionKind, InstitutionTrustAnchors, TrustedSigningKey},
+    trust::{
+        AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire, TrustedSigningKey,
+        WorkspaceBootstrapRequest,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +58,9 @@ pub struct HostTrustConfiguration {
     pub workspace: InstitutionWorkspace,
     /// Installed public verification keys for the exact workspace.
     pub anchors: Vec<InstalledTrustAnchor>,
+    /// Owner-signed installed workspace skeleton. This establishes host scope
+    /// and never approves the workspace's institutional knowledge.
+    pub bootstrap: SignedAdmissionWire<WorkspaceBootstrapRequest>,
 }
 
 /// Why an installation layout could not be initialized safely.
@@ -178,7 +184,7 @@ impl HostTrustConfiguration {
             self.workspace.id.clone(),
             prefix,
         );
-        let _anchors = self.anchors()?;
+        let _bootstrap = self.admit_workspace_bootstrap()?;
         layout.initialize_filesystem()?;
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|error| InstallationError::Io(io::Error::other(error)))?;
@@ -198,7 +204,7 @@ impl HostTrustConfiguration {
         {
             return Err(InstallationError::InvalidLayout);
         }
-        let _anchors = configuration.anchors()?;
+        let _bootstrap = configuration.admit_workspace_bootstrap()?;
         Ok(configuration)
     }
 
@@ -219,6 +225,22 @@ impl HostTrustConfiguration {
             keys,
         )
         .map_err(|error| InstallationError::InvalidTrust(error.to_string()))
+    }
+
+    /// Re-admit the installed owner-signed workspace skeleton.
+    pub fn admit_workspace_bootstrap(
+        &self,
+    ) -> Result<politeia_core::trust::Admitted<WorkspaceBootstrapRequest>, InstallationError> {
+        let anchors = self.anchors()?;
+        let admitted = anchors
+            .admit_workspace_bootstrap(self.bootstrap.clone())
+            .map_err(|error| InstallationError::InvalidTrust(error.to_string()))?;
+        if admitted.payload().workspace != self.workspace {
+            return Err(InstallationError::InvalidTrust(
+                "workspace bootstrap differs from host workspace configuration".to_string(),
+            ));
+        }
+        Ok(admitted)
     }
 }
 
@@ -264,6 +286,7 @@ mod tests {
         fs,
     };
 
+    use ed25519_dalek::SigningKey;
     use politeia_core::{
         DelegationId, Digest, PolicyBundleId, PrincipalId,
         generation::{ApprovedGenerationInputs, CommissioningCapability, ReproducibilityContract},
@@ -334,12 +357,28 @@ mod tests {
             },
             secret_references: BTreeSet::new(),
         };
+        let owner_key = SigningKey::from_bytes(&[42; 32]);
+        let bootstrap = SignedAdmissionWire::sign(
+            AdmissionKind::WorkspaceBootstrap,
+            workspace.institution.clone(),
+            workspace.id.clone(),
+            workspace.owner.clone(),
+            WorkspaceBootstrapRequest {
+                workspace: workspace.clone(),
+            },
+            &owner_key,
+        )
+        .expect("fixture bootstrap signs");
         let configuration = HostTrustConfiguration {
             anchors: vec![InstalledTrustAnchor {
                 principal: workspace.owner.clone(),
-                public_key: [42; 32],
-                permitted: BTreeSet::from([AdmissionKind::FactApproval]),
+                public_key: owner_key.verifying_key().to_bytes(),
+                permitted: BTreeSet::from([
+                    AdmissionKind::FactApproval,
+                    AdmissionKind::WorkspaceBootstrap,
+                ]),
             }],
+            bootstrap,
             workspace,
         };
         let layout = configuration
