@@ -48,4 +48,4 @@ A deliberate return to broader engineering after material change. It requires a 
 
 `operational | maintenance → recommissioning → operational`
 
-No other transition is structurally valid. Policy may impose additional owner approval, evidence, or separation-of-duty requirements; it may not invent a shortcut around handoff or revocation. Every transition is authorized and evidence-bearing.
+No other transition is structurally valid. Policy may impose additional owner approval, evidence, or separation-of-duty requirements; it may not invent a shortcut around handoff or revocation. Every transition is authorized and evidence-bearing. An installed owner's signed generation-transition decision binds the exact activate or rollback action, target generation, observed active pointer and revision, and the canonical digest of the lifecycle assurance; control evidence alone cannot change the active pointer.

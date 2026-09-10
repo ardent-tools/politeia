@@ -131,7 +131,7 @@ pub struct CommissioningSelection {
 }
 
 /// Typed assurance material required for activation and rollback.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActivationAssurance {
     /// Verifier-signed calibration evidence retained by the activation proof.
@@ -146,6 +146,61 @@ pub struct ActivationAssurance {
     pub proof_authority: SignedAdmissionWire<Delegation>,
 }
 
+/// One typed lifecycle action that only the installed institution owner may
+/// authorize for the active-generation pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationTransitionAction {
+    /// Make a generation the active operational generation.
+    Activate,
+    /// Return a previously admitted generation to the active slot.
+    Rollback,
+}
+
+impl GenerationTransitionAction {
+    fn control(self) -> &'static str {
+        match self {
+            Self::Activate => ACTIVATE_CONTROL,
+            Self::Rollback => ROLLBACK_CONTROL,
+        }
+    }
+}
+
+/// Exact installed-owner decision to change the active-generation pointer.
+///
+/// The signed envelope supplies the owner and workspace scope. Its payload
+/// binds the lifecycle action, target, observed compare-and-swap state, and
+/// complete signed assurance document so evidence producers cannot authorize
+/// a deployment decision by themselves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationTransitionRequest {
+    /// Identity under which the complete owner decision is retained as evidence.
+    pub evidence: EvidenceId,
+    /// The requested lifecycle action.
+    pub action: GenerationTransitionAction,
+    /// Exact admitted generation to activate.
+    pub generation: Digest,
+    /// Durable workspace revision the owner observed.
+    pub expected_revision: i64,
+    /// Active generation the owner observed, including explicit empty.
+    pub expected_active: Option<Digest>,
+    /// BLAKE3 of the exact canonical signed assurance document.
+    pub assurance_digest: Digest,
+}
+
+/// Derive the canonical assurance binding used by an owner transition.
+///
+/// # Errors
+///
+/// Returns a canonical encoding error when the signed assurance cannot be
+/// represented as canonical bytes.
+pub fn activation_assurance_digest(
+    assurance: &ActivationAssurance,
+) -> Result<Digest, politeia_core::canonical::CanonicalError> {
+    politeia_core::canonical::to_canonical_bytes(assurance).map(|bytes| Digest::blake3(&bytes))
+}
+
 /// Generation lifecycle requests carried by the commissioning transport.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -153,7 +208,7 @@ pub enum GenerationRequest {
     /// Derive, publish, verify, and durably admit a complete generation.
     Publish {
         /// Exact signed specialization inputs.
-        inputs: SignedAdmissionWire<RuntimeGenerationInputs>,
+        inputs: Box<SignedAdmissionWire<RuntimeGenerationInputs>>,
         /// Re-admitted commissioning selection.
         commissioning: CommissioningSelection,
         /// Workspace-confined bytes for every approved input.
@@ -177,27 +232,12 @@ pub enum GenerationRequest {
         /// Exact lifecycle control that will bind the unsigned report.
         control: String,
     },
-    /// Compare-and-swap an admitted generation into the active slot.
-    Activate {
-        /// Target generation digest.
-        generation: Digest,
-        /// Durable workspace revision observed by the caller.
-        expected_revision: i64,
-        /// Active generation observed by the caller, including explicit empty.
-        expected_active: Option<Digest>,
+    /// Change the active slot only under an installed-owner transition decision.
+    Transition {
         /// Control run and independent activation proof.
-        assurance: ActivationAssurance,
-    },
-    /// Compare-and-swap a previously admitted generation back into service.
-    Rollback {
-        /// Previously admitted target generation digest.
-        generation: Digest,
-        /// Durable workspace revision observed by the caller.
-        expected_revision: i64,
-        /// Active generation observed by the caller.
-        expected_active: Option<Digest>,
-        /// Control run and independent activation proof.
-        assurance: ActivationAssurance,
+        assurance: Box<ActivationAssurance>,
+        /// Installed-owner deployment decision bound to this exact request.
+        transition: Option<SignedAdmissionWire<GenerationTransitionRequest>>,
     },
     /// Admit a fresh replacement-maintainer grant before further commissioning.
     Recommission {
@@ -226,7 +266,7 @@ impl PoliteiadService {
                 commissioning,
                 sources,
             } => {
-                self.publish_generation(inputs, commissioning, sources)
+                self.publish_generation(*inputs, commissioning, sources)
                     .await
             }
             GenerationRequest::Verify { generation } => self.verify_generation(generation).await,
@@ -245,36 +285,10 @@ impl PoliteiadService {
                     evidence_refs: Vec::new(),
                 })
             }
-            GenerationRequest::Activate {
-                generation,
-                expected_revision,
-                expected_active,
+            GenerationRequest::Transition {
                 assurance,
-            } => {
-                self.activate_generation(
-                    generation,
-                    expected_revision,
-                    expected_active,
-                    assurance,
-                    ACTIVATE_CONTROL,
-                )
-                .await
-            }
-            GenerationRequest::Rollback {
-                generation,
-                expected_revision,
-                expected_active,
-                assurance,
-            } => {
-                self.activate_generation(
-                    generation,
-                    expected_revision,
-                    expected_active,
-                    assurance,
-                    ROLLBACK_CONTROL,
-                )
-                .await
-            }
+                transition,
+            } => self.activate_generation(*assurance, transition).await,
             GenerationRequest::Recommission { delegation } => self.recommission(delegation).await,
             GenerationRequest::DeriveRecord { selection } => {
                 self.derive_commissioning_receipt(selection).await
@@ -484,12 +498,54 @@ impl PoliteiadService {
 
     async fn activate_generation(
         &self,
-        generation: Digest,
-        expected_revision: i64,
-        expected_active: Option<Digest>,
         assurance: ActivationAssurance,
-        control: &str,
+        transition: Option<SignedAdmissionWire<GenerationTransitionRequest>>,
     ) -> Result<OperationResult, CoordinatorError> {
+        let transition = transition.ok_or_else(|| {
+            CoordinatorError::Refused(
+                "generation transition requires an installed-owner signed authorization"
+                    .to_string(),
+            )
+        })?;
+        let admitted_transition = self
+            .anchors()
+            .admit_expected(AdmissionKind::GenerationTransition, transition.clone())
+            .map_err(refusal)?;
+        if admitted_transition.signer() != &self.workspace().owner {
+            return Err(CoordinatorError::Refused(
+                "only the installed institution owner may authorize a generation transition"
+                    .to_string(),
+            ));
+        }
+        let transition_request = admitted_transition.payload();
+        let generation = transition_request.generation.clone();
+        let expected_revision = transition_request.expected_revision;
+        let expected_active = transition_request.expected_active.clone();
+        let action = transition_request.action;
+        if assurance.run.payload.control != action.control()
+            || assurance.proof.payload.control != action.control()
+        {
+            return Err(CoordinatorError::Refused(
+                "signed lifecycle assurance control differs from owner transition action"
+                    .to_string(),
+            ));
+        }
+        if assurance.run.payload.input_digest != generation
+            || assurance.run.payload.subject != generation
+        {
+            return Err(CoordinatorError::Refused(
+                "signed lifecycle assurance target differs from owner transition target"
+                    .to_string(),
+            ));
+        }
+        if transition_request.assurance_digest
+            != activation_assurance_digest(&assurance).map_err(refusal)?
+        {
+            return Err(CoordinatorError::Refused(
+                "owner generation transition assurance digest differs from supplied assurance"
+                    .to_string(),
+            ));
+        }
         let durable = self.durable_snapshot().await?;
         if durable.revision != expected_revision || durable.active_generation != expected_active {
             return Err(CoordinatorError::Refused(
@@ -502,7 +558,7 @@ impl PoliteiadService {
             .await
             .map_err(storage_refusal)?;
         let validation = self
-            .generation_validation_report(generation.clone(), control)
+            .generation_validation_report(generation.clone(), action.control())
             .await?;
 
         let now = self.observed_at().await?;
@@ -594,8 +650,12 @@ impl PoliteiadService {
                     .to_string(),
             ));
         }
-        clean_claim(&[authorized], control, &generation, &verified).map_err(refusal)?;
+        clean_claim(&[authorized], action.control(), &generation, &verified).map_err(refusal)?;
         let evidence = vec![
+            EvidenceAdmission {
+                id: transition_request.evidence.clone(),
+                record: signed_wire_record(&transition)?,
+            },
             EvidenceAdmission {
                 id: assurance.calibration.payload.id.clone(),
                 record: signed_wire_record(&assurance.calibration)?,
@@ -609,7 +669,7 @@ impl PoliteiadService {
                 record: signed_wire_record(&assurance.proof)?,
             },
         ];
-        let transition = signed_wire_record(&assurance.run)?;
+        let transition = signed_wire_record(&transition)?;
         let authority_chains = vec![
             self.admit_live_delegation_chain(
                 &run_authority.payload().id,
@@ -644,12 +704,13 @@ impl PoliteiadService {
                 "active_generation": generation,
                 "revision": receipt.revision,
                 "transition": receipt.transition_digest,
-                "control": control,
+                "control": action.control(),
             }),
             evidence_refs: vec![
                 assurance.calibration.payload.id.0.to_string(),
                 assurance.run.payload.id.0.to_string(),
                 assurance.proof.payload.id.0.to_string(),
+                transition_request.evidence.0.to_string(),
             ],
         })
     }
@@ -772,7 +833,7 @@ impl PoliteiadService {
         })
     }
 
-    async fn load_commissioning_receipt(
+    pub(crate) async fn load_commissioning_receipt(
         &self,
         _durable: &politeia_storage::WorkspaceSnapshot,
         record: &politeia_core::CommissioningRecordId,
@@ -820,7 +881,7 @@ impl PoliteiadService {
         Ok(())
     }
 
-    async fn commissioning_record(
+    pub(crate) async fn commissioning_record(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
         record_id: &politeia_core::CommissioningRecordId,

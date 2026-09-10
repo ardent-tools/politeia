@@ -47,7 +47,10 @@ mod handoff;
 pub(crate) mod learning;
 mod lifecycle;
 pub(crate) mod operational;
-use politeiad::service_generation::CommissioningReceipt;
+use politeiad::service_generation::{
+    ActivationAssurance, CommissioningReceipt, GenerationTransitionAction,
+    GenerationTransitionRequest, activation_assurance_digest,
+};
 
 /// The two intentionally disjoint reference institutions exercised by the package.
 #[derive(Clone, Copy, Debug)]
@@ -292,6 +295,7 @@ impl ReferenceFixture {
                     AdmissionKind::FactApproval,
                     AdmissionKind::Delegation,
                     AdmissionKind::Generation,
+                    AdmissionKind::GenerationTransition,
                     AdmissionKind::Revocation,
                     AdmissionKind::LearningSource,
                     AdmissionKind::Evidence,
@@ -308,6 +312,7 @@ impl ReferenceFixture {
                     AdmissionKind::CandidateClaim,
                     AdmissionKind::Delegation,
                     AdmissionKind::Generation,
+                    AdmissionKind::GenerationTransition,
                     AdmissionKind::LearningContext,
                     AdmissionKind::OperationIntent,
                 ],
@@ -892,8 +897,7 @@ impl ReferenceFixture {
     }
 
     /// Serialize an activation or rollback request around independently
-    /// produced assurance. The daemon re-admits all four supplied wires and
-    /// performs the durable compare-and-swap.
+    /// produced assurance and a matching installed-owner deployment decision.
     pub(crate) fn activation_request(
         &self,
         kind: &str,
@@ -902,14 +906,68 @@ impl ReferenceFixture {
         expected_active: Option<Digest>,
         assurance: ActivationDocuments,
     ) -> serde_json::Value {
-        assert!(matches!(kind, "activate" | "rollback"));
+        let action = transition_action(kind);
+        let transition = self.generation_transition_authorization(
+            action,
+            generation.clone(),
+            expected_revision,
+            expected_active.clone(),
+            &assurance,
+        );
+        self.activation_request_with_transition(assurance, transition)
+    }
+
+    /// Sign the installed owner's exact active-generation decision for a
+    /// complete lifecycle assurance document.
+    pub(crate) fn generation_transition_authorization(
+        &self,
+        action: GenerationTransitionAction,
+        generation: Digest,
+        expected_revision: i64,
+        expected_active: Option<Digest>,
+        assurance: &ActivationDocuments,
+    ) -> SignedAdmissionWire<GenerationTransitionRequest> {
+        let assurance = ActivationAssurance {
+            calibration: assurance.calibration.clone(),
+            run: assurance.run.clone(),
+            run_authority: assurance.run_authority.clone(),
+            proof: assurance.proof.clone(),
+            proof_authority: assurance.proof_authority.clone(),
+        };
+        let transition = GenerationTransitionRequest {
+            evidence: EvidenceId::new(),
+            action,
+            generation,
+            expected_revision,
+            expected_active,
+            assurance_digest: activation_assurance_digest(&assurance)
+                .expect("activation assurance canonically encodes"),
+        };
+        SignedAdmissionWire::sign(
+            AdmissionKind::GenerationTransition,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.owner.clone(),
+            transition,
+            self.identities.owner_key(),
+        )
+        .expect("installed owner signs generation transition")
+    }
+
+    /// Serialize a lifecycle request with a caller-supplied signed transition.
+    ///
+    /// The process fixture uses this only to establish that a valid owner
+    /// signature over different action, target, or assurance bytes still
+    /// refuses at the service boundary.
+    pub(crate) fn activation_request_with_transition(
+        &self,
+        assurance: ActivationDocuments,
+        transition: SignedAdmissionWire<GenerationTransitionRequest>,
+    ) -> serde_json::Value {
         serde_json::json!({
             "kind": "generation",
             "request": {
-                "kind": kind,
-                "generation": generation,
-                "expected_revision": expected_revision,
-                "expected_active": expected_active,
+                "kind": "transition",
                 "assurance": {
                     "calibration": assurance.calibration,
                     "run": assurance.run,
@@ -917,6 +975,7 @@ impl ReferenceFixture {
                     "proof": assurance.proof,
                     "proof_authority": assurance.proof_authority,
                 },
+                "transition": transition,
             },
         })
     }
@@ -931,6 +990,14 @@ impl ReferenceFixture {
         )
         .expect("host trust configuration writes");
         path
+    }
+}
+
+fn transition_action(kind: &str) -> GenerationTransitionAction {
+    match kind {
+        "activate" => GenerationTransitionAction::Activate,
+        "rollback" => GenerationTransitionAction::Rollback,
+        _ => panic!("only activation and rollback are generation transitions"),
     }
 }
 

@@ -49,6 +49,8 @@ pub enum AdmissionKind {
     Verification,
     /// Inputs that identify an operational generation.
     Generation,
+    /// An installed-owner decision to activate or roll back one generation.
+    GenerationTransition,
     /// An owner-pinned approved fact and its eligible context provenance.
     LearningSource,
     /// A requester-bound institutional context compilation request.
