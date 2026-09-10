@@ -52,13 +52,9 @@ pub struct Observation {
     /// Digest of the exact bounded manifest captured before this observation.
     pub capture_manifest_digest: Digest,
     /// The workspace that owns the observation.
-    ///
-    /// WHY an observation names its workspace: institutional facts are
-    /// client-owned, and `docs/16-DATA_GOVERNANCE.md` requires an explicit
-    /// authorized export before one institution's material is reused by
-    /// another. Without this field a cross-institution observation is
-    /// structurally indistinguishable from a local one, and the quarantine
-    /// `docs/11-FAILURE_SEMANTICS.md` requires has nothing to key on.
+    // WHY: institutional facts are client-owned. Without this field a
+    // cross-institution observation is structurally indistinguishable from a
+    // local one, so the export and quarantine rules have nothing to key on.
     pub workspace: InstitutionWorkspaceId,
     /// The source the statement came from, as the institution names it.
     pub source: String,

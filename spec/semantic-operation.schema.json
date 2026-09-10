@@ -552,6 +552,10 @@
         "null"
       ]
     },
+    "input_digest": {
+      "$ref": "#/$defs/Digest",
+      "description": "Digest of the exact authenticated semantic input that selected this\noperation. It prevents a transport envelope from being authenticated\nseparately yet omitted from the policy-bound intent."
+    },
     "operation": {
       "$ref": "#/$defs/OperationSpec",
       "description": "The operation contract being invoked."
@@ -571,6 +575,7 @@
   },
   "required": [
     "principal",
+    "input_digest",
     "delegation_chain",
     "operation",
     "resources",

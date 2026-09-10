@@ -757,7 +757,7 @@
         },
         "workspace": {
           "$ref": "#/$defs/InstitutionWorkspaceId",
-          "description": "The workspace that owns the observation.\n\nWHY an observation names its workspace: institutional facts are\nclient-owned, and `docs/16-DATA_GOVERNANCE.md` requires an explicit\nauthorized export before one institution's material is reused by\nanother. Without this field a cross-institution observation is\nstructurally indistinguishable from a local one, and the quarantine\n`docs/11-FAILURE_SEMANTICS.md` requires has nothing to key on."
+          "description": "The workspace that owns the observation."
         }
       },
       "required": [
