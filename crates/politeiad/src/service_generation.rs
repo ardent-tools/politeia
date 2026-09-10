@@ -16,12 +16,9 @@ use politeia_core::{
         HistoricalReconnaissanceGrantRecord, TrustedCommissionerGrantRegistry,
         commissioning_institution_audience, commissioning_workspace_resource,
     },
-    evidence::{EvidenceRequest, TrustedEvidenceRegistry},
+    evidence::TrustedEvidenceRegistry,
     generation::RuntimeGenerationInputs,
-    knowledge::{
-        ObservationRequest, SourceCaptureRequest, TrustedObservationRegistry,
-        TrustedSourceCaptureRegistry,
-    },
+    knowledge::{TrustedObservationRegistry, TrustedSourceCaptureRegistry},
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use politeia_evidence::{
@@ -50,6 +47,7 @@ use crate::{
 const ACTIVATE_CONTROL: &str = "generation:activate";
 const ROLLBACK_CONTROL: &str = "generation:rollback";
 
+mod provenance;
 mod reproduction;
 
 /// Paths to complete artifact inputs, relative to the installed workspace.
@@ -560,14 +558,12 @@ impl PoliteiadService {
                 "commissioner delegation expired before receipt derivation".to_string(),
             ));
         }
-        let evidence_wires = durable
-            .evidence
-            .values()
-            .into_iter()
-            .map(evidence_wire)
-            .collect::<Result<Vec<_>, _>>()?;
-        let evidence = TrustedEvidenceRegistry::admit_signed(self.anchors(), evidence_wires)
-            .map_err(refusal)?;
+        let evidence = provenance::selected_evidence(
+            self.anchors(),
+            &durable.evidence,
+            &selection.observations,
+            &selection.approvals,
+        )?;
         let grant = CommissionerGrantRecord {
             institution: self.workspace().institution.clone(),
             workspace: self.workspace().id.clone(),
@@ -717,14 +713,12 @@ impl PoliteiadService {
                 "generation signer does not hold the selected commissioner delegation".to_string(),
             ));
         }
-        let evidence_wires = durable
-            .evidence
-            .values()
-            .into_iter()
-            .map(evidence_wire)
-            .collect::<Result<Vec<_>, _>>()?;
-        let evidence = TrustedEvidenceRegistry::admit_signed(self.anchors(), evidence_wires)
-            .map_err(refusal)?;
+        let evidence = provenance::selected_evidence(
+            self.anchors(),
+            &durable.evidence,
+            &receipt.observations,
+            &receipt.approvals,
+        )?;
         let grants = TrustedCommissionerGrantRegistry::from_trusted_bootstrap(
             receipt.captured_at,
             [CommissionerGrantRecord {
@@ -847,21 +841,6 @@ fn resolve_map<K: Ord>(
         .collect()
 }
 
-fn evidence_wire(
-    record: &SignedRecord,
-) -> Result<SignedAdmissionWire<EvidenceRequest>, CoordinatorError> {
-    let wire: SignedAdmissionWire<EvidenceRequest> = serde_json::from_slice(record.payload())
-        .map_err(|error| {
-            CoordinatorError::Refused(format!("stored evidence wire is malformed: {error}"))
-        })?;
-    if wire.signer != *record.signer() || wire.signature != record.signature() {
-        return Err(CoordinatorError::Refused(
-            "stored evidence wire differs from its durable signature".to_string(),
-        ));
-    }
-    Ok(wire)
-}
-
 /// Recover preserved, signed reconnaissance provenance for the selected
 /// evidence identities. Every source capture and observation is re-admitted;
 /// the original delegation chain is then checked at the observation instant,
@@ -876,27 +855,16 @@ fn historical_reconnaissance_observations(
     BTreeMap<EvidenceId, politeia_core::commissioning::HistoricalObservationProvenance>,
     CoordinatorError,
 > {
-    let captures = TrustedSourceCaptureRegistry::admit_signed(
-        service.anchors(),
-        durable
-            .state
-            .iter()
-            .filter(|(key, _)| key.starts_with("source_capture:"))
-            .map(|(_, value)| crate::service::state_wire(value))
-            .collect::<Result<Vec<SignedAdmissionWire<SourceCaptureRequest>>, _>>()?,
-    )
-    .map_err(refusal)?;
+    let (capture_wires, observation_wires) =
+        provenance::selected_reconnaissance_wires(durable, evidence_ids)?;
+    let captures = TrustedSourceCaptureRegistry::admit_signed(service.anchors(), capture_wires)
+        .map_err(refusal)?;
     let observations = TrustedObservationRegistry::admit_signed(
         service.workspace(),
         service.anchors(),
         evidence,
         &captures,
-        durable
-            .state
-            .iter()
-            .filter(|(key, _)| key.starts_with("observation:"))
-            .map(|(_, value)| crate::service::state_wire(value))
-            .collect::<Result<Vec<SignedAdmissionWire<ObservationRequest>>, _>>()?,
+        observation_wires,
     )
     .map_err(refusal)?;
     evidence_ids
