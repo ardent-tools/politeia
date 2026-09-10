@@ -711,9 +711,10 @@ impl PoliteiadService {
                 institution: self.workspace().institution.clone(),
                 workspace: self.workspace().id.clone(),
                 valid_from: persisted.admitted_at,
-                // Historical reconstruction preserves the prior grant; current
-                // authority was checked above for publication.
-                revoked_at: None,
+                // Historical reconstruction retains the actual revocation
+                // instant, so the core registry accepts this grant only when
+                // it was active at the retained receipt snapshot time.
+                revoked_at: persisted.revoked_at,
                 delegation: delegation.into_payload(),
             }],
         )

@@ -48,6 +48,8 @@ pub struct PersistedDelegation {
     pub wire: SignedAdmissionWire<Delegation>,
     /// Whether an immutable revocation exists for this delegation.
     pub revoked: bool,
+    /// Trusted instant at which the durable revocation was recorded, when one exists.
+    pub revoked_at: Option<Timestamp>,
     /// Trusted instant at which the durable authority admitted this envelope.
     pub admitted_at: Timestamp,
 }
@@ -128,7 +130,7 @@ impl PostgresStorage {
         }
         let mut delegations = BTreeMap::new();
         for delegation_row in transaction.query(
-            "SELECT d.delegation_id, d.delegation_digest, d.wire_digest, d.payload, d.signer_id, d.signature, r.delegation_id IS NOT NULL, (EXTRACT(EPOCH FROM d.admitted_at) * 1000000)::bigint FROM delegations d LEFT JOIN delegation_revocations r USING (institution_id, workspace_id, delegation_id) WHERE d.institution_id = $1 AND d.workspace_id = $2 ORDER BY d.delegation_id",
+            "SELECT d.delegation_id, d.delegation_digest, d.wire_digest, d.payload, d.signer_id, d.signature, r.delegation_id IS NOT NULL, (EXTRACT(EPOCH FROM r.revoked_at) * 1000000)::bigint, (EXTRACT(EPOCH FROM d.admitted_at) * 1000000)::bigint FROM delegations d LEFT JOIN delegation_revocations r USING (institution_id, workspace_id, delegation_id) WHERE d.institution_id = $1 AND d.workspace_id = $2 ORDER BY d.delegation_id",
             &[&scoped.institution, &scoped.workspace],
         ).await.map_err(StorageError::Database)? {
             let record = signed_from_row(&delegation_row, 2, 3, 4, 5)?;
@@ -143,14 +145,22 @@ impl PostgresStorage {
                 || semantic.as_str() != delegation_row.get::<_, String>(1) {
                 return Err(StorageError::AdmissionMismatch);
             }
-            let micros: i64 = delegation_row.get(7);
-            let nanos = i32::try_from(micros.rem_euclid(1_000_000) * 1_000)
-                .map_err(|_| StorageError::AdmissionMismatch)?;
-            let admitted_at = Timestamp::new(micros.div_euclid(1_000_000), nanos)
-                .map_err(|_| StorageError::AdmissionMismatch)?;
+            let timestamp = |micros: i64| -> Result<Timestamp, StorageError> {
+                let nanos = i32::try_from(micros.rem_euclid(1_000_000) * 1_000)
+                    .map_err(|_| StorageError::AdmissionMismatch)?;
+                Timestamp::new(micros.div_euclid(1_000_000), nanos)
+                    .map_err(|_| StorageError::AdmissionMismatch)
+            };
+            let revoked_at = delegation_row
+                .get::<_, Option<i64>>(7)
+                .map(timestamp)
+                .transpose()?;
+            let micros: i64 = delegation_row.get(8);
+            let admitted_at = timestamp(micros)?;
             delegations.insert(id, PersistedDelegation {
                 wire,
                 revoked: delegation_row.get(6),
+                revoked_at,
                 admitted_at,
             });
         }
