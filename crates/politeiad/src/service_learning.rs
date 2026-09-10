@@ -215,6 +215,7 @@ impl PoliteiadService {
             signed_wire_record(&source)?,
             format!("learning_source:{}", admitted.payload().id.0),
             signed_wire_record(&source)?,
+            None,
         )
         .await
     }
@@ -229,13 +230,15 @@ impl PoliteiadService {
             .map_err(refusal)?;
         require_disclosure_requester_signer(&admitted)?;
         require_finite_disclosure_budget(&admitted)?;
-        let delegation = self
-            .live_requester(
+        let durable = self.durable_snapshot().await?;
+        let authority = self
+            .live_requester_chain(
+                &durable,
                 &admitted.payload().requester,
                 &admitted.payload().delegation,
             )
             .await?;
-        let durable = self.durable_snapshot().await?;
+        let delegation = delegation_leaf(&authority)?;
         let snapshot = self
             .learning_snapshot(&durable, &admitted.payload().input.generation)
             .await?;
@@ -260,13 +263,15 @@ impl PoliteiadService {
             .map_err(refusal)?;
         require_disclosure_requester_signer(&admitted)?;
         require_finite_disclosure_budget(&admitted)?;
-        let delegation = self
-            .live_requester(
+        let durable = self.durable_snapshot().await?;
+        let authority = self
+            .live_requester_chain(
+                &durable,
                 &admitted.payload().requester,
                 &admitted.payload().delegation,
             )
             .await?;
-        let durable = self.durable_snapshot().await?;
+        let delegation = delegation_leaf(&authority)?;
         let snapshot = self
             .learning_snapshot(&durable, &admitted.payload().input.generation)
             .await?;
@@ -293,13 +298,15 @@ impl PoliteiadService {
             .admit_expected(AdmissionKind::LearningFeedback, wire.clone())
             .map_err(refusal)?;
         require_requester_signer(&admitted)?;
-        let delegation = self
-            .live_requester(
+        let durable = self.durable_snapshot().await?;
+        let authority = self
+            .live_requester_chain(
+                &durable,
                 &admitted.payload().requester,
                 &admitted.payload().delegation,
             )
             .await?;
-        let durable = self.durable_snapshot().await?;
+        let delegation = delegation_leaf(&authority)?;
         let snapshot = self
             .learning_snapshot(&durable, &admitted.payload().input.generation)
             .await?;
@@ -317,6 +324,7 @@ impl PoliteiadService {
             signed_wire_record(&wire)?,
             format!("learning_feedback:{}", admitted.payload().id.0),
             signed_wire_record(&wire)?,
+            Some(&authority),
         )
         .await
         .map(|mut outcome| {
@@ -336,12 +344,6 @@ impl PoliteiadService {
             .admit_expected(AdmissionKind::LearningCorrection, wire.clone())
             .map_err(refusal)?;
         require_requester_signer(&admitted)?;
-        let delegation = self
-            .live_requester(
-                &admitted.payload().requester,
-                &admitted.payload().delegation,
-            )
-            .await?;
         for relation in &admitted.payload().input.relations {
             if relation.authority != admitted.payload().requester
                 || relation.authority_delegation != admitted.payload().delegation
@@ -353,6 +355,14 @@ impl PoliteiadService {
             }
         }
         let durable = self.durable_snapshot().await?;
+        let authority = self
+            .live_requester_chain(
+                &durable,
+                &admitted.payload().requester,
+                &admitted.payload().delegation,
+            )
+            .await?;
+        let delegation = delegation_leaf(&authority)?;
         let feedback =
             durable_feedback(self.anchors(), &durable, &admitted.payload().input.feedback)?;
         if !admitted.payload().input.relations.iter().any(|relation| {
@@ -383,6 +393,7 @@ impl PoliteiadService {
             signed_wire_record(&wire)?,
             format!("learning_correction:{}", admitted.payload().id.0),
             signed_wire_record(&wire)?,
+            Some(&authority),
         )
         .await
         .map(|mut outcome| {
@@ -472,29 +483,31 @@ impl PoliteiadService {
         transition: SignedRecord,
         state_key: String,
         state: SignedRecord,
+        authority: Option<&[politeia_core::trust::Admitted<politeia_core::Delegation>]>,
     ) -> Result<OperationResult, CoordinatorError> {
         if durable.state.contains_key(&state_key) {
             return Err(CoordinatorError::Refused(
                 "learning request identity was already committed".to_string(),
             ));
         }
-        let receipt = self
-            .storage()
-            .commit(&ScopedCommit {
-                scope: self.scope().clone(),
-                expected_revision: durable.revision,
-                model: durable.model.clone(),
-                model_kind: kind.to_string(),
-                transition,
-                state: vec![StateMutation {
-                    key: state_key,
-                    value: state,
-                }],
-                evidence: Vec::new(),
-                outbox: Vec::new(),
-            })
-            .await
-            .map_err(|error| storage_refusal(&error))?;
+        let commit = ScopedCommit {
+            scope: self.scope().clone(),
+            expected_revision: durable.revision,
+            model: durable.model.clone(),
+            model_kind: kind.to_string(),
+            transition,
+            state: vec![StateMutation {
+                key: state_key,
+                value: state,
+            }],
+            evidence: Vec::new(),
+            outbox: Vec::new(),
+        };
+        let receipt = match authority {
+            Some(chain) => self.storage().commit_authorized(&commit, chain).await,
+            None => self.storage().commit(&commit).await,
+        }
+        .map_err(|error| storage_refusal(&error))?;
         Ok(OperationResult::Coordinated {
             result: json!({"revision": receipt.revision, "transition": receipt.transition_digest}),
             evidence_refs: Vec::new(),
@@ -917,6 +930,14 @@ fn require_requester_signer<T>(
     Ok(())
 }
 
+fn delegation_leaf(
+    chain: &[politeia_core::trust::Admitted<politeia_core::Delegation>],
+) -> Result<&politeia_core::trust::Admitted<politeia_core::Delegation>, CoordinatorError> {
+    chain
+        .last()
+        .ok_or_else(|| CoordinatorError::Refused("learning authority chain is empty".to_string()))
+}
+
 fn require_disclosure_requester_signer<T>(
     admitted: &politeia_core::trust::Admitted<LearningDisclosureIngress<T>>,
 ) -> Result<(), CoordinatorError> {
@@ -1124,13 +1145,13 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
-    fn source(id: EvidenceId, subject: Digest) -> Result<LearningSourceRequest, String> {
+    fn source(id: EvidenceId, subject: &Digest) -> Result<LearningSourceRequest, String> {
         let content = b"approved institutional content".to_vec();
         Ok(LearningSourceRequest {
             id: id.clone(),
             claim: politeia_core::ClaimId::new(),
             approval_digest: Digest::blake3(b"approval"),
-            subject,
+            subject: subject.clone(),
             proposition: Digest::blake3(&content),
             content,
             evidence: BTreeSet::from([id]),
@@ -1153,7 +1174,6 @@ mod tests {
         delegation_id: DelegationId,
         first: EvidenceId,
         second: EvidenceId,
-        subject: Digest,
     ) -> Result<DurableCorrections, String> {
         let at = at()?;
         let delegation = Delegation {
@@ -1187,7 +1207,6 @@ mod tests {
             authority_delegation: delegation_id.clone(),
             asserted_at: at,
         };
-        let _ = subject;
         Ok(DurableCorrections {
             relations: vec![relation],
             delegations: BTreeMap::from([(delegation_id, delegation)]),
@@ -1224,9 +1243,9 @@ mod tests {
             },
         ])
         .map_err(|error| error.to_string())?;
-        let prior_source = source(prior.clone(), subject.clone())?;
-        let successor_source = source(successor.clone(), subject.clone())?;
-        let corrections = corrections(authority, delegation, prior, successor, subject)?;
+        let prior_source = source(prior.clone(), &subject)?;
+        let successor_source = source(successor.clone(), &subject)?;
+        let corrections = corrections(authority, delegation, prior, successor)?;
         assert!(
             !source_survives_corrections(&prior_source, &registry, &corrections)
                 .map_err(|error| error.to_string())?
