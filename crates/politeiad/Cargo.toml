@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "politeia"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 tokio = { workspace = true, features = ["io-util", "net"] }
