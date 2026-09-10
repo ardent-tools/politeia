@@ -3,7 +3,7 @@
 # spdx: MPL-2.0
 
 [pipeline]
-stages = ["cargo fmt", "cargo check", "cargo clippy", "cargo test", "xtask check", "xtask derive"]
+stages = ["cargo fmt", "cargo check", "cargo clippy", "cargo test", "postgres", "xtask check", "xtask derive"]
 
 [stages."cargo fmt"]
 cmd = "cargo fmt --all -- --check"
@@ -24,6 +24,10 @@ timeout_secs = 600
 [stages."xtask check"]
 cmd = "cargo run -p xtask --locked --jobs 8 -- check"
 timeout_secs = 300
+
+[stages.postgres]
+cmd = "python3 bin/check-postgres.py"
+timeout_secs = 600
 
 [stages."xtask derive"]
 cmd = "cargo run -p xtask --locked --jobs 8 -- derive && git diff --exit-code"

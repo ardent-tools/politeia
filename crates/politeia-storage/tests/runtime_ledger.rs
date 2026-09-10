@@ -1,0 +1,426 @@
+//! PostgreSQL admission exercised through the real dispatcher and effect port.
+//!
+//! This fixture isolates durable admission; it deliberately uses a trivial
+//! policy and does not count as control activation or daemon acceptance.
+
+use std::{
+    collections::BTreeSet,
+    error::Error,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
+use ed25519_dalek::SigningKey;
+use jiff::{SignedDuration, Timestamp};
+use politeia_core::{
+    AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, EvidenceId, InstitutionId,
+    InstitutionWorkspaceId, OperationId, OperationSpec, PolicyBundleId, PrincipalId,
+    ResourceBudget, RuntimeGenerationId,
+    trust::{AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire, TrustedSigningKey},
+};
+use politeia_policy::PolicyDecision;
+use politeia_runtime::{
+    AuthorizedEffect, Dispatcher, DispatcherConfig, EffectPort, OperationIntent,
+    PolicyDecisionPoint, RuntimeError,
+};
+use politeia_storage::{
+    AttemptStatus, PostgresAuthorizationLedger, PostgresStorage, Scope, SignedRecord, StorageError,
+    WorkspaceBootstrap,
+};
+
+type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+type TestDispatcher = Dispatcher<LedgerFixturePolicy, CountingPort, PostgresAuthorizationLedger>;
+
+struct LedgerFixturePolicy {
+    bundle: PolicyBundleId,
+    digest: Digest,
+}
+
+impl PolicyDecisionPoint for LedgerFixturePolicy {
+    type Error = RuntimeError;
+
+    async fn decide(&self, intent: &OperationIntent) -> Result<PolicyDecision, Self::Error> {
+        Ok(PolicyDecision {
+            bundle: self.bundle.clone(),
+            policy_digest: self.digest.clone(),
+            intent_digest: intent.digest()?,
+            principal: intent.principal.clone(),
+            allowed: true,
+            binding_ids: vec!["ledger-fixture".to_owned()],
+            reasons: vec!["test isolates persistence from policy evaluation".to_owned()],
+        })
+    }
+}
+
+struct CountingPort {
+    adapter: AdapterId,
+    calls: Arc<AtomicUsize>,
+}
+
+impl EffectPort for CountingPort {
+    type Output = Digest;
+    type Error = std::convert::Infallible;
+
+    fn adapter(&self) -> &AdapterId {
+        &self.adapter
+    }
+    fn audience(&self) -> &'static str {
+        "fixture:effect-port"
+    }
+
+    async fn execute<'lease>(
+        &'lease self,
+        invocation: AuthorizedEffect<'lease>,
+    ) -> Result<Self::Output, Self::Error> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(invocation.lease().policy_digest().clone())
+    }
+}
+
+struct Fixture {
+    storage: PostgresStorage,
+    scope: Scope,
+    intent: OperationIntent,
+    policy: PolicyBundleId,
+    policy_digest: Digest,
+    generation: RuntimeGenerationId,
+    adapter: AdapterId,
+    calls: Arc<AtomicUsize>,
+}
+
+fn budget(wall_ms: u64) -> ResourceBudget {
+    ResourceBudget {
+        wall_ms: Some(wall_ms),
+        cpu_ms: Some(0),
+        memory_bytes: Some(0),
+        io_bytes: Some(0),
+        network_bytes: Some(0),
+        external_cost_microunits: Some(0),
+    }
+}
+
+impl Fixture {
+    async fn new(database_url: &str, capacity: u64) -> TestResult<Self> {
+        let storage = PostgresStorage::connect(database_url).await?;
+        storage.migrate().await?;
+        let institution = InstitutionId::new();
+        let workspace = InstitutionWorkspaceId::new();
+        let owner = PrincipalId::new();
+        let scope = Scope::new(
+            institution.clone(),
+            workspace.clone(),
+            "fixture.local".parse()?,
+        );
+        let key = SigningKey::from_bytes(&[0x37; 32]);
+        let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
+            institution.clone(),
+            workspace.clone(),
+            [TrustedSigningKey::new(
+                owner.clone(),
+                key.verifying_key().to_bytes(),
+                BTreeSet::from([AdmissionKind::Delegation, AdmissionKind::Generation]),
+            )?],
+        )?;
+        let delegation = Delegation {
+            id: DelegationId::new(),
+            issuer: owner.clone(),
+            subject: owner.clone(),
+            parent: None,
+            actions: BTreeSet::from(["read".to_owned()]),
+            resources: BTreeSet::from(["fixture:document".to_owned()]),
+            effects: BTreeSet::from([Effect::ReadExternalSystem]),
+            data_classes: BTreeSet::from([DataClass::Public]),
+            audience: BTreeSet::from(["fixture:effect-port".to_owned()]),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+            budget: budget(capacity),
+        };
+        let model = SignedAdmissionWire::sign(
+            AdmissionKind::Generation,
+            institution.clone(),
+            workspace.clone(),
+            owner.clone(),
+            serde_json::json!({"fixture": "durable-admission"}),
+            &key,
+        )?;
+        anchors.admit_expected(AdmissionKind::Generation, model.clone())?;
+        let model_record = SignedRecord::from_json(
+            &serde_json::to_value(&model)?,
+            owner.clone(),
+            model.signature.clone(),
+        )?;
+        storage
+            .bootstrap_workspace(&WorkspaceBootstrap {
+                scope: scope.clone(),
+                owner: owner.clone(),
+                owner_delegation: delegation.id.clone(),
+                model: model_record,
+            })
+            .await?;
+        let signed = SignedAdmissionWire::sign(
+            AdmissionKind::Delegation,
+            institution,
+            workspace,
+            owner.clone(),
+            delegation.clone(),
+            &key,
+        )?;
+        let admitted = anchors.admit_expected(AdmissionKind::Delegation, signed.clone())?;
+        storage.admit_delegation(&scope, &admitted, &signed).await?;
+        let operation = OperationSpec {
+            id: OperationId::new(),
+            name: "durable_fixture_read".to_owned(),
+            actions: delegation.actions.clone(),
+            effects: delegation.effects.clone(),
+            data_classes: delegation.data_classes.clone(),
+            evidence_obligations: vec![],
+            execution_requirement: None,
+            retryable: true,
+            requires_idempotency: true,
+        };
+        Ok(Self {
+            storage,
+            scope,
+            intent: OperationIntent {
+                principal: owner,
+                delegation_chain: vec![delegation],
+                operation,
+                resources: BTreeSet::from(["fixture:document".to_owned()]),
+                budget: budget(1),
+                idempotency_key: Some("fixture-attempt".to_owned()),
+                execution: None,
+            },
+            policy: PolicyBundleId::new(),
+            policy_digest: Digest::blake3(b"ledger-fixture-policy"),
+            generation: RuntimeGenerationId::from_digest(Digest::blake3(b"ledger-fixture-runtime")),
+            adapter: AdapterId::new(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn dispatcher(
+        &self,
+        storage: PostgresStorage,
+        ttl: SignedDuration,
+    ) -> TestResult<TestDispatcher> {
+        let config = DispatcherConfig::new(
+            self.policy.clone(),
+            self.policy_digest.clone(),
+            self.generation.clone(),
+            "fixture:durable-replay".to_owned(),
+            ttl,
+            self.intent.delegation_chain.clone(),
+            [self.intent.operation.clone()],
+        )?;
+        Ok(Dispatcher::new(
+            LedgerFixturePolicy {
+                bundle: self.policy.clone(),
+                digest: self.policy_digest.clone(),
+            },
+            CountingPort {
+                adapter: self.adapter.clone(),
+                calls: self.calls.clone(),
+            },
+            PostgresAuthorizationLedger::new(storage, self.scope.clone()),
+            config,
+        ))
+    }
+}
+
+fn database_url() -> TestResult<String> {
+    Ok(std::env::var("POLITEIA_STORAGE_TEST_DATABASE_URL")?)
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn dispatcher_reopens_reservations_and_refuses_ambiguous_replay() -> TestResult {
+    let url = database_url()?;
+    let fixture = Fixture::new(&url, 2).await?;
+    let snapshot = fixture.storage.load_workspace(&fixture.scope).await?;
+    assert_eq!(snapshot.revision, 0);
+    assert_eq!(snapshot.owner, fixture.intent.principal);
+    assert_eq!(snapshot.delegations.len(), 1);
+    let wrong_domain = Scope::new(
+        fixture.scope.institution().clone(),
+        fixture.scope.workspace().clone(),
+        "fixture.wrong".parse()?,
+    );
+    assert!(matches!(
+        fixture.storage.load_workspace(&wrong_domain).await,
+        Err(StorageError::NotFound)
+    ));
+    let first = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
+    let lease = first.authorize(&fixture.intent).await?;
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture
+            .storage
+            .load_attempt(&fixture.scope, lease.reservation_id())
+            .await?
+            .status,
+        AttemptStatus::Reserved
+    );
+    drop(first);
+    let reopened = PostgresStorage::connect(&url).await?;
+    let replacement = fixture.dispatcher(reopened.clone(), SignedDuration::from_secs(30))?;
+    replacement.execute(&lease).await?;
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    let incomplete = reopened
+        .load_attempt(&fixture.scope, lease.reservation_id())
+        .await?;
+    assert!(matches!(
+        reopened
+            .load_attempt(&wrong_domain, lease.reservation_id())
+            .await,
+        Err(StorageError::NotFound)
+    ));
+    assert_eq!(incomplete.status, AttemptStatus::Claimed);
+    assert!(incomplete.receipt_digest.is_none());
+    drop(replacement);
+    let restarted = fixture.dispatcher(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+    )?;
+    assert!(
+        restarted.execute(&lease).await.is_err(),
+        "issued effect cannot be claimed twice"
+    );
+    assert!(
+        restarted.authorize(&fixture.intent).await.is_err(),
+        "fresh lease cannot erase semantic replay"
+    );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    reopened
+        .record_completion(
+            &fixture.scope,
+            lease.reservation_id(),
+            &Digest::blake3(b"receipt"),
+        )
+        .await?;
+    assert_eq!(
+        reopened
+            .load_attempt(&fixture.scope, lease.reservation_id())
+            .await?
+            .status,
+        AttemptStatus::Completed
+    );
+    assert!(
+        restarted.authorize(&fixture.intent).await.is_err(),
+        "completion does not release retained replay"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn concurrent_dispatchers_share_budget_and_one_use_claim() -> TestResult {
+    let url = database_url()?;
+    let fixture = Fixture::new(&url, 1).await?;
+    let first = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
+    let second = fixture.dispatcher(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+    )?;
+    let mut other = fixture.intent.clone();
+    other.idempotency_key = Some("different-effect-same-budget".to_owned());
+    let (left, right) = tokio::join!(first.authorize(&fixture.intent), second.authorize(&other));
+    let lease = match (left, right) {
+        (Ok(lease), Err(_)) | (Err(_), Ok(lease)) => lease,
+        (left, right) => {
+            return Err(format!(
+                "exactly one budget reservation must win; failures: {:?}, {:?}",
+                left.err(),
+                right.err()
+            )
+            .into());
+        }
+    };
+    let (left, right) = tokio::join!(first.execute(&lease), second.execute(&lease));
+    assert_ne!(
+        left.is_ok(),
+        right.is_ok(),
+        "exactly one claimant may reach the effect port"
+    );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    let reopened = fixture.dispatcher(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+    )?;
+    let mut third = fixture.intent.clone();
+    third.idempotency_key = Some("fresh-key-after-spent-budget".to_owned());
+    assert!(
+        reopened.authorize(&third).await.is_err(),
+        "restart cannot reset spent budget"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn revoke_between_reservation_and_claim_prevents_effect() -> TestResult {
+    let fixture = Fixture::new(&database_url()?, 2).await?;
+    let dispatcher = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
+    let lease = dispatcher.authorize(&fixture.intent).await?;
+    fixture
+        .storage
+        .revoke_delegation(
+            &fixture.scope,
+            &fixture.intent.delegation_chain[0].id,
+            &Digest::blake3(b"owner-revocation"),
+            &EvidenceId::new(),
+        )
+        .await?;
+    assert!(
+        fixture
+            .storage
+            .load_delegation(&fixture.scope, &fixture.intent.delegation_chain[0].id)
+            .await?
+            .revoked
+    );
+    assert!(
+        dispatcher.execute(&lease).await.is_err(),
+        "revoked authority cannot claim a pending lease"
+    );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    let remaining = fixture
+        .storage
+        .load_attempt(&fixture.scope, lease.reservation_id())
+        .await?;
+    assert_eq!(
+        remaining.status,
+        AttemptStatus::Reserved,
+        "failed claim cannot fabricate an attempt"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn expired_reservation_releases_budget_for_a_different_replay_key() -> TestResult {
+    let fixture = Fixture::new(&database_url()?, 1).await?;
+    let dispatcher =
+        fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_millis(10))?;
+    let expired = dispatcher.authorize(&fixture.intent).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let mut fresh = fixture.intent.clone();
+    fresh.idempotency_key = Some("different-key-after-expiry".to_owned());
+    let dispatcher = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
+    let lease = dispatcher.authorize(&fresh).await?;
+    assert!(dispatcher.execute(&expired).await.is_err());
+    dispatcher.execute(&lease).await?;
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    let foreign = Scope::new(
+        InstitutionId::new(),
+        InstitutionWorkspaceId::new(),
+        "fixture.other".parse()?,
+    );
+    assert!(matches!(
+        fixture
+            .storage
+            .load_attempt(&foreign, lease.reservation_id())
+            .await,
+        Err(StorageError::NotFound)
+    ));
+    Ok(())
+}

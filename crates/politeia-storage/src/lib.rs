@@ -5,6 +5,9 @@
 
 #![deny(missing_docs)]
 
+mod read;
+pub use read::{PersistedDelegation, StoredPayload, WorkspaceSnapshot};
+
 use std::str::FromStr;
 
 use politeia_runtime::{AuthorizationLedger, ReservationRequest, RuntimeError};
@@ -37,7 +40,9 @@ pub struct Scope {
 }
 
 impl Scope {
-    /// Construct the non-forgeable storage scope supplied by the service boundary.
+    /// Name the exact storage scope validated by the service boundary.
+    ///
+    /// This value identifies a scope; constructing it grants no authority.
     pub fn new(
         institution: InstitutionId,
         workspace: InstitutionWorkspaceId,
@@ -528,8 +533,8 @@ impl PostgresStorage {
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
         let admitted = transaction.query_opt(
-            "SELECT 1 FROM delegations WHERE institution_id = $1 AND workspace_id = $2 AND delegation_id = $3 FOR UPDATE",
-            &[&scoped.institution, &scoped.workspace, &delegation.0],
+            "SELECT 1 FROM delegations d JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE d.institution_id = $1 AND d.workspace_id = $2 AND d.delegation_id = $3 AND w.trust_domain = $4 FOR UPDATE OF d",
+            &[&scoped.institution, &scoped.workspace, &delegation.0, &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?;
         if admitted.is_none() {
             return Err(StorageError::NotFound);
@@ -674,8 +679,8 @@ impl PostgresStorage {
         let client = self.client().await?;
         let scoped = scope_values(scope);
         let completed = client.execute(
-            "UPDATE operation_attempts SET status = 'completed', receipt_digest = $4, completed_at = CURRENT_TIMESTAMP WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND status = 'claimed'",
-            &[&scoped.institution, &scoped.workspace, &reservation.0, &receipt.as_str()],
+            "UPDATE operation_attempts a SET status = 'completed', receipt_digest = $4, completed_at = CURRENT_TIMESTAMP FROM institution_workspaces w WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND a.status = 'claimed' AND w.institution_id = a.institution_id AND w.workspace_id = a.workspace_id AND w.trust_domain = $5",
+            &[&scoped.institution, &scoped.workspace, &reservation.0, &receipt.as_str(), &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?;
         if completed != 1 {
             return Err(StorageError::AttemptUnavailable);
@@ -692,8 +697,8 @@ impl PostgresStorage {
         let client = self.client().await?;
         let scoped = scope_values(scope);
         let row = client.query_opt(
-            "SELECT status::text, receipt_digest FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3",
-            &[&scoped.institution, &scoped.workspace, &reservation.0],
+            "SELECT a.status::text, a.receipt_digest FROM operation_attempts a JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND w.trust_domain = $4",
+            &[&scoped.institution, &scoped.workspace, &reservation.0, &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?.ok_or(StorageError::NotFound)?;
         let status = match row.get::<_, String>(0).as_str() {
             "reserved" => AttemptStatus::Reserved,
@@ -973,7 +978,7 @@ impl PostgresStorage {
             let limit_values = limit.as_strings();
             transaction
                 .execute(
-                    "INSERT INTO delegation_budget_accounts (institution_id, workspace_id, replay_domain, delegation_id, delegation_digest, wall_ms_limit, cpu_ms_limit, memory_bytes_limit, io_bytes_limit, network_bytes_limit, external_cost_microunits_limit) VALUES ($1, $2, $3, $4, $5, $6::numeric, $7::numeric, $8::numeric, $9::numeric, $10::numeric, $11::numeric) ON CONFLICT DO NOTHING",
+                    "INSERT INTO delegation_budget_accounts (institution_id, workspace_id, replay_domain, delegation_id, delegation_digest, wall_ms_limit, cpu_ms_limit, memory_bytes_limit, io_bytes_limit, network_bytes_limit, external_cost_microunits_limit) VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric, $9::text::numeric, $10::text::numeric, $11::text::numeric) ON CONFLICT DO NOTHING",
                     &[&scoped.institution, &scoped.workspace, &request.replay_domain(), &budget_scope.delegation_id().0, &budget_scope.delegation_digest().as_str(), &limit_values.0, &limit_values.1, &limit_values.2, &limit_values.3, &limit_values.4, &limit_values.5],
                 )
                 .await
@@ -1018,7 +1023,7 @@ impl PostgresStorage {
         for budget_scope in request.budget_scopes() {
             transaction
                 .execute(
-                    "INSERT INTO attempt_budget_scopes (institution_id, workspace_id, reservation_id, replay_domain, delegation_id, wall_ms, cpu_ms, memory_bytes, io_bytes, network_bytes, external_cost_microunits) VALUES ($1, $2, $3, $4, $5, $6::numeric, $7::numeric, $8::numeric, $9::numeric, $10::numeric, $11::numeric)",
+                    "INSERT INTO attempt_budget_scopes (institution_id, workspace_id, reservation_id, replay_domain, delegation_id, wall_ms, cpu_ms, memory_bytes, io_bytes, network_bytes, external_cost_microunits) VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7::text::numeric, $8::text::numeric, $9::text::numeric, $10::text::numeric, $11::text::numeric)",
                     &[&scoped.institution, &scoped.workspace, &request.reservation_id().0, &request.replay_domain(), &budget_scope.delegation_id().0, &requested_values.0, &requested_values.1, &requested_values.2, &requested_values.3, &requested_values.4, &requested_values.5],
                 )
                 .await
@@ -1080,7 +1085,7 @@ impl PostgresStorage {
             let requested_values = requested.as_strings();
             let updated = transaction
                 .execute(
-                    "UPDATE delegation_budget_accounts SET wall_ms_committed = wall_ms_committed + $5::numeric, cpu_ms_committed = cpu_ms_committed + $6::numeric, memory_bytes_committed = memory_bytes_committed + $7::numeric, io_bytes_committed = io_bytes_committed + $8::numeric, network_bytes_committed = network_bytes_committed + $9::numeric, external_cost_microunits_committed = external_cost_microunits_committed + $10::numeric WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND delegation_id = $4 AND delegation_digest = $11",
+                    "UPDATE delegation_budget_accounts SET wall_ms_committed = wall_ms_committed + $5::text::numeric, cpu_ms_committed = cpu_ms_committed + $6::text::numeric, memory_bytes_committed = memory_bytes_committed + $7::text::numeric, io_bytes_committed = io_bytes_committed + $8::text::numeric, network_bytes_committed = network_bytes_committed + $9::text::numeric, external_cost_microunits_committed = external_cost_microunits_committed + $10::text::numeric WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND delegation_id = $4 AND delegation_digest = $11",
                     &[&scoped.institution, &scoped.workspace, &request.replay_domain(), &budget_scope.delegation_id().0, &requested_values.0, &requested_values.1, &requested_values.2, &requested_values.3, &requested_values.4, &requested_values.5, &budget_scope.delegation_digest().as_str()],
                 )
                 .await
