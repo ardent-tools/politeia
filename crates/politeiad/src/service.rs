@@ -33,8 +33,8 @@ use politeia_runtime::{
     OperationIntent, PolicyDecisionPoint, RuntimeError,
 };
 use politeia_storage::{
-    EvidenceAdmission, PostgresAuthorizationLedger, PostgresStorage, Scope, ScopedCommit,
-    SignedRecord, StateMutation,
+    CanonicalPayload, EvidenceAdmission, PostgresAuthorizationLedger, PostgresStorage, Scope,
+    ScopedCommit, SignedRecord, StateMutation,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -453,9 +453,14 @@ impl PoliteiadService {
         let capture_record = signed_wire_record(&submission.capture)?;
         let evidence_record = signed_wire_record(&submission.evidence)?;
         let observation_record = signed_wire_record(&submission.observation)?;
+        let authority_chain = self.admit_durable_delegation_chain(
+            &durable,
+            std::slice::from_ref(delegation.payload()),
+            capture.signer(),
+        )?;
         let receipt = self
             .storage
-            .commit(&ScopedCommit {
+            .commit_authorized(&ScopedCommit {
                 scope: self.scope.clone(),
                 expected_revision: durable.revision,
                 model: durable.model,
@@ -476,7 +481,25 @@ impl PoliteiadService {
                     record: evidence_record,
                 }],
                 outbox: Vec::new(),
-            })
+            }, &authority_chain)
+            .await
+            .map_err(|error| storage_refusal(&error))?;
+        self.storage
+            .record_completion_with_outbox(
+                &self.scope,
+                lease.reservation_id(),
+                &CanonicalPayload::from_serializable(&json!({
+                    "kind": "source_capture_completion.v1",
+                    "capture": request.id,
+                    "observation": observation.id,
+                    "evidence": submission.evidence.payload.id,
+                    "snapshot_manifest": snapshot.manifest_digest,
+                    "state_revision": receipt.revision,
+                    "transition": receipt.transition_digest,
+                }))
+                .map_err(|error| storage_refusal(&error))?,
+                &[],
+            )
             .await
             .map_err(|error| storage_refusal(&error))?;
         Ok(OperationResult::Coordinated {
@@ -666,6 +689,21 @@ impl PoliteiadService {
         delegation_id: &politeia_core::DelegationId,
         requester: &politeia_core::PrincipalId,
     ) -> Result<politeia_core::trust::Admitted<Delegation>, CoordinatorError> {
+        self.admit_live_delegation_chain(delegation_id, requester)
+            .await?
+            .pop()
+            .ok_or_else(|| {
+                CoordinatorError::Refused("delegation authority chain is empty".to_string())
+            })
+    }
+
+    /// Recover the exact root-to-leaf authority chain for a requester-bound
+    /// delegation so durable commits can recheck every ancestor atomically.
+    pub(crate) async fn admit_live_delegation_chain(
+        &self,
+        delegation_id: &politeia_core::DelegationId,
+        requester: &politeia_core::PrincipalId,
+    ) -> Result<Vec<politeia_core::trust::Admitted<Delegation>>, CoordinatorError> {
         let durable = self.durable_snapshot().await?;
         let persisted = durable.delegations.get(delegation_id).ok_or_else(|| {
             CoordinatorError::Refused("delegation is not durably admitted".to_string())
@@ -685,6 +723,82 @@ impl PoliteiadService {
             ));
         }
         self.validate_delegation_authority(&durable, &admitted)?;
+        let mut leaf_to_root = vec![admitted.payload().clone()];
+        while let Some(parent) = leaf_to_root
+            .last()
+            .and_then(|current| current.parent.clone())
+        {
+            let persisted = durable.delegations.get(&parent).ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "delegation parent is not durably admitted".to_string(),
+                )
+            })?;
+            if persisted.revoked {
+                return Err(CoordinatorError::Refused(
+                    "delegation parent is revoked".to_string(),
+                ));
+            }
+            leaf_to_root.push(persisted.wire.payload.clone());
+        }
+        leaf_to_root.reverse();
+        self.admit_durable_delegation_chain(&durable, &leaf_to_root, requester)
+    }
+
+    /// Re-admit one exact root-to-leaf delegation list from an already loaded
+    /// durable snapshot. Runtime callers use this to bind every untrusted
+    /// operation-chain member to its stored signed wire without a second read.
+    pub(crate) fn admit_durable_delegation_chain(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        expected: &[Delegation],
+        requester: &politeia_core::PrincipalId,
+    ) -> Result<Vec<politeia_core::trust::Admitted<Delegation>>, CoordinatorError> {
+        if expected.is_empty() || expected.last().is_none_or(|leaf| leaf.subject != *requester) {
+            return Err(CoordinatorError::Refused(
+                "delegation chain does not end at the requester".to_string(),
+            ));
+        }
+        let admitted = expected
+            .iter()
+            .map(|delegation| {
+                let persisted = durable.delegations.get(&delegation.id).ok_or_else(|| {
+                    CoordinatorError::Refused(
+                        "delegation chain member is not durably admitted".to_string(),
+                    )
+                })?;
+                if persisted.revoked {
+                    return Err(CoordinatorError::Refused(
+                        "delegation chain member is revoked".to_string(),
+                    ));
+                }
+                let admitted = self
+                    .anchors
+                    .admit_expected(AdmissionKind::Delegation, persisted.wire.clone())
+                    .map_err(refusal)?;
+                if admitted.payload() != delegation {
+                    return Err(CoordinatorError::Refused(
+                        "delegation chain member differs from durable admission".to_string(),
+                    ));
+                }
+                Ok(admitted)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for (parent, child) in admitted.iter().zip(admitted.iter().skip(1)) {
+            if child.payload().parent.as_ref() != Some(&parent.payload().id)
+                || child.payload().issuer != parent.payload().subject
+                || !child.payload().is_attenuation_of(parent.payload())
+            {
+                return Err(CoordinatorError::Refused(
+                    "delegation chain is not ordered root-to-leaf attenuation".to_string(),
+                ));
+            }
+        }
+        self.validate_delegation_authority(
+            durable,
+            admitted.last().ok_or_else(|| {
+                CoordinatorError::Refused("delegation chain is empty".to_string())
+            })?,
+        )?;
         Ok(admitted)
     }
 

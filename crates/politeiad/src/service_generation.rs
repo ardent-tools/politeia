@@ -12,11 +12,13 @@ use std::{
 use politeia_core::{
     AdapterId, Delegation, DelegationId, Digest, EvidenceId,
     commissioning::{
-        CommissionerGrantRecord, CommissioningRecord, TrustedCommissionerGrantRegistry,
+        COMMISSION_ACTION, CommissionerGrantRecord, CommissioningRecord,
+        TrustedCommissionerGrantRegistry, commissioning_institution_audience,
+        commissioning_workspace_resource,
     },
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     generation::RuntimeGenerationInputs,
-    trust::{AdmissionKind, SignedAdmissionWire},
+    trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use politeia_evidence::{
     assurance::{
@@ -112,6 +114,11 @@ pub struct CommissioningRecordRequest {
 pub struct CommissioningSelection {
     /// Daemon-issued receipt selecting every immutable provenance input.
     pub receipt: CommissioningReceipt,
+    /// Fresh live grant held by the signed generation-input publisher.
+    ///
+    /// This authorizes publication now; it is deliberately separate from the
+    /// historical commissioner grant retained in `receipt`.
+    pub publication_delegation: DelegationId,
 }
 
 /// Typed assurance material required for activation and rollback.
@@ -250,11 +257,9 @@ impl PoliteiadService {
         let commissioning = self
             .commissioning_record(
                 &durable,
-                admitted.signer(),
                 &admitted.payload().commissioning_record,
                 &admitted.payload().commissioning_record_digest,
-                &selection,
-                true,
+                &selection.receipt,
             )
             .await?;
         let artifact = GenerationArtifactBuilder::new(self.layout().artifact_dir.clone())
@@ -281,8 +286,16 @@ impl PoliteiadService {
             artifact_digest: artifact.manifest_digest().clone(),
             manifest: signed_wire_record(&inputs)?,
         };
+        let authority_chain = self
+            .admit_live_delegation_chain(&selection.publication_delegation, admitted.signer())
+            .await?;
+        self.require_live_publication_grant(
+            authority_chain
+                .last()
+                .ok_or_else(|| CoordinatorError::Refused("publication authority chain is empty".to_string()))?,
+        )?;
         self.storage()
-            .admit_generation(&stored)
+            .admit_generation_authorized(&stored, durable.revision, &authority_chain)
             .await
             .map_err(storage_refusal)?;
         let verified = GenerationArtifactBuilder::new(self.layout().artifact_dir.clone())
@@ -327,18 +340,14 @@ impl PoliteiadService {
         let commissioning = self
             .commissioning_record(
                 &durable,
-                admitted.signer(),
                 &admitted.payload().commissioning_record,
                 &admitted.payload().commissioning_record_digest,
-                &CommissioningSelection {
-                    receipt: self
-                        .load_commissioning_receipt(
-                            &durable,
-                            &admitted.payload().commissioning_record,
-                        )
-                        .await?,
-                },
-                false,
+                &self
+                    .load_commissioning_receipt(
+                        &durable,
+                        &admitted.payload().commissioning_record,
+                    )
+                    .await?,
             )
             .await?;
         let artifact = builder
@@ -441,9 +450,21 @@ impl PoliteiadService {
             },
         ];
         let transition = signed_wire_record(&assurance.run)?;
+        let authority_chains = vec![
+            self.admit_live_delegation_chain(
+                &run_authority.payload().id,
+                &run_authority.payload().subject,
+            )
+            .await?,
+            self.admit_live_delegation_chain(
+                &proof_authority.payload().id,
+                &proof_authority.payload().subject,
+            )
+            .await?,
+        ];
         let receipt = self
             .storage()
-            .activate_generation(&ActivationCommit {
+            .activate_generation_authorized(&ActivationCommit {
                 scope: self.scope().clone(),
                 expected_revision,
                 expected_active,
@@ -451,7 +472,7 @@ impl PoliteiadService {
                 transition,
                 evidence,
                 outbox: Vec::new(),
-            })
+            }, &authority_chains)
             .await
             .map_err(storage_refusal)?;
         Ok(OperationResult::Coordinated {
@@ -606,6 +627,27 @@ impl PoliteiadService {
         Ok(receipt)
     }
 
+    fn require_live_publication_grant(
+        &self,
+        grant: &Admitted<Delegation>,
+    ) -> Result<(), CoordinatorError> {
+        let delegation = grant.payload();
+        if grant.signer() != &delegation.issuer
+            || !delegation.actions.contains(COMMISSION_ACTION)
+            || !delegation
+                .resources
+                .contains(&commissioning_workspace_resource(&self.workspace().id))
+            || !delegation
+                .audience
+                .contains(&commissioning_institution_audience(&self.workspace().institution))
+        {
+            return Err(CoordinatorError::Refused(
+                "generation publisher lacks a scoped live commissioning grant".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "reconstruction keeps separately admitted provenance axes explicit"
@@ -613,16 +655,12 @@ impl PoliteiadService {
     async fn commissioning_record(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
-        signer: &politeia_core::PrincipalId,
         record_id: &politeia_core::CommissioningRecordId,
         expected_digest: &Digest,
-        selection: &CommissioningSelection,
-        require_current: bool,
+        receipt: &CommissioningReceipt,
     ) -> Result<CommissioningRecord, CoordinatorError> {
-        let receipt = self
-            .load_commissioning_receipt(durable, record_id)
-            .await?;
-        if receipt != selection.receipt
+        let stored = self.load_commissioning_receipt(durable, record_id).await?;
+        if stored != *receipt
             || receipt.record != *record_id
             || receipt.record_digest != *expected_digest
         {
@@ -639,33 +677,18 @@ impl PoliteiadService {
                     "commissioner delegation is not durably admitted".to_string(),
                 )
             })?;
-        if require_current && persisted.revoked {
-            return Err(CoordinatorError::Refused(
-                "commissioner delegation is revoked".to_string(),
-            ));
-        }
         let delegation = self
             .anchors()
             .admit_expected(AdmissionKind::Delegation, persisted.wire.clone())
             .map_err(refusal)?;
         if delegation.signer() != &delegation.payload().issuer
-            || delegation.payload().subject != *signer
             || delegation.payload().subject != receipt.commissioner
         {
             return Err(CoordinatorError::Refused(
                 "generation signer does not hold the selected commissioner delegation".to_string(),
             ));
         }
-        if require_current {
-            self.validate_delegation_authority(durable, &delegation)?;
-            if delegation.payload().expires_at <= self.observed_at().await? {
-                return Err(CoordinatorError::Refused(
-                    "commissioner delegation expired before generation publication".to_string(),
-                ));
-            }
-        }
-        let evidence_wires = selection
-            .receipt
+        let evidence_wires = receipt
             .observations
             .iter()
             .chain(receipt.approvals.iter())
