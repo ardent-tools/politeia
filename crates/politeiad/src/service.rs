@@ -440,6 +440,7 @@ impl PoliteiadService {
                 root: self.layout.workspace_dir.clone(),
                 request: request.clone(),
                 resources,
+                input_digest,
                 audience: format!("institution:{}", self.workspace.institution.0),
             };
             let dispatcher = admitted.dispatcher(
@@ -485,6 +486,7 @@ impl PoliteiadService {
                 root: self.layout.workspace_dir.clone(),
                 request: request.clone(),
                 resources: resources.clone(),
+                input_digest: capture_operation_input_digest(&submission)?,
                 audience: format!("institution:{}", self.workspace.institution.0),
             };
             let dispatcher = Dispatcher::new(
@@ -1160,6 +1162,7 @@ struct InstalledCapturePort {
     root: PathBuf,
     request: SourceCaptureRequest,
     resources: BTreeSet<String>,
+    input_digest: Digest,
     audience: String,
 }
 impl EffectPort for InstalledCapturePort {
@@ -1175,17 +1178,22 @@ impl EffectPort for InstalledCapturePort {
         &'a self,
         effect: AuthorizedEffect<'a>,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
-        ready(if effect.lease().resources() == &self.resources {
-            crate::source::snapshot(crate::source::SourceSnapshotRequest {
-                root: self.root.clone(),
-                members: self.request.manifest.iter().map(PathBuf::from).collect(),
-            })
-            .map_err(|e| CapturePortError(e.to_string()))
-        } else {
-            Err(CapturePortError(
-                "capture lease resources differ from installed descriptor".to_string(),
+        ready(
+            if effect.lease().resources() == &self.resources
+                && effect.lease().input_digest() == &self.input_digest
+            {
+                crate::source::snapshot(crate::source::SourceSnapshotRequest {
+                    root: self.root.clone(),
+                    members: self.request.manifest.iter().map(PathBuf::from).collect(),
+                })
+                .map_err(|e| CapturePortError(e.to_string()))
+            } else {
+                Err(CapturePortError(
+                "capture lease resources or authenticated input differ from the installed descriptor"
+                    .to_string(),
             ))
-        })
+            },
+        )
     }
 }
 
