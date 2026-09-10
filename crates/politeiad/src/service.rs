@@ -62,6 +62,13 @@ pub struct PoliteiadService {
     storage: PostgresStorage,
     scope: Scope,
     bootstrap: SignedAdmissionWire<WorkspaceBootstrapRequest>,
+    /// Digest of the executable image running this daemon process.
+    ///
+    /// This is measured from Linux's process-owned executable handle during
+    /// connection, rather than a replaceable installation pathname. Active
+    /// operational generations must bind their approved executable component
+    /// to this identity before an installed handler is reachable.
+    running_executable_digest: Digest,
 }
 
 /// Signed source-capture material submitted through the semantic coordinator.
@@ -182,6 +189,7 @@ impl PoliteiadService {
         let storage = PostgresStorage::connect(database_url)
             .await
             .map_err(|error| storage_refusal(&error))?;
+        let running_executable_digest = daemon_executable_digest()?;
         Ok(Self {
             layout,
             workspace,
@@ -189,6 +197,7 @@ impl PoliteiadService {
             storage,
             scope,
             bootstrap,
+            running_executable_digest,
         })
     }
 
@@ -265,6 +274,11 @@ impl PoliteiadService {
     /// Return the PostgreSQL authority for adjacent lifecycle coordination.
     pub(crate) fn storage(&self) -> &PostgresStorage {
         &self.storage
+    }
+
+    /// Return the immutable identity of the executable image running this daemon.
+    pub(crate) fn running_executable_digest(&self) -> &Digest {
+        &self.running_executable_digest
     }
 
     /// Recover one coherent inert durable snapshot for adjacent lifecycle coordination.
@@ -1223,6 +1237,19 @@ fn runtime_refusal(error: &RuntimeError) -> CoordinatorError {
 
 pub(crate) fn refusal(error: impl std::fmt::Display) -> CoordinatorError {
     CoordinatorError::Refused(error.to_string())
+}
+
+fn daemon_executable_digest() -> Result<Digest, CoordinatorError> {
+    // Linux keeps this process-owned executable reference stable across
+    // replacement of the installation pathname. The daemon never trusts a
+    // caller-selected or deployment-relative path for its own identity.
+    std::fs::read("/proc/self/exe")
+        .map(|bytes| Digest::blake3(&bytes))
+        .map_err(|error| {
+            CoordinatorError::Refused(format!(
+                "daemon executable identity cannot be measured from /proc/self/exe: {error}"
+            ))
+        })
 }
 
 /// Rebuild only the signed provenance explicitly named by a candidate claim.

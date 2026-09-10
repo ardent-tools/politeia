@@ -367,6 +367,58 @@ pub struct RegisteredOperation {
     pub handler: InstalledOperationHandler,
 }
 
+/// Why an installed deterministic handler cannot be bound to this daemon.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExecutableIdentityRefusal {
+    /// The approved generation/workspace executable is not the daemon image.
+    ApprovedExecutableMismatch,
+    /// A deterministic resource names a different executable than approved.
+    DescriptorExecutableMismatch,
+}
+
+impl std::fmt::Display for ExecutableIdentityRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApprovedExecutableMismatch => formatter.write_str(
+                "approved executable component differs from the running daemon executable",
+            ),
+            Self::DescriptorExecutableMismatch => formatter.write_str(
+                "deterministic resource descriptor differs from the approved daemon executable",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExecutableIdentityRefusal {}
+
+fn validate_approved_executable_identity(
+    approved: &Digest,
+    running: &Digest,
+) -> Result<(), ExecutableIdentityRefusal> {
+    if approved != running {
+        return Err(ExecutableIdentityRefusal::ApprovedExecutableMismatch);
+    }
+    Ok(())
+}
+
+fn validate_builtin_executable_identity(
+    descriptor: &ExecutionResourceDescriptor,
+    approved: &Digest,
+    running: &Digest,
+) -> Result<(), ExecutableIdentityRefusal> {
+    validate_approved_executable_identity(approved, running)?;
+    match descriptor {
+        ExecutionResourceDescriptor::DeterministicTool {
+            artifact_digest, ..
+        } if artifact_digest == approved => Ok(()),
+        _ => Err(ExecutableIdentityRefusal::DescriptorExecutableMismatch),
+    }
+}
+
+fn profile_requires_builtin_handler(profile: &CapabilityProfile) -> bool {
+    !profile.task_classes.is_empty() || !profile.capabilities.is_empty()
+}
+
 impl CapabilityQualificationEvidence {
     /// Execute and capture the public qualification implied by exact registry
     /// objects.
@@ -695,6 +747,7 @@ pub struct ActiveOperationalRegistry {
     generation: RuntimeGenerationId,
     policy: OperationalPolicyRegistry,
     execution: OperationalExecutionRegistry,
+    executable_digest: Digest,
 }
 
 impl ActiveOperationalRegistry {
@@ -702,6 +755,7 @@ impl ActiveOperationalRegistry {
         generation: RuntimeGenerationId,
         policy: OperationalPolicyRegistry,
         execution: OperationalExecutionRegistry,
+        executable_digest: Digest,
     ) -> Result<Self, OperationalRegistryRefusal> {
         let operation_scopes: BTreeSet<_> = execution
             .document
@@ -721,6 +775,7 @@ impl ActiveOperationalRegistry {
             generation,
             policy,
             execution,
+            executable_digest,
         })
     }
 
@@ -737,6 +792,38 @@ impl ActiveOperationalRegistry {
     /// Execution registry decoded from this generation's freshly verified bytes.
     pub fn execution(&self) -> &OperationalExecutionRegistry {
         &self.execution
+    }
+
+    /// Exact executable component approved by this generation and matched to
+    /// the running daemon before this registry was exposed.
+    pub fn executable_digest(&self) -> &Digest {
+        &self.executable_digest
+    }
+
+    fn capability_qualification(
+        &self,
+        verification: &CapabilityVerificationRecord,
+    ) -> Result<CapabilityQualificationEvidence, CapabilityQualificationRefusal> {
+        let profile = self
+            .execution
+            .document
+            .profiles
+            .iter()
+            .find(|profile| profile.verification == verification.id)
+            .ok_or(CapabilityQualificationRefusal::ProfileAbsent)?;
+        if profile_requires_builtin_handler(profile) {
+            let resource = self
+                .execution
+                .resource(&verification.resource)
+                .ok_or(CapabilityQualificationRefusal::ResourceAbsent)?;
+            validate_builtin_executable_identity(
+                &resource.descriptor,
+                &self.executable_digest,
+                &self.executable_digest,
+            )
+            .map_err(CapabilityQualificationRefusal::ExecutableIdentity)?;
+        }
+        self.execution.capability_qualification(verification)
     }
 }
 
@@ -882,6 +969,20 @@ impl PoliteiadService {
             ));
         }
         let inputs = generation.inputs();
+        let executable_digest = inputs
+            .approved
+            .component_digests
+            .get("executable")
+            .ok_or_else(|| operational_refusal("generation has no executable component"))?
+            .clone();
+        // Reread and rehash the exact component now, rather than accepting the
+        // immutable bundle verification from an earlier filesystem read.
+        artifact
+            .component_bytes("executable")
+            .map_err(|error| operational_refusal(error.to_string()))?;
+        validate_approved_executable_identity(&executable_digest, self.running_executable_digest())
+            .map_err(OperationalRegistryRefusal::ExecutableIdentity)
+            .map_err(|error| operational_refusal(error.to_string()))?;
         let policy_bytes = artifact
             .policy_bytes()
             .map_err(|error| operational_refusal(error.to_string()))?;
@@ -902,8 +1003,13 @@ impl PoliteiadService {
         let execution =
             OperationalExecutionRegistry::from_artifact_bytes(&execution_bytes, execution_digest)
                 .map_err(|error| operational_refusal(error.to_string()))?;
-        ActiveOperationalRegistry::new(generation.id().clone(), policy, execution)
-            .map_err(|error| operational_refusal(error.to_string()))
+        ActiveOperationalRegistry::new(
+            generation.id().clone(),
+            policy,
+            execution,
+            executable_digest,
+        )
+        .map_err(|error| operational_refusal(error.to_string()))
     }
 
     /// Reproduce and durably admit evidence for one exact capability record.
@@ -953,6 +1059,23 @@ impl PoliteiadService {
             &authority_resource,
         )
         .map_err(operational_refusal)?;
+
+        if profile_requires_builtin_handler(&submission.qualification.profile) {
+            let approved_executable = self
+                .workspace()
+                .approved_generation
+                .component_digests
+                .get("executable")
+                .ok_or_else(|| {
+                    operational_refusal("workspace has no approved executable component")
+                })?;
+            validate_builtin_executable_identity(
+                &submission.qualification.resource.descriptor,
+                approved_executable,
+                self.running_executable_digest(),
+            )
+            .map_err(operational_refusal)?;
+        }
 
         let reproduced = CapabilityQualificationEvidence::reproduce(
             verification.payload(),
@@ -1192,7 +1315,7 @@ impl PoliteiadService {
         let now = ledger.observed_at().await.map_err(operational_refusal)?;
         let admitted_capabilities = self.admit_capability_verifications(
             durable,
-            registry.execution(),
+            &registry,
             &submission.capability_verifications,
             now,
         )?;
@@ -1288,10 +1411,13 @@ impl PoliteiadService {
             .execution()
             .resource(&admitted.assignment().resource)
             .ok_or_else(|| operational_refusal("selected execution resource is absent"))?;
-        if !matches!(
+        validate_builtin_executable_identity(
             &selected_resource.descriptor,
-            ExecutionResourceDescriptor::DeterministicTool { .. }
-        ) || selected_resource.locality != ExecutionLocality::ClientLocal
+            admitted.registry().executable_digest(),
+            admitted.registry().executable_digest(),
+        )
+        .map_err(operational_refusal)?;
+        if selected_resource.locality != ExecutionLocality::ClientLocal
             || selected_resource.trust_domain != self.workspace().trust_domain
         {
             return Err(operational_refusal(
@@ -1608,7 +1734,7 @@ impl PoliteiadService {
     fn admit_capability_verifications(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
-        registry: &OperationalExecutionRegistry,
+        registry: &ActiveOperationalRegistry,
         submitted: &[CapabilityVerificationEvidence],
         at: Timestamp,
     ) -> Result<AdmittedCapabilityVerifications, CoordinatorError> {
@@ -2078,6 +2204,8 @@ pub enum CapabilityQualificationRefusal {
     UnexpectedManifestOperation,
     /// A declared bound is too large for the finite public planted probe.
     ProbePopulationTooLarge,
+    /// The declared deterministic tool does not bind the approved daemon image.
+    ExecutableIdentity(ExecutableIdentityRefusal),
     /// The real manifest algorithm refused an input required to be known-good.
     ManifestProbe(ResourceManifestProbeRefusal),
     /// A canonical typed payload could not be encoded.
@@ -2116,6 +2244,7 @@ impl std::fmt::Display for CapabilityQualificationRefusal {
             Self::ProbePopulationTooLarge => {
                 formatter.write_str("capability probe population is not safely bounded")
             }
+            Self::ExecutableIdentity(source) => write!(formatter, "{source}"),
             Self::ManifestProbe(source) => write!(formatter, "capability probe failed: {source}"),
             Self::Canonical(_) => {
                 formatter.write_str("capability qualification cannot be encoded canonically")
@@ -2128,6 +2257,7 @@ impl std::error::Error for CapabilityQualificationRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::ManifestProbe(source) => Some(source),
+            Self::ExecutableIdentity(source) => Some(source),
             Self::Canonical(source) => Some(source),
             _ => None,
         }
@@ -2151,6 +2281,8 @@ pub(crate) fn direct_grant_authorization_digest(
 pub enum OperationalRegistryRefusal {
     /// Artifact bytes do not have the generation-approved digest.
     ExecutionDigestMismatch,
+    /// The generation or selected deterministic resource does not bind this daemon executable.
+    ExecutableIdentity(ExecutableIdentityRefusal),
     /// A required registry population is empty.
     EmptyRegistry,
     /// Operation identities, names, or canonical ordering are ambiguous.
@@ -2187,6 +2319,7 @@ impl std::fmt::Display for OperationalRegistryRefusal {
             Self::ExecutionDigestMismatch => {
                 "execution registry digest differs from the active generation"
             }
+            Self::ExecutableIdentity(error) => return write!(formatter, "{error}"),
             Self::EmptyRegistry => "execution registry has an empty required population",
             Self::AmbiguousOperation => "execution registry operation identity is ambiguous",
             Self::OperationContractMismatch => {
@@ -2218,6 +2351,7 @@ impl std::error::Error for OperationalRegistryRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Canonical(error) => Some(error),
+            Self::ExecutableIdentity(error) => Some(error),
             Self::Routing(error) => Some(error),
             _ => None,
         }
@@ -2234,9 +2368,13 @@ mod tests {
     use std::collections::BTreeSet;
 
     use jiff::{SignedDuration, Timestamp};
-    use politeia_core::{DataClass, DelegationId, Effect, PrincipalId, ResourceBudget};
+    use politeia_core::{DataClass, DelegationId, Digest, Effect, PrincipalId, ResourceBudget};
+    use politeia_runtime::routing::ExecutionResourceDescriptor;
 
-    use super::{Delegation, direct_grant_authorization_digest};
+    use super::{
+        Delegation, ExecutableIdentityRefusal, direct_grant_authorization_digest,
+        validate_approved_executable_identity, validate_builtin_executable_identity,
+    };
 
     fn direct_grant() -> Delegation {
         Delegation {
@@ -2270,6 +2408,37 @@ mod tests {
             direct_grant_authorization_digest(&first).expect("fixture grant encodes"),
             direct_grant_authorization_digest(&replacement).expect("replacement grant encodes"),
             "a run cannot be replayed under another otherwise-equivalent direct grant"
+        );
+    }
+
+    #[test]
+    fn refuses_a_staged_executable_that_is_not_the_running_daemon() {
+        let refusal = validate_approved_executable_identity(
+            &Digest::blake3(b"staged approved executable"),
+            &Digest::blake3(b"running daemon executable"),
+        )
+        .expect_err("a generation staged for different bytes must not activate here");
+        assert_eq!(
+            refusal,
+            ExecutableIdentityRefusal::ApprovedExecutableMismatch
+        );
+    }
+
+    #[test]
+    fn refuses_a_builtin_descriptor_that_names_another_executable() {
+        let approved = Digest::blake3(b"running daemon executable");
+        let refusal = validate_builtin_executable_identity(
+            &ExecutionResourceDescriptor::DeterministicTool {
+                artifact_digest: Digest::blake3(b"another deterministic tool"),
+                version: "fixture".to_owned(),
+            },
+            &approved,
+            &approved,
+        )
+        .expect_err("a builtin handler must not execute a descriptor for other bytes");
+        assert_eq!(
+            refusal,
+            ExecutableIdentityRefusal::DescriptorExecutableMismatch
         );
     }
 }
