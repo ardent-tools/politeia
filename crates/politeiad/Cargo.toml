@@ -14,6 +14,8 @@ uuid.workspace = true
 cap-std = "3"
 cap-fs-ext = "3"
 politeia-core.workspace = true
+politeia-runtime.workspace = true
+politeia-storage = { version = "0.1.0", path = "../politeia-storage" }
 politeia-protocol.workspace = true
 
 # WHY dev-only: the binary is still a scaffold and does not run the slice. The

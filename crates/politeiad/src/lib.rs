@@ -7,6 +7,7 @@
 
 #![deny(missing_docs)]
 
+pub mod artifacts;
 pub mod config;
 pub mod source;
 pub mod transport;
