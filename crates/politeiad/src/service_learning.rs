@@ -1111,3 +1111,106 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod correction_negative_test {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    use politeia_core::{
+        Delegation, Effect, ResourceBudget,
+        evidence::{EvidenceRecord, IndependenceClass},
+    };
+    use politeia_evidence::assessment::{RelationKind, SUPERSEDE_ACTION};
+
+    #[test]
+    fn conflicting_successors_withhold_context_source() -> Result<(), String> {
+        let subject = Digest::blake3(b"billing");
+        let authority = PrincipalId::new();
+        let delegation_id = DelegationId::new();
+        let prior = EvidenceId::new();
+        let successor_a = EvidenceId::new();
+        let successor_b = EvidenceId::new();
+        let timestamp: jiff::Timestamp = "2026-09-09T00:00:00Z"
+            .parse()
+            .map_err(|error: jiff::Error| error.to_string())?;
+        let registry = TrustedEvidenceRegistry::from_trusted_bootstrap(
+            [prior.clone(), successor_a.clone(), successor_b.clone()]
+                .into_iter()
+                .map(|id| EvidenceRecord {
+                    id,
+                    subject: subject.clone(),
+                    producer: authority.clone(),
+                    producer_delegation: delegation_id.clone(),
+                    method: "fixture".to_string(),
+                    payload_digest: Digest::blake3(b"fixture"),
+                    observed_at: timestamp,
+                    independence: IndependenceClass::HumanAuthority,
+                }),
+        )
+        .map_err(|error| error.to_string())?;
+        let delegation = Delegation {
+            id: delegation_id.clone(),
+            issuer: authority.clone(),
+            subject: authority.clone(),
+            parent: None,
+            actions: BTreeSet::from([SUPERSEDE_ACTION.to_string()]),
+            resources: BTreeSet::new(),
+            effects: BTreeSet::from([Effect::ReadInstitutionalContext]),
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audience: BTreeSet::from(["operator".to_string()]),
+            expires_at: "2026-09-10T00:00:00Z"
+                .parse::<jiff::Timestamp>()
+                .map_err(|error| error.to_string())?,
+            budget: ResourceBudget {
+                wall_ms: None,
+                cpu_ms: None,
+                memory_bytes: None,
+                io_bytes: None,
+                network_bytes: None,
+                external_cost_microunits: None,
+            },
+        };
+        let relations = [successor_a, successor_b]
+            .into_iter()
+            .map(|successor| AssessmentRelation {
+                id: EvidenceId::new(),
+                kind: RelationKind::Supersession,
+                prior: prior.clone(),
+                successor,
+                authority: authority.clone(),
+                authority_delegation: delegation_id.clone(),
+                asserted_at: timestamp,
+            })
+            .collect();
+        let corrections = DurableCorrections {
+            relations,
+            delegations: BTreeMap::from([(delegation_id.clone(), delegation)]),
+        };
+        let source = LearningSourceRequest {
+            id: prior.clone(),
+            claim: politeia_core::ClaimId::new(),
+            approval_digest: Digest::blake3(b"approval"),
+            subject,
+            proposition: Digest::blake3(b"content"),
+            content: b"content".to_vec(),
+            evidence: BTreeSet::from([prior]),
+            observations: BTreeSet::new(),
+            captures: BTreeSet::new(),
+            adapter: AdapterId::new(),
+            currency: KnowledgeCurrency::Canonical,
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audiences: BTreeSet::from(["operator".to_string()]),
+            sinks: BTreeSet::from(["local".to_string()]),
+            trust_domain: "institution:learning"
+                .parse::<politeia_core::institution::TrustDomainId>()
+                .map_err(|error| error.to_string())?,
+            relevance: 1,
+        };
+        assert!(
+            !source_survives_corrections(&source, &registry, &corrections)
+                .map_err(|error| error.to_string())?
+        );
+        Ok(())
+    }
+}
