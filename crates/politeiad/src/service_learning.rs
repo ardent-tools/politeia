@@ -136,6 +136,17 @@ pub enum LearningRequest {
     },
 }
 
+/// Return the exact digest PostgreSQL stores for a signed wire.
+///
+/// Source bindings use this digest to name their fact approval. It is BLAKE3
+/// over the canonical JSON record, so callers must use this helper instead of
+/// hashing ordinary serializer output.
+pub fn durable_signed_wire_digest<T: Serialize>(
+    wire: &SignedAdmissionWire<T>,
+) -> Result<Digest, CoordinatorError> {
+    Ok(signed_wire_record(wire)?.digest().clone())
+}
+
 impl PoliteiadService {
     /// Dispatch one opaque learning document after transport has selected the
     /// commissioning boundary.
@@ -717,11 +728,14 @@ fn validate_new_source(
     durable: &WorkspaceSnapshot,
     source: &LearningSourceRequest,
 ) -> Result<(), CoordinatorError> {
-    if source.trust_domain != workspace.trust_domain
-        || Digest::blake3(&source.content) != source.proposition
-    {
+    if source.trust_domain != workspace.trust_domain {
         return Err(CoordinatorError::Refused(
-            "learning source content is not bound to its exact approved proposition".to_string(),
+            "learning source trust domain differs from the installed workspace".to_string(),
+        ));
+    }
+    if Digest::blake3(&source.content) != source.proposition {
+        return Err(CoordinatorError::Refused(
+            "learning source content digest differs from its proposition".to_string(),
         ));
     }
     let approval = durable
@@ -734,7 +748,8 @@ fn validate_new_source(
         })?;
     if approval.digest != source.approval_digest {
         return Err(CoordinatorError::Refused(
-            "learning source approval digest differs from durable approval".to_string(),
+            "learning source approval digest differs from the canonical durable approval wire"
+                .to_string(),
         ));
     }
     let evidence = durable_evidence(anchors, durable)?;
@@ -745,24 +760,46 @@ fn validate_new_source(
     let fact = facts.get(&source.claim).ok_or_else(|| {
         CoordinatorError::Refused("learning source has no durable approved fact".to_string())
     })?;
-    if fact.subject() != &source.subject
-        || fact.proposition() != &source.proposition
-        || source
-            .evidence
-            .iter()
-            .any(|id| evidence.resolve(id).is_none())
-        || source
-            .observations
-            .iter()
-            .any(|id| observations.resolve(id).is_none())
-        || source
-            .captures
-            .iter()
-            .any(|id| captures.resolve(id).is_none())
-        || !source.evidence.contains(&source.id)
+    if fact.subject() != &source.subject {
+        return Err(CoordinatorError::Refused(
+            "learning source subject differs from the durable approved fact".to_string(),
+        ));
+    }
+    if fact.proposition() != &source.proposition {
+        return Err(CoordinatorError::Refused(
+            "learning source proposition differs from the durable approved fact".to_string(),
+        ));
+    }
+    if !source.evidence.contains(&source.id) {
+        return Err(CoordinatorError::Refused(
+            "learning source identity is absent from its declared evidence provenance".to_string(),
+        ));
+    }
+    if source
+        .evidence
+        .iter()
+        .any(|id| evidence.resolve(id).is_none())
     {
         return Err(CoordinatorError::Refused(
-            "learning source does not resolve exact durable approved provenance".to_string(),
+            "learning source names evidence absent from durable admission".to_string(),
+        ));
+    }
+    if source
+        .observations
+        .iter()
+        .any(|id| observations.resolve(id).is_none())
+    {
+        return Err(CoordinatorError::Refused(
+            "learning source names an observation absent from durable admission".to_string(),
+        ));
+    }
+    if source
+        .captures
+        .iter()
+        .any(|id| captures.resolve(id).is_none())
+    {
+        return Err(CoordinatorError::Refused(
+            "learning source names a capture absent from durable admission".to_string(),
         ));
     }
     Ok(())
