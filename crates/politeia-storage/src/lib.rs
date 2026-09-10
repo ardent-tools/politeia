@@ -579,6 +579,41 @@ impl PostgresStorage {
         Ok(())
     }
 
+    /// Recover one immutable generation envelope within the installed scope.
+    ///
+    /// The returned manifest remains inert until the semantic service re-admits
+    /// its signed generation inputs and verifies the associated artifact bytes.
+    pub async fn load_generation(
+        &self,
+        scope: &Scope,
+        generation_digest: &Digest,
+    ) -> Result<RuntimeGeneration, StorageError> {
+        let client = self.client().await?;
+        let scoped = scope_values(scope);
+        let row = client
+            .query_opt(
+                "SELECT g.input_digest, g.artifact_digest, g.manifest, g.signature, g.signer_id FROM runtime_generations g JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE g.institution_id = $1 AND g.workspace_id = $2 AND w.trust_domain = $3 AND g.generation_digest = $4",
+                &[&scoped.institution, &scoped.workspace, &scoped.trust_domain, &generation_digest.as_str()],
+            )
+            .await
+            .map_err(StorageError::Database)?
+            .ok_or(StorageError::NotFound)?;
+        let manifest_bytes: Vec<u8> = row.get(2);
+        let manifest = SignedRecord::from_bytes(
+            manifest_bytes.clone(),
+            Digest::blake3(&manifest_bytes),
+            PrincipalId(row.get(4)),
+            row.get(3),
+        )?;
+        Ok(RuntimeGeneration {
+            scope: scope.clone(),
+            generation_digest: generation_digest.clone(),
+            input_digest: parse_digest(&row.get::<_, String>(0))?,
+            artifact_digest: parse_digest(&row.get::<_, String>(1))?,
+            manifest,
+        })
+    }
+
     /// Atomically compare-and-swap the active generation and append its evidence-bearing transition.
     pub async fn activate_generation(
         &self,

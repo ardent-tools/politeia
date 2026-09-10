@@ -258,6 +258,33 @@ impl CommissioningRecord {
         })
     }
 
+    /// Rebuild one previously identified record from re-admitted durable facts.
+    ///
+    /// The supplied identity is only accepted after [`Self::new`] has rebuilt
+    /// every authority and evidence axis. Callers must bind it to independently
+    /// signed provenance, such as runtime-generation inputs; this method never
+    /// deserializes a record around the trusted registries.
+    pub fn rebuild(
+        id: CommissioningRecordId,
+        workspace: &InstitutionWorkspace,
+        grants: &TrustedCommissionerGrantRegistry,
+        evidence: &TrustedEvidenceRegistry,
+        observation_ids: &BTreeSet<EvidenceId>,
+        approval_ids: &BTreeSet<EvidenceId>,
+        unresolved_obligations: BTreeSet<String>,
+    ) -> Result<Self, CommissioningError> {
+        let mut record = Self::new(
+            workspace,
+            grants,
+            evidence,
+            observation_ids,
+            approval_ids,
+            unresolved_obligations,
+        )?;
+        record.id = id;
+        Ok(record)
+    }
+
     /// Digest the canonical record for runtime-generation provenance binding.
     ///
     /// # Errors

@@ -8,7 +8,7 @@ use std::{
 };
 
 use politeia_core::{
-    AdapterId, Digest,
+    AdapterId, DelegationId, Digest, EvidenceId,
     canonical::to_canonical_bytes,
     commissioning::CommissioningRecord,
     generation::{RuntimeGeneration, RuntimeGenerationInputs},
@@ -142,9 +142,28 @@ fn read_source(path: &Path) -> Result<Vec<u8>, ArtifactError> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BundleManifest {
     signed_inputs: SignedAdmissionWire<RuntimeGenerationInputs>,
+    commissioning: CommissioningProvenance,
     generation_digest: Digest,
     generation_manifest_digest: Digest,
     components: BTreeMap<String, Digest>,
+}
+
+/// Inert selection material required to reconstruct commissioning provenance.
+///
+/// The signed runtime-generation inputs bind the resulting record identity and
+/// digest. This material therefore has no authority by itself: every recovery
+/// path must rebuild the record from currently re-admitted durable evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommissioningProvenance {
+    /// The commissioner delegation used when the record was assembled.
+    pub delegation: DelegationId,
+    /// Evidence identities for the admitted discovery observations.
+    pub observations: std::collections::BTreeSet<EvidenceId>,
+    /// Evidence identities for the owner approvals.
+    pub approvals: std::collections::BTreeSet<EvidenceId>,
+    /// Explicitly approved unresolved obligations.
+    pub unresolved_obligations: std::collections::BTreeSet<String>,
 }
 
 fn expected_components(
@@ -208,6 +227,32 @@ impl GenerationArtifactBuilder {
         signed_inputs: SignedAdmissionWire<RuntimeGenerationInputs>,
         workspace: &InstitutionWorkspace,
         commissioning: &CommissioningRecord,
+        sources: &ArtifactSources,
+    ) -> Result<VerifiedGenerationArtifact, ArtifactError> {
+        self.publish_with_provenance(
+            anchors,
+            signed_inputs,
+            workspace,
+            commissioning,
+            CommissioningProvenance {
+                delegation: commissioning.commissioner_delegation().clone(),
+                observations: std::collections::BTreeSet::new(),
+                approvals: std::collections::BTreeSet::new(),
+                unresolved_obligations: commissioning.unresolved_obligations().clone(),
+            },
+            sources,
+        )
+    }
+
+    /// Publish a bundle while retaining the inert material needed for durable
+    /// commissioning-record recovery.
+    pub fn publish_with_provenance(
+        &self,
+        anchors: &InstitutionTrustAnchors,
+        signed_inputs: SignedAdmissionWire<RuntimeGenerationInputs>,
+        workspace: &InstitutionWorkspace,
+        commissioning: &CommissioningRecord,
+        provenance: CommissioningProvenance,
         sources: &ArtifactSources,
     ) -> Result<VerifiedGenerationArtifact, ArtifactError> {
         let admitted = anchors
@@ -315,6 +360,7 @@ impl GenerationArtifactBuilder {
         }
         let manifest = BundleManifest {
             signed_inputs,
+            commissioning: provenance,
             generation_digest: generation_digest.clone(),
             generation_manifest_digest: Digest::blake3(
                 &generation
@@ -392,6 +438,29 @@ impl GenerationArtifactBuilder {
             generation,
             manifest_digest: Digest::blake3(&bytes),
         })
+    }
+
+    /// Recover inert provenance selection material from an immutable bundle.
+    ///
+    /// Callers must re-admit the durable signed inputs and rebuild the
+    /// commissioning record before using this selection.
+    pub fn commissioning_provenance(
+        &self,
+        generation_digest: &Digest,
+    ) -> Result<CommissioningProvenance, ArtifactError> {
+        let bytes = fs::read(
+            self.artifact_dir
+                .join(generation_digest.as_str())
+                .join("manifest.json"),
+        )?;
+        let manifest: BundleManifest = serde_json::from_slice(&bytes)
+            .map_err(|error| ArtifactError::Encoding(error.to_string()))?;
+        if &manifest.generation_digest != generation_digest {
+            return Err(ArtifactError::Substitution(
+                "generation identity".to_owned(),
+            ));
+        }
+        Ok(manifest.commissioning)
     }
 }
 impl VerifiedGenerationArtifact {

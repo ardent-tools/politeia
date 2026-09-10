@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use jiff::Timestamp;
 use politeia_core::{
     Delegation, DelegationId, Digest, EvidenceId, PrincipalId, trust::SignedAdmissionWire,
 };
@@ -47,6 +48,8 @@ pub struct PersistedDelegation {
     pub wire: SignedAdmissionWire<Delegation>,
     /// Whether an immutable revocation exists for this delegation.
     pub revoked: bool,
+    /// Trusted instant at which the durable authority admitted this envelope.
+    pub admitted_at: Timestamp,
 }
 
 /// One coherent recovery snapshot, read at a single PostgreSQL MVCC boundary.
@@ -125,7 +128,7 @@ impl PostgresStorage {
         }
         let mut delegations = BTreeMap::new();
         for delegation_row in transaction.query(
-            "SELECT d.delegation_id, d.delegation_digest, d.wire_digest, d.payload, d.signer_id, d.signature, r.delegation_id IS NOT NULL FROM delegations d LEFT JOIN delegation_revocations r USING (institution_id, workspace_id, delegation_id) WHERE d.institution_id = $1 AND d.workspace_id = $2 ORDER BY d.delegation_id",
+            "SELECT d.delegation_id, d.delegation_digest, d.wire_digest, d.payload, d.signer_id, d.signature, r.delegation_id IS NOT NULL, EXTRACT(EPOCH FROM d.admitted_at)::bigint FROM delegations d LEFT JOIN delegation_revocations r USING (institution_id, workspace_id, delegation_id) WHERE d.institution_id = $1 AND d.workspace_id = $2 ORDER BY d.delegation_id",
             &[&scoped.institution, &scoped.workspace],
         ).await.map_err(StorageError::Database)? {
             let record = signed_from_row(&delegation_row, 2, 3, 4, 5)?;
@@ -140,7 +143,13 @@ impl PostgresStorage {
                 || semantic.as_str() != delegation_row.get::<_, String>(1) {
                 return Err(StorageError::AdmissionMismatch);
             }
-            delegations.insert(id, PersistedDelegation { wire, revoked: delegation_row.get(6) });
+            let admitted_at = Timestamp::from_second(delegation_row.get(7))
+                .map_err(|_| StorageError::AdmissionMismatch)?;
+            delegations.insert(id, PersistedDelegation {
+                wire,
+                revoked: delegation_row.get(6),
+                admitted_at,
+            });
         }
         let snapshot = WorkspaceSnapshot {
             scope: scope.clone(),
