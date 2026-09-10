@@ -5,7 +5,7 @@
 
 use std::{
     collections::{BTreeSet, HashSet},
-    future::Future,
+    future::{Future, ready},
     path::PathBuf,
     pin::Pin,
 };
@@ -23,7 +23,14 @@ use politeia_core::{
         AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire, WorkspaceBootstrapRequest,
     },
 };
-use politeia_runtime::{AuthorizationLedger, RuntimeError};
+use politeia_policy::bootstrap::{
+    BootstrapReconnaissance, BootstrapRefusal, bootstrap_capture_resources,
+    bootstrap_reconnaissance_operation, evaluate_bootstrap_reconnaissance,
+};
+use politeia_runtime::{
+    AuthorizationLedger, AuthorizedEffect, Dispatcher, DispatcherConfig, EffectPort,
+    OperationIntent, PolicyDecisionPoint, RuntimeError,
+};
 use politeia_storage::{
     EvidenceAdmission, PostgresAuthorizationLedger, PostgresStorage, Scope, ScopedCommit,
     SignedRecord, StateMutation,
@@ -359,15 +366,67 @@ impl PoliteiadService {
             .admit(&boundary, delegation.payload(), observation, now)
             .map_err(refusal)?;
 
-        let snapshot = crate::source::snapshot(crate::source::SourceSnapshotRequest {
+        let bootstrap = self
+            .storage
+            .load_bootstrap(&self.scope)
+            .await
+            .map_err(|error| storage_refusal(&error))?;
+        let resources = bootstrap_capture_resources(request);
+        let operation = bootstrap_reconnaissance_operation(
+            politeia_core::OperationId::new(),
+            delegation.payload().data_classes.clone(),
+        );
+        let policy = BootstrapCapturePolicy {
+            workspace: self.workspace.clone(),
+            captures: captures.clone(),
+            capture: request.id.clone(),
+            delegation: delegation.clone(),
+            scope: submission.reconnaissance.clone(),
+            bootstrap: bootstrap.digest().clone(),
+            now,
+        };
+        let port = InstalledCapturePort {
             root: self.layout.workspace_dir.clone(),
-            members: request
-                .manifest
-                .iter()
-                .map(PathBuf::from)
-                .collect::<BTreeSet<_>>(),
-        })
-        .map_err(refusal)?;
+            request: request.clone(),
+            resources: resources.clone(),
+            audience: format!("institution:{}", self.workspace.institution.0),
+        };
+        let dispatcher = Dispatcher::new(
+            policy,
+            port,
+            PostgresAuthorizationLedger::for_bootstrap(
+                self.storage.clone(),
+                self.scope.clone(),
+                bootstrap.digest().clone(),
+            ),
+            DispatcherConfig::new(
+                self.workspace.policy_bundle.clone(),
+                self.workspace.policy_digest.clone(),
+                politeia_core::RuntimeGenerationId::from_digest(bootstrap.digest().clone()),
+                format!("bootstrap:{}", bootstrap.digest().as_str()),
+                jiff::SignedDuration::from_mins(5),
+                [delegation.payload().clone()],
+                [operation.clone()],
+            )
+            .map_err(|error| runtime_refusal(&error))?,
+        );
+        let intent = OperationIntent {
+            principal: capture.signer().clone(),
+            delegation_chain: vec![delegation.payload().clone()],
+            operation,
+            resources,
+            budget: delegation.payload().budget.clone(),
+            idempotency_key: None,
+            execution: None,
+        };
+        let lease = dispatcher
+            .authorize(&intent)
+            .await
+            .map_err(|error| runtime_refusal(&error))?;
+        let snapshot = dispatcher
+            .execute(&lease)
+            .await
+            .map_err(|error| runtime_refusal(&error))?;
         if snapshot.manifest_digest != request.content_manifest_digest {
             return Err(CoordinatorError::Refused(
                 "installed source bytes do not match the signed capture content manifest"
@@ -566,6 +625,83 @@ impl CommissioningCoordinator for PoliteiadService {
         operation: SemanticOperation,
     ) -> Pin<Box<dyn Future<Output = Result<OperationResult, CoordinatorError>> + Send + '_>> {
         Box::pin(self.handle(operation))
+    }
+}
+
+#[derive(Clone)]
+struct BootstrapCapturePolicy {
+    workspace: InstitutionWorkspace,
+    captures: TrustedSourceCaptureRegistry,
+    capture: politeia_core::SourceCaptureId,
+    delegation: politeia_core::trust::Admitted<Delegation>,
+    scope: ReconnaissanceScope,
+    bootstrap: politeia_core::Digest,
+    now: jiff::Timestamp,
+}
+impl PolicyDecisionPoint for BootstrapCapturePolicy {
+    type Error = BootstrapRefusal;
+    fn decide(
+        &self,
+        intent: &OperationIntent,
+    ) -> impl Future<Output = Result<politeia_policy::PolicyDecision, Self::Error>> + Send {
+        ready((|| {
+            let digest =
+                politeia_core::Digest::of(politeia_core::DigestDomain::OperationIntent, intent)
+                    .map_err(BootstrapRefusal::Encoding)?;
+            evaluate_bootstrap_reconnaissance(&BootstrapReconnaissance {
+                workspace: &self.workspace,
+                captures: &self.captures,
+                capture: &self.capture,
+                delegation: &self.delegation,
+                scope: &self.scope,
+                principal: &intent.principal,
+                operation: &intent.operation,
+                resources: &intent.resources,
+                intent_digest: &digest,
+                bootstrap_record_digest: &self.bootstrap,
+                at: self.now,
+            })
+        })())
+    }
+}
+#[derive(Debug)]
+struct CapturePortError(String);
+impl std::fmt::Display for CapturePortError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for CapturePortError {}
+struct InstalledCapturePort {
+    root: PathBuf,
+    request: SourceCaptureRequest,
+    resources: BTreeSet<String>,
+    audience: String,
+}
+impl EffectPort for InstalledCapturePort {
+    type Output = crate::source::SourceSnapshot;
+    type Error = CapturePortError;
+    fn adapter(&self) -> &politeia_core::AdapterId {
+        &self.request.adapter
+    }
+    fn audience(&self) -> &str {
+        &self.audience
+    }
+    fn execute<'a>(
+        &'a self,
+        effect: AuthorizedEffect<'a>,
+    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
+        ready(if effect.lease().resources() != &self.resources {
+            Err(CapturePortError(
+                "capture lease resources differ from installed descriptor".to_string(),
+            ))
+        } else {
+            crate::source::snapshot(crate::source::SourceSnapshotRequest {
+                root: self.root.clone(),
+                members: self.request.manifest.iter().map(PathBuf::from).collect(),
+            })
+            .map_err(|e| CapturePortError(e.to_string()))
+        })
     }
 }
 

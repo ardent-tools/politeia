@@ -22,13 +22,13 @@ cap-std = "3"
 cap-fs-ext = "3"
 politeia-core.workspace = true
 politeia-runtime.workspace = true
+politeia-policy.workspace = true
 politeia-storage = { version = "0.1.0", path = "../politeia-storage" }
 politeia-protocol.workspace = true
 politeia-evidence.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
-politeia-policy.workspace = true
 
 [lints]
 workspace = true
