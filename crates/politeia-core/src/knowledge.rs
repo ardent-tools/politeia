@@ -30,6 +30,11 @@ use crate::{
     AdapterId, ClaimId, DelegationId, Digest, EvidenceId, InstitutionWorkspaceId, ObservationId,
     PrincipalId,
 };
+use crate::{
+    evidence::TrustedEvidenceRegistry,
+    institution::InstitutionWorkspace,
+    trust::{AdmissionError, AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire},
+};
 
 /// A sourced statement about reality.
 ///
@@ -37,8 +42,7 @@ use crate::{
 /// meaning: an observation records that a named source, reached through an
 /// exact adapter, said a particular thing at a particular time. What it is
 /// taken to mean is a [`CandidateClaim`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Observation {
     /// This observation's identity.
     pub id: ObservationId,
@@ -68,6 +72,191 @@ pub struct Observation {
 impl crate::institution::WorkspaceScoped for Observation {
     fn workspace(&self) -> &InstitutionWorkspaceId {
         &self.workspace
+    }
+}
+
+/// Inert observation data received before installed-key and evidence checks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRequest {
+    /// The source the statement came from, as the institution names it.
+    pub source: String,
+    /// The exact adapter that reached the source.
+    pub adapter: AdapterId,
+    /// Digest of the subject the statement is about.
+    pub subject: Digest,
+    /// Digest of the statement itself.
+    pub statement: Digest,
+    /// Time the source was observed.
+    pub observed_at: Timestamp,
+    /// Evidence that establishes the source observation.
+    pub evidence: EvidenceId,
+}
+
+/// Exact source observations admitted for one workspace.
+#[derive(Clone, Debug, Default)]
+pub struct TrustedObservationRegistry {
+    workspace: Option<InstitutionWorkspaceId>,
+    observations: BTreeMap<ObservationId, Observation>,
+}
+
+impl TrustedObservationRegistry {
+    /// Admit signed observations after resolving their evidence from trusted admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationAdmissionRefusal`] when the signature is invalid,
+    /// the evidence is absent or rebound, or the evidence producer did not
+    /// sign the observation.
+    pub fn admit_signed(
+        workspace: &InstitutionWorkspace,
+        anchors: &InstitutionTrustAnchors,
+        evidence: &TrustedEvidenceRegistry,
+        statements: impl IntoIterator<Item = SignedAdmissionWire<ObservationRequest>>,
+    ) -> Result<Self, ObservationAdmissionRefusal> {
+        if anchors.institution() != &workspace.institution || anchors.workspace() != &workspace.id {
+            return Err(ObservationAdmissionRefusal::ForeignTrustScope);
+        }
+        let mut observations = BTreeMap::new();
+        for statement in statements {
+            let admitted = anchors
+                .admit_expected(AdmissionKind::Observation, statement)
+                .map_err(ObservationAdmissionRefusal::Authentication)?;
+            let request = admitted.payload();
+            let record = evidence
+                .resolve(&request.evidence)
+                .ok_or(ObservationAdmissionRefusal::EvidenceNotAdmitted)?;
+            if record.subject != request.subject {
+                return Err(ObservationAdmissionRefusal::EvidenceSubjectMismatch);
+            }
+            if record.producer != *admitted.signer() {
+                return Err(ObservationAdmissionRefusal::EvidenceProducerMismatch);
+            }
+            let observation = Observation {
+                id: ObservationId::new(),
+                workspace: workspace.id.clone(),
+                source: request.source.clone(),
+                adapter: request.adapter.clone(),
+                subject: request.subject.clone(),
+                statement: request.statement.clone(),
+                observed_at: request.observed_at,
+                evidence: request.evidence.clone(),
+            };
+            if observations
+                .insert(observation.id.clone(), observation)
+                .is_some()
+            {
+                return Err(ObservationAdmissionRefusal::DuplicateIdentity);
+            }
+        }
+        Ok(Self {
+            workspace: Some(workspace.id.clone()),
+            observations,
+        })
+    }
+
+    /// Construct a registry from an already-admitted trusted snapshot.
+    ///
+    /// This is a bootstrap boundary for persisted, previously verified
+    /// observations. New received observations must use [`Self::admit_signed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationAdmissionRefusal`] when an observation belongs to
+    /// another workspace, has no trusted evidence, rebinds evidence to another
+    /// subject, or repeats an identity.
+    pub fn from_trusted_bootstrap(
+        workspace: &InstitutionWorkspaceId,
+        evidence: &TrustedEvidenceRegistry,
+        observations: impl IntoIterator<Item = Observation>,
+    ) -> Result<Self, ObservationAdmissionRefusal> {
+        let mut registered = BTreeMap::new();
+        for observation in observations {
+            if observation.workspace != *workspace {
+                return Err(ObservationAdmissionRefusal::ForeignWorkspace);
+            }
+            let record = evidence
+                .resolve(&observation.evidence)
+                .ok_or(ObservationAdmissionRefusal::EvidenceNotAdmitted)?;
+            if record.subject != observation.subject {
+                return Err(ObservationAdmissionRefusal::EvidenceSubjectMismatch);
+            }
+            if registered
+                .insert(observation.id.clone(), observation)
+                .is_some()
+            {
+                return Err(ObservationAdmissionRefusal::DuplicateIdentity);
+            }
+        }
+        Ok(Self {
+            workspace: Some(workspace.clone()),
+            observations: registered,
+        })
+    }
+
+    fn resolve(&self, id: &ObservationId) -> Option<&Observation> {
+        self.observations.get(id)
+    }
+
+    fn workspace(&self) -> Option<&InstitutionWorkspaceId> {
+        self.workspace.as_ref()
+    }
+}
+
+/// Why an observation did not enter a trusted registry.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ObservationAdmissionRefusal {
+    /// The installed anchors do not belong to the requested workspace.
+    ForeignTrustScope,
+    /// Signature or installed-signer checks failed.
+    Authentication(AdmissionError),
+    /// The cited evidence identity was absent from trusted admission.
+    EvidenceNotAdmitted,
+    /// The cited evidence concerns another subject.
+    EvidenceSubjectMismatch,
+    /// The admitted signer differs from the evidence producer.
+    EvidenceProducerMismatch,
+    /// Bootstrap supplied an observation for another workspace.
+    ForeignWorkspace,
+    /// One snapshot repeated an observation identity.
+    DuplicateIdentity,
+}
+
+impl std::fmt::Display for ObservationAdmissionRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ForeignTrustScope => {
+                formatter.write_str("installed anchors do not match observation workspace")
+            }
+            Self::Authentication(error) => {
+                write!(formatter, "observation authentication failed: {error}")
+            }
+            Self::EvidenceNotAdmitted => {
+                formatter.write_str("observation evidence was not admitted")
+            }
+            Self::EvidenceSubjectMismatch => {
+                formatter.write_str("observation evidence concerns another subject")
+            }
+            Self::EvidenceProducerMismatch => {
+                formatter.write_str("observation signer differs from evidence producer")
+            }
+            Self::ForeignWorkspace => {
+                formatter.write_str("observation belongs to another workspace")
+            }
+            Self::DuplicateIdentity => {
+                formatter.write_str("observation registry repeats an identity")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ObservationAdmissionRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Authentication(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -115,6 +304,8 @@ pub enum ClaimStatus {
 pub struct CandidateClaim {
     /// This claim's identity.
     pub id: ClaimId,
+    /// Institution workspace in which this claim may be evaluated.
+    pub workspace: InstitutionWorkspaceId,
     /// Digest of the subject the proposition is about.
     pub subject: Digest,
     /// Digest of the proposition.
@@ -165,27 +356,33 @@ impl CandidateClaim {
 /// accepted something they never saw.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct FactApproval {
+pub struct FactApprovalRequest {
     /// The claim being accepted.
     pub claim: ClaimId,
+    /// The subject as the approver saw it.
+    pub subject: Digest,
     /// The proposition as the approver saw it.
     pub proposition: Digest,
     /// The status the approver saw.
     pub acknowledged_status: ClaimStatus,
     /// The gaps the approver saw and accepted.
     pub acknowledged_missed_axes: BTreeSet<String>,
-    /// The institution owner accepting it.
-    pub owner: PrincipalId,
-    /// The exact delegation carrying that authority.
-    pub owner_delegation: DelegationId,
     /// When the approval was given.
     pub approved_at: Timestamp,
 }
 
 /// Why a claim did not become an approved fact.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum ApprovalRefusal {
+    /// Installed signing-key verification failed.
+    Authentication(AdmissionError),
+    /// The candidate or its observations belongs to another workspace.
+    ForeignWorkspace,
+    /// The installed anchors belong to another institution or workspace.
+    ForeignTrustScope,
+    /// The signed approver is not the workspace's installed owner.
+    NotInstitutionOwner,
     /// The approval names a different claim.
     WrongClaim {
         /// The claim presented.
@@ -195,6 +392,8 @@ pub enum ApprovalRefusal {
     },
     /// The proposition changed after the approval was given.
     PropositionChanged,
+    /// The subject changed after the approval was signed.
+    SubjectChanged,
     /// The claim is contradicted and no owner may approve it as it stands.
     ///
     /// The contradiction has to be resolved -- by evidence, by a correction, or
@@ -208,6 +407,21 @@ pub enum ApprovalRefusal {
     },
     /// Nothing observed the claim.
     Unsupported,
+    /// A claimed support or contradiction reference was not admitted.
+    ObservationNotAdmitted {
+        /// Missing observation identity.
+        id: ObservationId,
+    },
+    /// A claim labeled an observation under a different source.
+    ObservationSourceMismatch {
+        /// Observation identity.
+        id: ObservationId,
+    },
+    /// A claim referenced an observation about another subject.
+    ObservationSubjectMismatch {
+        /// Observation identity.
+        id: ObservationId,
+    },
     /// The approver saw a different status than the claim now has.
     StatusChanged {
         /// What the approver acknowledged.
@@ -225,12 +439,27 @@ pub enum ApprovalRefusal {
 impl std::fmt::Display for ApprovalRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ApprovalRefusal::Authentication(error) => {
+                write!(formatter, "approval authentication failed: {error}")
+            }
+            ApprovalRefusal::ForeignWorkspace => {
+                formatter.write_str("claim or observation belongs to another workspace")
+            }
+            ApprovalRefusal::ForeignTrustScope => {
+                formatter.write_str("installed anchors do not match approval workspace")
+            }
+            ApprovalRefusal::NotInstitutionOwner => {
+                formatter.write_str("signed approver is not the workspace owner")
+            }
             ApprovalRefusal::WrongClaim { claim, approved } => write!(
                 formatter,
                 "approval names {approved:?}, not the claim {claim:?} presented"
             ),
             ApprovalRefusal::PropositionChanged => {
                 formatter.write_str("the proposition changed after the approval was given")
+            }
+            ApprovalRefusal::SubjectChanged => {
+                formatter.write_str("the subject changed after the approval was given")
             }
             ApprovalRefusal::Contested { sources } => write!(
                 formatter,
@@ -239,6 +468,17 @@ impl std::fmt::Display for ApprovalRefusal {
             ApprovalRefusal::Unsupported => {
                 formatter.write_str("no observation supports the claim")
             }
+            ApprovalRefusal::ObservationNotAdmitted { id } => {
+                write!(formatter, "claim observation {id:?} was not admitted")
+            }
+            ApprovalRefusal::ObservationSourceMismatch { id } => write!(
+                formatter,
+                "claim source label disagrees with observation {id:?}"
+            ),
+            ApprovalRefusal::ObservationSubjectMismatch { id } => write!(
+                formatter,
+                "claim observation {id:?} concerns another subject"
+            ),
             ApprovalRefusal::StatusChanged {
                 acknowledged,
                 actual,
@@ -258,16 +498,19 @@ impl std::error::Error for ApprovalRefusal {}
 
 /// A claim the institution has accepted.
 ///
-/// Constructible only through [`approve`], so the checks are not something a
-/// caller can route around by building the value directly.
+/// Constructible only through [`approve_claim`], so authentication, ownership,
+/// and evidence-resolution checks are not something a caller can route around
+/// by building the value directly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ApprovedFact {
     claim: ClaimId,
+    workspace: InstitutionWorkspaceId,
     subject: Digest,
     proposition: Digest,
     support: Support,
     accepted_gaps: BTreeSet<String>,
     owner: PrincipalId,
+    owner_delegation: DelegationId,
     approved_at: Timestamp,
 }
 
@@ -275,6 +518,10 @@ impl ApprovedFact {
     /// The claim this fact came from.
     pub fn claim(&self) -> &ClaimId {
         &self.claim
+    }
+    /// The institution workspace that accepted the fact.
+    pub fn workspace(&self) -> &InstitutionWorkspaceId {
+        &self.workspace
     }
     /// The subject the fact is about.
     pub fn subject(&self) -> &Digest {
@@ -300,13 +547,22 @@ impl ApprovedFact {
     pub fn owner(&self) -> &PrincipalId {
         &self.owner
     }
+    /// The workspace delegation that establishes the owner's authority.
+    pub fn owner_delegation(&self) -> &DelegationId {
+        &self.owner_delegation
+    }
     /// When it was accepted.
     pub fn approved_at(&self) -> Timestamp {
         self.approved_at
     }
 }
 
-/// Accept a claim as an institutional fact.
+/// Accept an evidence-resolved claim as an institutional fact.
+///
+/// The signed request is raw transport input. This function authenticates it
+/// against installed anchors for the exact workspace, requires that signer to
+/// be the workspace owner, and resolves every cited observation from trusted
+/// admission before it can produce an [`ApprovedFact`].
 ///
 /// # Errors
 ///
@@ -316,15 +572,36 @@ impl ApprovedFact {
 /// acknowledge.
 ///
 /// Time: O(g) for g declared gaps. Space: O(g).
-pub fn approve(
+pub fn approve_claim(
+    workspace: &InstitutionWorkspace,
+    observations: &TrustedObservationRegistry,
+    anchors: &InstitutionTrustAnchors,
     claim: &CandidateClaim,
-    approval: &FactApproval,
+    approval: SignedAdmissionWire<FactApprovalRequest>,
 ) -> Result<ApprovedFact, ApprovalRefusal> {
+    if anchors.institution() != &workspace.institution || anchors.workspace() != &workspace.id {
+        return Err(ApprovalRefusal::ForeignTrustScope);
+    }
+    if claim.workspace != workspace.id || observations.workspace() != Some(&workspace.id) {
+        return Err(ApprovalRefusal::ForeignWorkspace);
+    }
+    validate_claim_observations(claim, observations)?;
+
+    let admitted = anchors
+        .admit_expected(AdmissionKind::FactApproval, approval)
+        .map_err(ApprovalRefusal::Authentication)?;
+    if admitted.signer() != &workspace.owner {
+        return Err(ApprovalRefusal::NotInstitutionOwner);
+    }
+    let approval = admitted.payload();
     if approval.claim != claim.id {
         return Err(ApprovalRefusal::WrongClaim {
             claim: claim.id.clone(),
             approved: approval.claim.clone(),
         });
+    }
+    if approval.subject != claim.subject {
+        return Err(ApprovalRefusal::SubjectChanged);
     }
     if approval.proposition != claim.proposition {
         return Err(ApprovalRefusal::PropositionChanged);
@@ -363,18 +640,53 @@ pub fn approve(
 
     Ok(ApprovedFact {
         claim: claim.id.clone(),
+        workspace: workspace.id.clone(),
         subject: claim.subject.clone(),
         proposition: claim.proposition.clone(),
         support: claim.support(),
         accepted_gaps: claim.missed_axes.clone(),
-        owner: approval.owner.clone(),
+        owner: admitted.signer().clone(),
+        owner_delegation: workspace.owner_delegation.clone(),
         approved_at: approval.approved_at,
     })
 }
 
+fn validate_claim_observations(
+    claim: &CandidateClaim,
+    observations: &TrustedObservationRegistry,
+) -> Result<(), ApprovalRefusal> {
+    for sources in [&claim.supported_by, &claim.contradicted_by] {
+        for (source, identities) in sources {
+            for id in identities {
+                let observation = observations
+                    .resolve(id)
+                    .ok_or_else(|| ApprovalRefusal::ObservationNotAdmitted { id: id.clone() })?;
+                if observation.source != *source {
+                    return Err(ApprovalRefusal::ObservationSourceMismatch { id: id.clone() });
+                }
+                if observation.subject != claim.subject {
+                    return Err(ApprovalRefusal::ObservationSubjectMismatch { id: id.clone() });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "fixture construction must fail loudly when its authenticated boundary drifts"
+    )]
+
     use super::*;
+
+    use ed25519_dalek::SigningKey;
+
+    use crate::evidence::{EvidenceRecord, IndependenceClass};
+    use crate::test_support::fixture;
+    use crate::trust::TrustedSigningKey;
 
     #[expect(
         clippy::expect_used,
@@ -394,252 +706,394 @@ mod tests {
         Digest::blake3(b"billing is handled by the finance team")
     }
 
-    fn observation(source: &str) -> Observation {
-        Observation {
+    struct Fixture {
+        workspace: InstitutionWorkspace,
+        owner_key: SigningKey,
+        owner: PrincipalId,
+        observation: Observation,
+        registry: TrustedObservationRegistry,
+        anchors: InstitutionTrustAnchors,
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the canonical workspace fixture must be internally coherent"
+    )]
+    fn fixture_with_observation() -> Fixture {
+        let base = fixture();
+        let owner_key = SigningKey::from_bytes(&[23; 32]);
+        let owner = base.workspace.owner.clone();
+        let evidence_id = EvidenceId::new();
+        let evidence = TrustedEvidenceRegistry::from_trusted_bootstrap([EvidenceRecord {
+            id: evidence_id.clone(),
+            subject: subject(),
+            producer: owner.clone(),
+            producer_delegation: base.workspace.owner_delegation.clone(),
+            method: "fixture".to_string(),
+            payload_digest: Digest::blake3(b"evidence"),
+            observed_at: now(),
+            independence: IndependenceClass::HumanAuthority,
+        }])
+        .expect("fixture evidence identity is unique");
+        let observation = Observation {
             id: ObservationId::new(),
-            workspace: InstitutionWorkspaceId::new(),
-            source: source.to_string(),
+            workspace: base.workspace.id.clone(),
+            source: "crm".to_string(),
             adapter: AdapterId::new(),
             subject: subject(),
-            statement: Digest::blake3(source.as_bytes()),
+            statement: Digest::blake3(b"finance handles billing"),
             observed_at: now(),
-            evidence: EvidenceId::new(),
+            evidence: evidence_id,
+        };
+        let registry = TrustedObservationRegistry::from_trusted_bootstrap(
+            &base.workspace.id,
+            &evidence,
+            [observation.clone()],
+        )
+        .expect("fixture observation is evidence-bound");
+        let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
+            base.workspace.institution.clone(),
+            base.workspace.id.clone(),
+            [TrustedSigningKey::new(
+                owner.clone(),
+                owner_key.verifying_key().to_bytes(),
+                BTreeSet::from([AdmissionKind::FactApproval]),
+            )
+            .expect("fixture key is valid")],
+        )
+        .expect("fixture owner is unique");
+        Fixture {
+            workspace: base.workspace,
+            owner_key,
+            owner,
+            observation,
+            registry,
+            anchors,
         }
     }
 
-    fn by_source(observations: &[&Observation]) -> BTreeMap<String, BTreeSet<ObservationId>> {
-        let mut map: BTreeMap<String, BTreeSet<ObservationId>> = BTreeMap::new();
-        for observation in observations {
-            map.entry(observation.source.clone())
-                .or_default()
-                .insert(observation.id.clone());
-        }
-        map
-    }
-
-    fn claim(
-        supported: &[&Observation],
-        contradicted: &[&Observation],
-        missed: &[&str],
-    ) -> CandidateClaim {
+    fn claim(fixture: &Fixture, contradicted: bool) -> CandidateClaim {
         CandidateClaim {
             id: ClaimId::new(),
+            workspace: fixture.workspace.id.clone(),
             subject: subject(),
             proposition: proposition(),
-            supported_by: by_source(supported),
-            contradicted_by: by_source(contradicted),
-            missed_axes: missed.iter().map(|axis| (*axis).to_string()).collect(),
+            supported_by: BTreeMap::from([(
+                fixture.observation.source.clone(),
+                BTreeSet::from([fixture.observation.id.clone()]),
+            )]),
+            contradicted_by: if contradicted {
+                BTreeMap::from([(
+                    fixture.observation.source.clone(),
+                    BTreeSet::from([fixture.observation.id.clone()]),
+                )])
+            } else {
+                BTreeMap::new()
+            },
+            missed_axes: BTreeSet::from(["subsidiaries".to_string()]),
             interpreter: PrincipalId::new(),
             interpreter_delegation: DelegationId::new(),
         }
     }
 
-    fn approval(claim: &CandidateClaim, acknowledged: &[&str]) -> FactApproval {
-        FactApproval {
-            claim: claim.id.clone(),
-            proposition: claim.proposition.clone(),
-            acknowledged_status: claim.status(),
-            acknowledged_missed_axes: acknowledged.iter().map(|a| (*a).to_string()).collect(),
-            owner: PrincipalId::new(),
-            owner_delegation: DelegationId::new(),
-            approved_at: now(),
-        }
-    }
-
-    #[test]
-    fn one_source_is_support_and_two_are_corroboration() {
-        let first = observation("crm");
-        let second = observation("payroll");
-        assert_eq!(claim(&[], &[], &[]).support(), Support::None);
-        assert_eq!(claim(&[&first], &[], &[]).support(), Support::Single);
-        assert_eq!(
-            claim(&[&first, &second], &[], &[]).support(),
-            Support::Corroborated
-        );
-    }
-
-    #[test]
-    fn one_source_polled_twice_is_not_corroboration() {
-        // The distinction the map keys exist for. Counting observations rather
-        // than sources is how a single unreliable source becomes a consensus
-        // by being asked again.
-        let once = observation("crm");
-        let twice = Observation {
-            id: ObservationId::new(),
-            ..once.clone()
-        };
-        assert_eq!(claim(&[&once, &twice], &[], &[]).support(), Support::Single);
-    }
-
-    #[test]
-    fn a_contradiction_outranks_any_amount_of_support() {
-        // Nine to one is contested, not nine-tenths true.
-        let supporting: Vec<Observation> = (0..9)
-            .map(|index| observation(&format!("source-{index}")))
-            .collect();
-        let against = observation("ledger");
-        let refs: Vec<&Observation> = supporting.iter().collect();
-        let contested = claim(&refs, &[&against], &[]);
-
-        assert_eq!(contested.support(), Support::Corroborated);
-        assert_eq!(contested.status(), ClaimStatus::Contested);
-    }
-
-    #[test]
-    fn an_unobserved_claim_is_unsupported_rather_than_merely_unapproved() {
-        assert_eq!(claim(&[], &[], &[]).status(), ClaimStatus::Unsupported);
-    }
-
-    #[test]
     #[expect(
         clippy::expect_used,
-        reason = "a fixture that does not approve is a broken test, not a finding"
+        reason = "a signed fixture approval must encode canonically"
     )]
-    fn a_supported_uncontradicted_claim_is_approvable() {
-        let seen = observation("crm");
-        let candidate = claim(&[&seen], &[], &[]);
-        let accepted = approve(&candidate, &approval(&candidate, &[]));
-
-        let fact = accepted.as_ref().expect("a clean candidate is approvable");
-        assert_eq!(fact.claim(), &candidate.id);
-        assert_eq!(fact.proposition(), &proposition());
-        assert_eq!(fact.support(), Support::Single);
-        assert!(fact.accepted_gaps().is_empty());
+    fn approval(
+        fixture: &Fixture,
+        claim: &CandidateClaim,
+        signer: PrincipalId,
+        key: &SigningKey,
+    ) -> SignedAdmissionWire<FactApprovalRequest> {
+        SignedAdmissionWire::sign(
+            AdmissionKind::FactApproval,
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            signer,
+            FactApprovalRequest {
+                claim: claim.id.clone(),
+                subject: claim.subject.clone(),
+                proposition: claim.proposition.clone(),
+                acknowledged_status: claim.status(),
+                acknowledged_missed_axes: claim.missed_axes.clone(),
+                approved_at: now(),
+            },
+            key,
+        )
+        .expect("fixture approval encodes")
     }
 
     #[test]
-    fn a_contested_claim_cannot_be_approved_past() {
-        // `docs/18-FIRST_VERTICAL_SLICE.md`: contradictions remain visible
-        // until approved. This is what "remain visible" means when someone
-        // tries to approve anyway -- the contradiction is not a warning the
-        // approver can accept, it is a refusal.
-        let seen = observation("crm");
-        let against = observation("ledger");
-        let contested = claim(&[&seen], &[&against], &[]);
-
-        assert_eq!(
-            approve(&contested, &approval(&contested, &[])),
-            Err(ApprovalRefusal::Contested {
-                sources: BTreeSet::from(["ledger".to_string()]),
-            })
-        );
-    }
-
-    #[test]
-    fn an_unsupported_claim_cannot_be_approved() {
-        let empty = claim(&[], &[], &[]);
-        assert_eq!(
-            approve(&empty, &approval(&empty, &[])),
-            Err(ApprovalRefusal::Unsupported)
-        );
-    }
-
-    #[test]
-    fn a_gap_the_approval_does_not_acknowledge_refuses() {
-        let seen = observation("crm");
-        let candidate = claim(&[&seen], &[], &["subsidiaries", "historical contracts"]);
-
-        assert_eq!(
-            approve(&candidate, &approval(&candidate, &["subsidiaries"])),
-            Err(ApprovalRefusal::UnacknowledgedGaps {
-                missed: BTreeSet::from(["historical contracts".to_string()]),
-            }),
-            "an approver who saw one gap has not accepted the other"
-        );
-    }
-
-    #[test]
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture that does not approve is a broken test, not a finding"
-    )]
-    fn acknowledging_every_gap_approves_and_carries_them_forward() {
-        // A fact approved with known gaps is a different thing from one
-        // approved without, and a consumer that cannot tell them apart will
-        // treat them alike.
-        let seen = observation("crm");
-        let candidate = claim(&[&seen], &[], &["subsidiaries", "historical contracts"]);
-        let accepted = approve(
+    fn authenticated_owner_approval_resolves_admitted_evidence() {
+        let fixture = fixture_with_observation();
+        let candidate = claim(&fixture, false);
+        let fact = approve_claim(
+            &fixture.workspace,
+            &fixture.registry,
+            &fixture.anchors,
             &candidate,
-            &approval(&candidate, &["subsidiaries", "historical contracts"]),
-        );
+            approval(
+                &fixture,
+                &candidate,
+                fixture.owner.clone(),
+                &fixture.owner_key,
+            ),
+        )
+        .expect("evidence-resolved owner approval succeeds");
 
-        let fact = accepted.as_ref().expect("every declared gap was accepted");
+        assert_eq!(fact.workspace(), &fixture.workspace.id);
+        assert_eq!(fact.owner(), &fixture.owner);
+        assert_eq!(fact.owner_delegation(), &fixture.workspace.owner_delegation);
         assert_eq!(
             fact.accepted_gaps(),
-            &BTreeSet::from([
-                "historical contracts".to_string(),
-                "subsidiaries".to_string()
-            ])
+            &BTreeSet::from(["subsidiaries".to_string()])
         );
     }
 
     #[test]
-    fn acknowledging_a_gap_the_claim_does_not_declare_is_harmless() {
-        let seen = observation("crm");
-        let candidate = claim(&[&seen], &[], &["subsidiaries"]);
-        assert!(
-            approve(
+    fn a_raw_or_wrongly_signed_approval_cannot_create_a_fact() {
+        let fixture = fixture_with_observation();
+        let candidate = claim(&fixture, false);
+        let imposter = PrincipalId::new();
+        let imposter_key = SigningKey::from_bytes(&[31; 32]);
+        assert!(matches!(
+            approve_claim(
+                &fixture.workspace,
+                &fixture.registry,
+                &fixture.anchors,
                 &candidate,
-                &approval(&candidate, &["subsidiaries", "something else entirely"])
-            )
-            .is_ok(),
-            "extra caution is not a defect"
-        );
+                approval(&fixture, &candidate, imposter, &imposter_key),
+            ),
+            Err(ApprovalRefusal::Authentication(
+                AdmissionError::UnknownSigner
+            ))
+        ));
     }
 
     #[test]
-    fn an_approval_for_another_claim_is_refused() {
-        let seen = observation("crm");
-        let mine = claim(&[&seen], &[], &[]);
-        let theirs = claim(&[&seen], &[], &[]);
-        assert_eq!(
-            approve(&mine, &approval(&theirs, &[])),
-            Err(ApprovalRefusal::WrongClaim {
-                claim: mine.id.clone(),
-                approved: theirs.id.clone(),
-            })
-        );
+    fn a_cross_workspace_signed_approval_is_refused() {
+        let fixture = fixture_with_observation();
+        let candidate = claim(&fixture, false);
+        let wire = SignedAdmissionWire::sign(
+            AdmissionKind::FactApproval,
+            fixture.workspace.institution.clone(),
+            InstitutionWorkspaceId::new(),
+            fixture.owner.clone(),
+            FactApprovalRequest {
+                claim: candidate.id.clone(),
+                subject: candidate.subject.clone(),
+                proposition: candidate.proposition.clone(),
+                acknowledged_status: candidate.status(),
+                acknowledged_missed_axes: candidate.missed_axes.clone(),
+                approved_at: now(),
+            },
+            &fixture.owner_key,
+        )
+        .expect("fixture approval encodes");
+        assert!(matches!(
+            approve_claim(
+                &fixture.workspace,
+                &fixture.registry,
+                &fixture.anchors,
+                &candidate,
+                wire
+            ),
+            Err(ApprovalRefusal::Authentication(
+                AdmissionError::ForeignWorkspace
+            ))
+        ));
     }
 
     #[test]
-    fn a_proposition_that_changed_after_approval_is_refused() {
-        // The reason the approval restates what it accepted instead of naming
-        // it. Carrying only an identity would leave the approval valid over
-        // whatever the claim later said.
-        let seen = observation("crm");
-        let mut candidate = claim(&[&seen], &[], &[]);
-        let given = approval(&candidate, &[]);
-        candidate.proposition = Digest::blake3(b"something the owner never read");
-
-        assert_eq!(
-            approve(&candidate, &given),
-            Err(ApprovalRefusal::PropositionChanged)
-        );
+    fn an_approval_of_a_stale_subject_is_refused() {
+        let fixture = fixture_with_observation();
+        let candidate = claim(&fixture, false);
+        let wire = SignedAdmissionWire::sign(
+            AdmissionKind::FactApproval,
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            fixture.owner.clone(),
+            FactApprovalRequest {
+                claim: candidate.id.clone(),
+                subject: Digest::blake3(b"a later subject"),
+                proposition: candidate.proposition.clone(),
+                acknowledged_status: candidate.status(),
+                acknowledged_missed_axes: candidate.missed_axes.clone(),
+                approved_at: now(),
+            },
+            &fixture.owner_key,
+        )
+        .expect("fixture approval encodes");
+        assert!(matches!(
+            approve_claim(
+                &fixture.workspace,
+                &fixture.registry,
+                &fixture.anchors,
+                &candidate,
+                wire
+            ),
+            Err(ApprovalRefusal::SubjectChanged)
+        ));
     }
 
     #[test]
-    fn a_claim_that_gained_a_contradiction_after_approval_is_refused() {
-        // The race the acknowledged status exists for: the owner approved a
-        // clean candidate, and a contradicting observation arrived before the
-        // approval was applied.
-        let seen = observation("crm");
-        let candidate = claim(&[&seen], &[], &[]);
-        let given = approval(&candidate, &[]);
-
-        let against = observation("ledger");
-        let contested = CandidateClaim {
-            contradicted_by: by_source(&[&against]),
-            ..candidate
+    fn evidence_cannot_be_rebound_to_another_observation_subject() {
+        let fixture = fixture_with_observation();
+        let record = EvidenceRecord {
+            id: EvidenceId::new(),
+            subject: Digest::blake3(b"another subject"),
+            producer: fixture.owner.clone(),
+            producer_delegation: fixture.workspace.owner_delegation.clone(),
+            method: "fixture".to_string(),
+            payload_digest: Digest::blake3(b"evidence"),
+            observed_at: now(),
+            independence: IndependenceClass::HumanAuthority,
         };
+        let evidence = TrustedEvidenceRegistry::from_trusted_bootstrap([record.clone()])
+            .expect("fixture evidence identity is unique");
+        let forged = Observation {
+            id: ObservationId::new(),
+            workspace: fixture.workspace.id.clone(),
+            source: "crm".to_string(),
+            adapter: AdapterId::new(),
+            subject: subject(),
+            statement: Digest::blake3(b"forged binding"),
+            observed_at: now(),
+            evidence: record.id,
+        };
+        assert!(matches!(
+            TrustedObservationRegistry::from_trusted_bootstrap(
+                &fixture.workspace.id,
+                &evidence,
+                [forged],
+            ),
+            Err(ObservationAdmissionRefusal::EvidenceSubjectMismatch)
+        ));
+    }
 
-        assert_eq!(
-            approve(&contested, &given),
-            Err(ApprovalRefusal::StatusChanged {
-                acknowledged: ClaimStatus::Candidate,
-                actual: ClaimStatus::Contested,
-            }),
-            "the refusal must name the change, not merely the contradiction"
-        );
+    #[test]
+    fn observation_admission_binds_the_signed_producer_to_its_evidence() {
+        let fixture = fixture_with_observation();
+        let second = PrincipalId::new();
+        let second_key = SigningKey::from_bytes(&[47; 32]);
+        let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            [
+                TrustedSigningKey::new(
+                    fixture.owner.clone(),
+                    fixture.owner_key.verifying_key().to_bytes(),
+                    BTreeSet::from([AdmissionKind::Observation]),
+                )
+                .expect("fixture key is valid"),
+                TrustedSigningKey::new(
+                    second.clone(),
+                    second_key.verifying_key().to_bytes(),
+                    BTreeSet::from([AdmissionKind::Observation]),
+                )
+                .expect("fixture key is valid"),
+            ],
+        )
+        .expect("fixture principals are distinct");
+        let evidence_id = EvidenceId::new();
+        let evidence = TrustedEvidenceRegistry::from_trusted_bootstrap([EvidenceRecord {
+            id: evidence_id.clone(),
+            subject: subject(),
+            producer: fixture.owner.clone(),
+            producer_delegation: fixture.workspace.owner_delegation.clone(),
+            method: "fixture".to_string(),
+            payload_digest: Digest::blake3(b"evidence"),
+            observed_at: now(),
+            independence: IndependenceClass::HumanAuthority,
+        }])
+        .expect("fixture evidence identity is unique");
+        let wire = SignedAdmissionWire::sign(
+            AdmissionKind::Observation,
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            second,
+            ObservationRequest {
+                source: "crm".to_string(),
+                adapter: AdapterId::new(),
+                subject: subject(),
+                statement: Digest::blake3(b"billing"),
+                observed_at: now(),
+                evidence: evidence_id,
+            },
+            &second_key,
+        )
+        .expect("fixture observation encodes");
+        assert!(matches!(
+            TrustedObservationRegistry::admit_signed(
+                &fixture.workspace,
+                &anchors,
+                &evidence,
+                [wire],
+            ),
+            Err(ObservationAdmissionRefusal::EvidenceProducerMismatch)
+        ));
+    }
+
+    #[test]
+    fn an_explicit_conflict_remains_unapprovable() {
+        let fixture = fixture_with_observation();
+        let candidate = claim(&fixture, true);
+        assert!(matches!(
+            approve_claim(
+                &fixture.workspace,
+                &fixture.registry,
+                &fixture.anchors,
+                &candidate,
+                approval(
+                    &fixture,
+                    &candidate,
+                    fixture.owner.clone(),
+                    &fixture.owner_key
+                ),
+            ),
+            Err(ApprovalRefusal::Contested { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_or_fabricated_support_map_cannot_be_approved() {
+        let fixture = fixture_with_observation();
+        let mut candidate = claim(&fixture, false);
+        candidate.supported_by = BTreeMap::new();
+        assert!(matches!(
+            approve_claim(
+                &fixture.workspace,
+                &fixture.registry,
+                &fixture.anchors,
+                &candidate,
+                approval(
+                    &fixture,
+                    &candidate,
+                    fixture.owner.clone(),
+                    &fixture.owner_key
+                ),
+            ),
+            Err(ApprovalRefusal::Unsupported)
+        ));
+
+        let mut fabricated = claim(&fixture, false);
+        fabricated.supported_by =
+            BTreeMap::from([("ledger".to_string(), BTreeSet::from([ObservationId::new()]))]);
+        assert!(matches!(
+            approve_claim(
+                &fixture.workspace,
+                &fixture.registry,
+                &fixture.anchors,
+                &fabricated,
+                approval(
+                    &fixture,
+                    &fabricated,
+                    fixture.owner.clone(),
+                    &fixture.owner_key
+                ),
+            ),
+            Err(ApprovalRefusal::ObservationNotAdmitted { .. })
+        ));
     }
 }

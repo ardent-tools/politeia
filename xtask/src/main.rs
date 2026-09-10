@@ -207,7 +207,7 @@ const WITHHELD_SCHEMAS: &[WithheldSchema] = &[
         reason: "commissioning knowledge surface; publication waits on the first vertical slice",
     },
     WithheldSchema {
-        type_name: "politeia_core::knowledge::FactApproval",
+        type_name: "politeia_core::knowledge::FactApprovalRequest",
         reason: "owner-approval surface; publication waits on the first vertical slice",
     },
     WithheldSchema {

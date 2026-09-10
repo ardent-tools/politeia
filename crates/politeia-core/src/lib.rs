@@ -26,6 +26,7 @@ pub mod outbox;
 pub mod reconnaissance;
 pub mod records;
 pub mod state;
+pub mod trust;
 
 #[cfg(test)]
 mod test_support;
