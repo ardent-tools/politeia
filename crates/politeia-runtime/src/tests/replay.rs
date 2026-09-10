@@ -159,6 +159,7 @@ async fn sibling_reservations_share_the_parent_budget_and_pending_expiry_release
     let operation = read_operation();
     let first = OperationIntent {
         principal: first_principal,
+        input_digest: Digest::blake3(b"first-input"),
         delegation_chain: vec![root.clone(), first_child.clone()],
         operation: operation.clone(),
         resources: BTreeSet::from(["repo:main".to_string()]),
@@ -168,6 +169,7 @@ async fn sibling_reservations_share_the_parent_budget_and_pending_expiry_release
     };
     let second = OperationIntent {
         principal: second_principal,
+        input_digest: Digest::blake3(b"second-input"),
         delegation_chain: vec![root.clone(), second_child.clone()],
         operation: operation.clone(),
         resources: BTreeSet::from(["repo:main".to_string()]),

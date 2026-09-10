@@ -17,6 +17,10 @@ fn operation_intent_wire_format_is_fail_closed() {
         decoded.delegation_chain, fixture.intent.delegation_chain,
         "the delegation chain must round-trip through its wire form"
     );
+    assert_eq!(
+        decoded.input_digest, fixture.intent.input_digest,
+        "the authenticated input binding must round-trip through the wire"
+    );
 
     let mut object = encoded
         .as_object()
@@ -27,5 +31,15 @@ fn operation_intent_wire_format_is_fail_closed() {
     assert!(
         result.is_err(),
         "unknown operation-intent fields must fail closed"
+    );
+
+    let mut missing = encoded
+        .as_object()
+        .expect("an operation intent must serialize as an object")
+        .clone();
+    missing.remove("input_digest");
+    assert!(
+        serde_json::from_value::<OperationIntent>(serde_json::Value::Object(missing)).is_err(),
+        "an operation intent cannot omit its authenticated input binding"
     );
 }

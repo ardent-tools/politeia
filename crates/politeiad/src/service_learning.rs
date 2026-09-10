@@ -334,6 +334,10 @@ impl PoliteiadService {
         );
         let intent = OperationIntent {
             principal: admitted.payload().requester.clone(),
+            input_digest: Digest::blake3(
+                &politeia_core::canonical::to_canonical_bytes(&(request_digest, population))
+                    .map_err(|error| CoordinatorError::Refused(format!("learning input cannot bind: {error}")))?,
+            ),
             delegation_chain: authority
                 .iter()
                 .map(|grant| grant.payload().clone())

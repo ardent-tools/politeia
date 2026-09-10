@@ -431,6 +431,7 @@ impl PoliteiadService {
         );
         let intent = OperationIntent {
             principal: capture.signer().clone(),
+            input_digest: Digest::blake3(b"bootstrap-capture-input"),
             delegation_chain: vec![delegation.payload().clone()],
             operation,
             resources,

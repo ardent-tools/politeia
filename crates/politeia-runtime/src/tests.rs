@@ -263,6 +263,7 @@ fn fixture() -> Fixture {
     let adapter = AdapterId::new();
     let intent = OperationIntent {
         principal: principal.clone(),
+        input_digest: Digest::blake3(b"fixture-input"),
         delegation_chain: vec![delegation(
             principal,
             now + SignedDuration::from_hours(1),

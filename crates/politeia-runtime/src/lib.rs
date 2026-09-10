@@ -170,6 +170,10 @@ fn replay_detected() -> RuntimeError {
 pub struct OperationIntent {
     /// The requesting principal.
     pub principal: PrincipalId,
+    /// Digest of the exact authenticated semantic input that selected this
+    /// operation. It prevents a transport envelope from being authenticated
+    /// separately yet omitted from the policy-bound intent.
+    pub input_digest: Digest,
     /// The complete root-to-leaf delegation chain under which the request proceeds.
     pub delegation_chain: Vec<Delegation>,
     /// The operation contract being invoked.

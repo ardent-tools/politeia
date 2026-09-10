@@ -441,6 +441,7 @@ impl Fixture {
             scope,
             intent: OperationIntent {
                 principal: owner,
+                input_digest: Digest::blake3(b"ledger-fixture-input"),
                 delegation_chain: vec![delegation],
                 operation,
                 resources: BTreeSet::from(["fixture:document".to_owned()]),

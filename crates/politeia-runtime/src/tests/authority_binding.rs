@@ -39,6 +39,7 @@ fn binding_fixture(narrow: impl FnOnce(&mut Delegation)) -> Fixture {
 
     let intent = OperationIntent {
         principal,
+        input_digest: Digest::blake3(b"authority-binding-input"),
         // The same delegation the registry trusts, so the identity checks pass
         // and the binding checks are what decide.
         delegation_chain: vec![root.clone()],
