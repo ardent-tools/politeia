@@ -181,12 +181,40 @@ impl CommissioningRecord {
         approval_ids: &BTreeSet<EvidenceId>,
         unresolved_obligations: BTreeSet<String>,
     ) -> Result<Self, CommissioningError> {
+        if observation_ids.is_empty() {
+            return Err(CommissioningError::MissingObservations);
+        }
         let expected: BTreeSet<_> = observation_ids.iter().cloned().collect();
         let retained: BTreeSet<_> = historical_observations.keys().cloned().collect();
         if expected != retained
             || historical_observations.values().any(|provenance| {
                 !observation_ids.contains(&provenance.evidence.id)
                     || evidence.resolve(&provenance.evidence.id) != Some(&provenance.evidence)
+                    || provenance.observation.workspace != workspace.id
+                    || provenance.capture.id != provenance.observation.capture
+                    || provenance.capture.content_manifest_digest
+                        != provenance.observation.capture_manifest_digest
+                    || provenance.capture.reconnaissance_delegation
+                        != provenance.grant.delegation.id
+                    || provenance.capture_signer != provenance.grant.delegation.subject
+                    || provenance.grant.institution != workspace.institution
+                    || provenance.grant.workspace != workspace.id
+                    || provenance.grant.scope.delegation != provenance.grant.delegation.id
+                    || provenance.grant.scope.commissioner != provenance.capture_signer
+                    || provenance
+                        .grant
+                        .scope
+                        .admit(
+                            &crate::institution::InstitutionBoundary::new(
+                                workspace.institution.clone(),
+                                workspace.id.clone(),
+                                (),
+                            ),
+                            &provenance.grant.delegation,
+                            &provenance.observation,
+                            provenance.observation.observed_at,
+                        )
+                        .is_err()
             })
         {
             return Err(CommissioningError::HistoricalObservationMismatch);

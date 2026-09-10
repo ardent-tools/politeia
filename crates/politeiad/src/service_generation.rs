@@ -928,7 +928,7 @@ fn historical_reconnaissance_observations(
                     institution: service.workspace().institution.clone(),
                     workspace: service.workspace().id.clone(),
                     valid_from: persisted.admitted_at,
-                    revoked_at: persisted.revoked_at,
+                    revoked_at: revocation_as_of(persisted.revoked_at, as_of),
                     scope: capture.request().reconnaissance.clone(),
                     delegation: leaf.payload().clone(),
                 },
