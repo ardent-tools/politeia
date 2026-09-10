@@ -8,10 +8,7 @@ use serde_json::Value;
 use tokio_postgres::IsolationLevel;
 use uuid::Uuid;
 
-use crate::{
-    PostgresStorage, SERIALIZABLE_ATTEMPTS, Scope, StorageError, is_serialization_failure,
-    scope_values,
-};
+use crate::{PostgresStorage, Scope, StorageError, scope_values, transaction};
 
 /// Immutable canonical JSON bytes and their derived content identity.
 ///
@@ -98,18 +95,8 @@ impl PostgresStorage {
         {
             return Err(StorageError::AttemptUnavailable);
         }
-        for attempt in 0..SERIALIZABLE_ATTEMPTS {
-            match self
-                .record_completion_once(scope, reservation, receipt, outbox)
-                .await
-            {
-                Err(StorageError::Database(source))
-                    if is_serialization_failure(&source) && attempt + 1 < SERIALIZABLE_ATTEMPTS => {
-                }
-                outcome => return outcome,
-            }
-        }
-        Err(StorageError::SerializationExhausted)
+        transaction::retry(|| self.record_completion_once(scope, reservation, receipt, outbox))
+            .await
     }
 
     async fn record_completion_once(
@@ -178,16 +165,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_payload_binds_sorted_exact_bytes() {
+    fn canonical_payload_binds_sorted_exact_bytes() -> Result<(), crate::StorageError> {
         let payload = CanonicalPayload::from_serializable(&Receipt {
             result: "completed",
             count: 2,
-        })
-        .expect("fixture receipt canonicalizes");
+        })?;
         assert_eq!(payload.bytes(), br#"{"count":2,"result":"completed"}"#);
         assert_eq!(
             payload.digest(),
             &politeia_core::Digest::blake3(payload.bytes())
         );
+        Ok(())
     }
 }

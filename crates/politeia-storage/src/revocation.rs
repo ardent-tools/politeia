@@ -3,7 +3,10 @@
 use politeia_core::{DelegationId, Digest};
 use tokio_postgres::IsolationLevel;
 
-use crate::{CommitReceipt, EvidenceAdmission, PostgresStorage, Scope, StorageError, scope_values};
+use crate::{
+    CommitReceipt, EvidenceAdmission, PostgresStorage, Scope, StorageError, scope_values,
+    transaction,
+};
 
 impl PostgresStorage {
     /// Revoke one exact delegation and append its authenticated decision atomically.
@@ -12,6 +15,17 @@ impl PostgresStorage {
     /// method. The workspace lock serializes the transition with reservation,
     /// claim, and activation; no effect can be claimed from a stale snapshot.
     pub async fn revoke_with_record(
+        &self,
+        scope: &Scope,
+        delegation: &DelegationId,
+        expected_delegation: &Digest,
+        evidence: &EvidenceAdmission,
+    ) -> Result<CommitReceipt, StorageError> {
+        transaction::retry(|| self.revoke_once(scope, delegation, expected_delegation, evidence))
+            .await
+    }
+
+    async fn revoke_once(
         &self,
         scope: &Scope,
         delegation: &DelegationId,

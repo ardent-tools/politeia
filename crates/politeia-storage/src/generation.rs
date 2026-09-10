@@ -3,7 +3,9 @@
 use politeia_core::{Delegation, trust::Admitted};
 use tokio_postgres::{GenericClient, IsolationLevel};
 
-use crate::{PostgresStorage, RuntimeGeneration, StorageError, authority, scope_values};
+use crate::{
+    PostgresStorage, RuntimeGeneration, StorageError, authority, scope_values, transaction,
+};
 
 impl PostgresStorage {
     /// Persist a semantically admitted generation in the exact workspace scope.
@@ -30,6 +32,18 @@ impl PostgresStorage {
         if authority_chain.is_empty() {
             return Err(StorageError::AdmissionMismatch);
         }
+        transaction::retry(|| {
+            self.admit_generation_once(generation, expected_revision, authority_chain)
+        })
+        .await
+    }
+
+    async fn admit_generation_once(
+        &self,
+        generation: &RuntimeGeneration,
+        expected_revision: i64,
+        authority_chain: &[Admitted<Delegation>],
+    ) -> Result<(), StorageError> {
         let mut client = self.client().await?;
         let transaction = client
             .build_transaction()

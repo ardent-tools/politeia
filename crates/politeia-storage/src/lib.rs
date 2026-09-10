@@ -10,6 +10,7 @@ mod completion;
 mod generation;
 mod read;
 mod revocation;
+mod transaction;
 pub use completion::{CanonicalPayload, OperationOutboxMessage};
 pub use read::{PersistedDelegation, StoredPayload, WorkspaceSnapshot};
 
@@ -48,7 +49,6 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../migrations/0004_commissioning_receipts.sql"),
     ),
 ];
-const SERIALIZABLE_ATTEMPTS: usize = 3;
 
 /// The three identities that scope every durable storage operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -523,15 +523,7 @@ impl PostgresStorage {
 
     /// Atomically compare-and-swap the approved model, state, journals, and outbox.
     pub async fn commit(&self, commit: &ScopedCommit) -> Result<CommitReceipt, StorageError> {
-        for attempt in 0..SERIALIZABLE_ATTEMPTS {
-            match self.commit_once(commit, None).await {
-                Err(StorageError::Database(source))
-                    if is_serialization_failure(&source) && attempt + 1 < SERIALIZABLE_ATTEMPTS => {
-                }
-                outcome => return outcome,
-            }
-        }
-        Err(StorageError::SerializationExhausted)
+        transaction::retry(|| self.commit_once(commit, None)).await
     }
 
     /// Commit a delegated change only while its exact root-to-leaf grant chain is live.
@@ -550,15 +542,7 @@ impl PostgresStorage {
         if authority_chain.is_empty() {
             return Err(StorageError::AdmissionMismatch);
         }
-        for attempt in 0..SERIALIZABLE_ATTEMPTS {
-            match self.commit_once(commit, Some(authority_chain)).await {
-                Err(StorageError::Database(source))
-                    if is_serialization_failure(&source) && attempt + 1 < SERIALIZABLE_ATTEMPTS => {
-                }
-                outcome => return outcome,
-            }
-        }
-        Err(StorageError::SerializationExhausted)
+        transaction::retry(|| self.commit_once(commit, Some(authority_chain))).await
     }
 
     /// Persist an anchor-admitted delegation and its exact signed wire envelope.
@@ -587,8 +571,8 @@ impl PostgresStorage {
         let client = self.client().await?;
         let scoped = scope_values(scope);
         let inserted = client.execute(
-            "INSERT INTO delegations (institution_id, workspace_id, delegation_id, delegation_digest, wire_digest, payload, signature, signer_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
-            &[&scoped.institution, &scoped.workspace, &delegation.id.0, &delegation_digest.as_str(), &wire_digest.as_str(), &wire_payload, &wire.signature, &wire.signer.0],
+            "INSERT INTO delegations (institution_id, workspace_id, delegation_id, delegation_digest, wire_digest, payload, signature, signer_id) SELECT $1, $2, $3, $4, $5, $6, $7, $8 WHERE EXISTS (SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $9) ON CONFLICT DO NOTHING",
+            &[&scoped.institution, &scoped.workspace, &delegation.id.0, &delegation_digest.as_str(), &wire_digest.as_str(), &wire_payload, &wire.signature, &wire.signer.0, &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?;
         if inserted == 0 {
             return Err(StorageError::ImmutableConflict);
@@ -710,7 +694,7 @@ impl PostgresStorage {
         &self,
         activation: &ActivationCommit,
     ) -> Result<CommitReceipt, StorageError> {
-        self.activate_generation_once(activation, None).await
+        transaction::retry(|| self.activate_generation_once(activation, None)).await
     }
 
     /// Activate only while every host-admitted authorization chain is still live.
@@ -726,7 +710,7 @@ impl PostgresStorage {
         if authority_chains.is_empty() || authority_chains.iter().any(Vec::is_empty) {
             return Err(StorageError::AdmissionMismatch);
         }
-        self.activate_generation_once(activation, Some(authority_chains))
+        transaction::retry(|| self.activate_generation_once(activation, Some(authority_chains)))
             .await
     }
 
@@ -1111,18 +1095,10 @@ impl PostgresStorage {
         })?;
         let payload = politeia_core::canonical::to_canonical_bytes(&payload)
             .map_err(StorageError::Canonical)?;
-        for attempt in 0..SERIALIZABLE_ATTEMPTS {
-            match self
-                .reserve_runtime_once(scope, request, &requested, &payload, bootstrap)
-                .await
-            {
-                Err(StorageError::Database(source))
-                    if is_serialization_failure(&source) && attempt + 1 < SERIALIZABLE_ATTEMPTS => {
-                }
-                outcome => return outcome,
-            }
-        }
-        Err(StorageError::SerializationExhausted)
+        transaction::retry(|| {
+            self.reserve_runtime_once(scope, request, &requested, &payload, bootstrap)
+        })
+        .await
     }
 
     async fn reserve_runtime_once(
@@ -1236,17 +1212,7 @@ impl PostgresStorage {
     ) -> Result<(), StorageError> {
         // A serialization refusal proves the transaction aborted before claim.
         // Retrying this boundary never invokes or retries an effect port.
-        for attempt in 0..SERIALIZABLE_ATTEMPTS {
-            match self.claim_runtime_once(scope, request, bootstrap).await {
-                Err(StorageError::Database(source))
-                    if is_serialization_failure(&source) && attempt + 1 < SERIALIZABLE_ATTEMPTS =>
-                {
-                    tokio::task::yield_now().await;
-                }
-                outcome => return outcome,
-            }
-        }
-        Err(StorageError::SerializationExhausted)
+        transaction::retry(|| self.claim_runtime_once(scope, request, bootstrap)).await
     }
 
     async fn claim_runtime_once(
@@ -1550,10 +1516,6 @@ fn scope_values(scope: &Scope) -> ScopeValues {
 
 fn parse_digest(value: &str) -> Result<Digest, StorageError> {
     value.parse().map_err(|_| StorageError::ImmutableConflict)
-}
-
-fn is_serialization_failure(error: &tokio_postgres::Error) -> bool {
-    error.code().is_some_and(|code| code.code() == "40001")
 }
 
 #[cfg(test)]
