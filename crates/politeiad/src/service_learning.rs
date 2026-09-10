@@ -214,7 +214,7 @@ impl PoliteiadService {
             self.now().await?,
         )
         .map_err(refusal)?;
-        Ok(self.hydrate_context(&durable, &result)?)
+        self.hydrate_context(&durable, &result)
     }
 
     async fn discover_capabilities(
@@ -319,11 +319,8 @@ impl PoliteiadService {
             }
         }
         let durable = self.durable_snapshot().await?;
-        let feedback = durable_feedback(
-            &self.anchors(),
-            &durable,
-            &admitted.payload().input.feedback,
-        )?;
+        let feedback =
+            durable_feedback(self.anchors(), &durable, &admitted.payload().input.feedback)?;
         if !admitted.payload().input.relations.iter().any(|relation| {
             relation.prior == feedback.payload().input.source
                 || relation.successor == feedback.payload().input.source
@@ -587,7 +584,7 @@ impl PoliteiadService {
                     "learning source provenance is absent from durable admission".to_string(),
                 ));
             }
-            if !source_survives_corrections(&source, &evidence, &corrections)? {
+            if !source_survives_corrections(source, &evidence, &corrections)? {
                 continue;
             }
             if sources
@@ -710,7 +707,6 @@ fn source_survives_corrections(
     .map_err(refusal)?
     {
         Projection::Current { record, .. } => Ok(source.id == record),
-        Projection::Unresolved(_) => Ok(false),
         _ => Ok(false),
     }
 }

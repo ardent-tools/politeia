@@ -246,6 +246,10 @@ impl GenerationArtifactBuilder {
 
     /// Publish a bundle while retaining the inert material needed for durable
     /// commissioning-record recovery.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "publication binds independent trust, provenance, and byte-source boundaries"
+    )]
     pub fn publish_with_provenance(
         &self,
         anchors: &InstitutionTrustAnchors,
@@ -510,6 +514,10 @@ impl VerifiedGenerationArtifact {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "fixtures fail loudly when setup or assertions drift"
+    )]
     use std::{
         collections::{BTreeMap, BTreeSet},
         fs,
@@ -869,10 +877,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::expect_used,
-        reason = "test constructs real admitted commissioning inputs"
-    )]
     fn refuses_a_generation_without_every_required_component_role() {
         let directory = TestDirectory::new();
         let fixture = fixture(false);

@@ -445,6 +445,10 @@ impl PoliteiadService {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "reconstruction keeps separately admitted provenance axes explicit"
+    )]
     async fn commissioning_record(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
@@ -733,6 +737,10 @@ fn refusal(error: impl std::fmt::Display) -> CoordinatorError {
     CoordinatorError::Refused(error.to_string())
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "used directly as a Result::map_err adapter"
+)]
 fn storage_refusal(error: politeia_storage::StorageError) -> CoordinatorError {
     CoordinatorError::Refused(format!("durable authority refused operation: {error}"))
 }

@@ -331,6 +331,10 @@ pub fn current_request(request_id: String, operation: SemanticOperation) -> Loca
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "fixtures fail loudly when setup or assertions drift"
+    )]
     use std::{collections::BTreeSet, fs, future::Future, pin::Pin};
 
     use super::*;

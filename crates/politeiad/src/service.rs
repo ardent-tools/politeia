@@ -102,7 +102,7 @@ pub enum CommissioningRequest {
     /// Persist an interpreter-signed candidate and owner-approved fact.
     ApproveClaim {
         /// Complete candidate claim, signed by its interpreter.
-        candidate: SignedAdmissionWire<CandidateClaimRequest>,
+        candidate: Box<SignedAdmissionWire<CandidateClaimRequest>>,
         /// Owner approval bound to that exact candidate digest.
         approval: SignedAdmissionWire<FactApprovalRequest>,
     },
@@ -703,7 +703,7 @@ impl PoliteiadService {
             CommissioningRequest::ApproveClaim {
                 candidate,
                 approval,
-            } => self.approve_candidate(candidate, approval).await,
+            } => self.approve_candidate(*candidate, approval).await,
             CommissioningRequest::AdmitDelegation { delegation } => {
                 let admitted = self
                     .anchors
@@ -799,16 +799,16 @@ impl EffectPort for InstalledCapturePort {
         &'a self,
         effect: AuthorizedEffect<'a>,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'a {
-        ready(if effect.lease().resources() != &self.resources {
-            Err(CapturePortError(
-                "capture lease resources differ from installed descriptor".to_string(),
-            ))
-        } else {
+        ready(if effect.lease().resources() == &self.resources {
             crate::source::snapshot(crate::source::SourceSnapshotRequest {
                 root: self.root.clone(),
                 members: self.request.manifest.iter().map(PathBuf::from).collect(),
             })
             .map_err(|e| CapturePortError(e.to_string()))
+        } else {
+            Err(CapturePortError(
+                "capture lease resources differ from installed descriptor".to_string(),
+            ))
         })
     }
 }
