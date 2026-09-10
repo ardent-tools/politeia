@@ -43,6 +43,7 @@ use serde_json::{Value, json};
 use crate::{
     CommissioningCoordinator, CoordinatorError, OperationResult, SemanticOperation,
     config::InstallationLayout,
+    service_operation::{CAPTURE_SOURCE_OPERATION, InstalledOperationHandler, OperationSubmission},
 };
 
 /// One configured, single-workspace Politeia service.
@@ -74,6 +75,10 @@ pub struct SourceCaptureSubmission {
     pub observation: SignedAdmissionWire<ObservationRequest>,
     /// Read-only authority required before the adapter reads.
     pub reconnaissance: ReconnaissanceScope,
+    /// Active-generation routing and control material. It is mandatory once a
+    /// runtime generation is active and ignored by the bootstrap-only path.
+    #[serde(default)]
+    pub operation: Option<OperationSubmission>,
 }
 
 /// One typed commissioning request accepted by the service.
@@ -385,68 +390,139 @@ impl PoliteiadService {
             .admit(&boundary, delegation.payload(), observation, now)
             .map_err(refusal)?;
 
-        let bootstrap = self
-            .storage
-            .load_bootstrap(&self.scope)
-            .await
-            .map_err(|error| storage_refusal(&error))?;
-        let resources = bootstrap_capture_resources(request);
-        let operation = bootstrap_reconnaissance_operation(
-            politeia_core::OperationId::new(),
-            delegation.payload().data_classes.clone(),
-        );
-        let policy = BootstrapCapturePolicy {
-            workspace: self.workspace.clone(),
-            captures: captures.clone(),
-            capture: request.id.clone(),
-            delegation: delegation.clone(),
-            scope: submission.reconnaissance.clone(),
-            bootstrap: bootstrap.digest().clone(),
-            now,
-        };
-        let port = InstalledCapturePort {
-            root: self.layout.workspace_dir.clone(),
-            request: request.clone(),
-            resources: resources.clone(),
-            audience: format!("institution:{}", self.workspace.institution.0),
-        };
-        let dispatcher = Dispatcher::new(
-            policy,
-            port,
-            PostgresAuthorizationLedger::for_bootstrap(
-                self.storage.clone(),
-                self.scope.clone(),
-                bootstrap.digest().clone(),
-            ),
-            DispatcherConfig::new(
-                self.workspace.policy_bundle.clone(),
-                self.workspace.policy_digest.clone(),
-                politeia_core::RuntimeGenerationId::from_digest(bootstrap.digest().clone()),
-                format!("bootstrap:{}", bootstrap.digest().as_str()),
-                jiff::SignedDuration::from_mins(5),
-                [delegation.payload().clone()],
-                [operation.clone()],
+        let (lease, snapshot, authority_chain) = if durable.active_generation.is_some() {
+            let operation = submission.operation.clone().ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "active-generation source capture requires signed operational admission"
+                        .to_string(),
+                )
+            })?;
+            let input_digest = capture_operation_input_digest(&submission)?;
+            let admitted = self
+                .admit_operational_submission(&durable, operation)
+                .await?;
+            if admitted.registered().spec.name != CAPTURE_SOURCE_OPERATION
+                || !matches!(
+                    admitted.registered().handler,
+                    InstalledOperationHandler::CaptureAuthorizedSource
+                )
+                || admitted.intent().principal != *capture.signer()
+                || admitted.intent().input_digest != input_digest
+                || admitted
+                    .intent()
+                    .delegation_chain
+                    .last()
+                    .is_none_or(|leaf| leaf.id != delegation.payload().id)
+            {
+                return Err(CoordinatorError::Refused(
+                    "active operation does not bind the signed capture and its registered handler"
+                        .to_string(),
+                ));
+            }
+            if admitted.assignment().adapter != request.adapter {
+                return Err(CoordinatorError::Refused(
+                    "active routing assignment selects a different source adapter".to_string(),
+                ));
+            }
+            let authority_chain = self.admit_durable_delegation_chain(
+                &durable,
+                &admitted.intent().delegation_chain,
+                capture.signer(),
+            )?;
+            let port = InstalledCapturePort {
+                root: self.layout.workspace_dir.clone(),
+                request: request.clone(),
+                resources: admitted.intent().resources.clone(),
+                audience: format!("institution:{}", self.workspace.institution.0),
+            };
+            let dispatcher = admitted.dispatcher(
+                port,
+                PostgresAuthorizationLedger::new(self.storage.clone(), self.scope.clone())
+                    .with_workspace_revision(admitted.admission_revision()),
+            )?;
+            let lease = dispatcher
+                .authorize(admitted.intent())
+                .await
+                .map_err(|error| runtime_refusal(&error))?;
+            let snapshot = dispatcher
+                .execute(&lease)
+                .await
+                .map_err(|error| runtime_refusal(&error))?;
+            (lease, snapshot, authority_chain)
+        } else {
+            let bootstrap = self
+                .storage
+                .load_bootstrap(&self.scope)
+                .await
+                .map_err(|error| storage_refusal(&error))?;
+            let resources = bootstrap_capture_resources(request);
+            let operation = bootstrap_reconnaissance_operation(
+                politeia_core::OperationId::new(),
+                delegation.payload().data_classes.clone(),
+            );
+            let policy = BootstrapCapturePolicy {
+                workspace: self.workspace.clone(),
+                captures: captures.clone(),
+                capture: request.id.clone(),
+                delegation: delegation.clone(),
+                scope: submission.reconnaissance.clone(),
+                bootstrap: bootstrap.digest().clone(),
+                now,
+            };
+            let port = InstalledCapturePort {
+                root: self.layout.workspace_dir.clone(),
+                request: request.clone(),
+                resources: resources.clone(),
+                audience: format!("institution:{}", self.workspace.institution.0),
+            };
+            let dispatcher = Dispatcher::new(
+                policy,
+                port,
+                PostgresAuthorizationLedger::for_bootstrap(
+                    self.storage.clone(),
+                    self.scope.clone(),
+                    bootstrap.digest().clone(),
+                )
+                .with_workspace_revision(durable.revision),
+                DispatcherConfig::new(
+                    self.workspace.policy_bundle.clone(),
+                    self.workspace.policy_digest.clone(),
+                    politeia_core::RuntimeGenerationId::from_digest(bootstrap.digest().clone()),
+                    format!("bootstrap:{}", bootstrap.digest().as_str()),
+                    jiff::SignedDuration::from_mins(5),
+                    [delegation.payload().clone()],
+                    [operation.clone()],
+                )
+                .map_err(|error| runtime_refusal(&error))?,
+            );
+            let intent = OperationIntent {
+                principal: capture.signer().clone(),
+                input_digest: capture_operation_input_digest(&submission)?,
+                delegation_chain: vec![delegation.payload().clone()],
+                operation,
+                resources,
+                budget: delegation.payload().budget.clone(),
+                idempotency_key: None,
+                execution: None,
+            };
+            let lease = dispatcher
+                .authorize(&intent)
+                .await
+                .map_err(|error| runtime_refusal(&error))?;
+            let snapshot = dispatcher
+                .execute(&lease)
+                .await
+                .map_err(|error| runtime_refusal(&error))?;
+            (
+                lease,
+                snapshot,
+                self.admit_durable_delegation_chain(
+                    &durable,
+                    std::slice::from_ref(delegation.payload()),
+                    capture.signer(),
+                )?,
             )
-            .map_err(|error| runtime_refusal(&error))?,
-        );
-        let intent = OperationIntent {
-            principal: capture.signer().clone(),
-            input_digest: Digest::blake3(b"bootstrap-capture-input"),
-            delegation_chain: vec![delegation.payload().clone()],
-            operation,
-            resources,
-            budget: delegation.payload().budget.clone(),
-            idempotency_key: None,
-            execution: None,
         };
-        let lease = dispatcher
-            .authorize(&intent)
-            .await
-            .map_err(|error| runtime_refusal(&error))?;
-        let snapshot = dispatcher
-            .execute(&lease)
-            .await
-            .map_err(|error| runtime_refusal(&error))?;
         if snapshot.manifest_digest != request.content_manifest_digest {
             return Err(CoordinatorError::Refused(
                 "installed source bytes do not match the signed capture content manifest"
@@ -457,11 +533,6 @@ impl PoliteiadService {
         let capture_record = signed_wire_record(&submission.capture)?;
         let evidence_record = signed_wire_record(&submission.evidence)?;
         let observation_record = signed_wire_record(&submission.observation)?;
-        let authority_chain = self.admit_durable_delegation_chain(
-            &durable,
-            std::slice::from_ref(delegation.payload()),
-            capture.signer(),
-        )?;
         let receipt = self
             .storage
             .commit_authorized(
@@ -1151,4 +1222,20 @@ pub(crate) fn signed_wire_record<T: Serialize>(
     })?;
     SignedRecord::from_json(&value, wire.signer.clone(), wire.signature.clone())
         .map_err(|error| storage_refusal(&error))
+}
+
+/// Bind an active-generation operation to exactly the signed capture proof it
+/// will authorize. The operational carrier itself is deliberately excluded to
+/// avoid a self-referential signed-intent digest.
+pub(crate) fn capture_operation_input_digest(
+    submission: &SourceCaptureSubmission,
+) -> Result<politeia_core::Digest, CoordinatorError> {
+    politeia_core::canonical::to_canonical_bytes(&(
+        &submission.capture,
+        &submission.evidence,
+        &submission.observation,
+        &submission.reconnaissance,
+    ))
+    .map(|bytes| politeia_core::Digest::blake3(&bytes))
+    .map_err(refusal)
 }
