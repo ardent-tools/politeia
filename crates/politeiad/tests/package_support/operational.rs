@@ -80,7 +80,6 @@ pub(crate) struct PreparedManifestOperation {
 pub(crate) struct OperationalFixture {
     policy: OperationalPolicyRegistry,
     execution: OperationalExecutionRegistry,
-    detector_rule: PublicDetectorRule,
     capability_evidence: Vec<CapabilityVerificationEvidence>,
     capability_admissions: Vec<serde_json::Value>,
     run_authority: SignedAdmissionWire<Delegation>,
@@ -417,27 +416,12 @@ impl OperationalFixture {
         Self {
             policy,
             execution,
-            detector_rule,
             capability_evidence,
             capability_admissions,
             run_authority,
             activation_authority,
             activation,
         }
-    }
-
-    /// Canonical policy bytes staged under the generation policy role.
-    pub(crate) fn policy_bytes(&self) -> Vec<u8> {
-        self.policy
-            .artifact_bytes()
-            .expect("installed policy remains canonical")
-    }
-
-    /// Canonical execution-registry bytes staged as `component:execution_registry`.
-    pub(crate) fn execution_registry_bytes(&self) -> Vec<u8> {
-        self.execution
-            .artifact_bytes()
-            .expect("installed execution registry remains canonical")
     }
 
     /// Exact registered operation selected by its stable semantic name.

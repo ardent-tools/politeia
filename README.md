@@ -2,9 +2,9 @@
 
 A greenfield, harness-independent institutional control plane for human and machine work.
 
-The product starts from one recurring institutional friction and attaches to the approved systems, workflows, and optional agent harnesses needed to resolve it. It constructs a typed operating model, exposes only authorized operations, binds consequential state transitions to evidence, and improves its own operating projections without granting itself new authority.
+Politeia learns an institution's approved knowledge, systems, and workflows before a particular task needs them. Observations become candidate claims; authenticated owner approval makes them available to authorized context, discovery, and work. Feedback proposes corrections, and approved changes improve those projections without granting the system new authority.
 
-This repository is intentionally a *starter architecture*, not a feature-complete product.
+The product is under active development. Its first commissioning package combines a Rust API, Linux CLI and daemon, PostgreSQL state, and immutable signed generations for two synthetic reference institutions.
 
 ## Product thesis
 
@@ -54,13 +54,13 @@ The first package is a single-tenant Linux daemon backed by PostgreSQL. It uses 
 Build the CLI from source, prepare an empty PostgreSQL database, and set its connection string only in the process environment:
 
 ```sh
-cargo build --release -p politeiad --bin politeia
+cargo build --release -p politeiad --bins
 export POLITEIA_DATABASE_URL='postgres://…/politeia_synthetic'
 ./target/release/politeia initialize /tmp/politeia-synthetic ./host-trust.json
-./target/release/politeia serve /tmp/politeia-synthetic
+./target/release/politeiad serve /tmp/politeia-synthetic
 ```
 
-`host-trust.json` is a serialized `politeiad::config::HostTrustConfiguration`. It contains public verification keys and an owner-signed `WorkspaceBootstrapRequest`; it contains no private signing key. Construct and sign it with the public `politeia-core` Rust APIs used in [`crates/politeiad/tests/slice_composition.rs`](crates/politeiad/tests/slice_composition.rs), then keep the corresponding signing keys in your institution-owned key directory, never in Git or PostgreSQL.
+`host-trust.json` is a serialized `politeiad::config::HostTrustConfiguration`. It contains public verification keys and an owner-signed `WorkspaceBootstrapRequest`; it contains no private signing key. Construct and sign it with the public Rust APIs demonstrated by the [synthetic commissioning fixture](crates/politeiad/tests/package_support/mod.rs), then keep the corresponding signing keys in your institution-owned key directory, never in Git or PostgreSQL. The fixture's deterministic test keys are examples only; an installation supplies its own independently generated keys.
 
 In another terminal, submit an already signed synthetic request document and inspect JSON evidence responses:
 
@@ -75,4 +75,6 @@ The command names are stable; their documents are typed signed wires, not loose 
 
 For a published generation, `{"kind":"generation","request":{"kind":"reproduce","generation":"<digest>"}}` materializes its retained signed inputs in a fresh directory and compares the complete bundle byte for byte. It needs neither the original source working directory nor the original commissioner's private key. The result proves generation materialization; approved executables are inputs to this operation, so it does not claim an independent compiler rebuild.
 
-Run `politeia serve` only after `initialize` succeeds. A normal daemon exit removes its own socket; a restart removes only a proved stale private socket. Refused requests print a JSON refusal and exit nonzero.
+Run `politeiad serve` only after `initialize` succeeds. A normal daemon exit removes its own socket; a restart removes only a proved stale private socket. Refused requests print a JSON refusal and exit nonzero.
+
+The executable acceptance harness constructs the software-development and analytics installations from public Rust APIs and signed JSON documents. Run it and the durable storage checks with `python3 bin/check-postgres.py`; the script uses `POLITEIA_STORAGE_TEST_DATABASE_URL` when supplied, or starts a disposable PostgreSQL container with Docker or Podman. PostgreSQL is required: an absent database is a failed prerequisite, never a passing acceptance result.

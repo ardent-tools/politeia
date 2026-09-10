@@ -11,7 +11,7 @@ use super::{
     require_refusal, run, status_value, submit_commissioning, write_request,
 };
 
-const PLANTED_DENIAL_REASON: &str = "public-resource-boundary violation applies Deny";
+use crate::package_support::operational::PLANTED_DENIAL_REASON;
 
 /// Exercise commissioner handoff only through the installed CLI and daemon.
 ///

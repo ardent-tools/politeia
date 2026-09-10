@@ -16,8 +16,7 @@ use politeia_core::{
 use politeia_evidence::assessment::AssessmentRelation;
 use politeiad::{
     learning::{
-        COMPILE_CONTEXT_ACTION, CONTEXT_READ_EFFECT, CapabilityRequest, ContextRequest,
-        DISCOVER_CAPABILITIES_ACTION, FeedbackRequest, RECORD_FEEDBACK_ACTION,
+        CONTEXT_READ_EFFECT, CapabilityRequest, ContextRequest, FeedbackRequest,
         context_source_resource, context_workspace_resource,
     },
     service_learning::{
@@ -34,8 +33,6 @@ pub(crate) struct ActiveContextDraft {
     request: SignedAdmissionWire<LearningDisclosureIngress<ContextRequest>>,
     input_digest: Digest,
     resources: BTreeSet<String>,
-    /// Exact selected owner-approved source expected in the mediated result.
-    pub(crate) source: EvidenceId,
 }
 
 impl ActiveContextDraft {
@@ -168,7 +165,6 @@ impl ReferenceFixture {
             request,
             input_digest,
             resources,
-            source: source.source.clone(),
         }
     }
 
@@ -328,13 +324,4 @@ pub(crate) fn active_learning_budget() -> ResourceBudget {
 /// Exact context effect used by active context, discovery, and feedback grants.
 pub(crate) fn active_learning_effects() -> BTreeSet<Effect> {
     BTreeSet::from([CONTEXT_READ_EFFECT])
-}
-
-/// Exact active learning actions the caller must attenuate into requester grants.
-pub(crate) fn active_learning_actions() -> BTreeSet<String> {
-    BTreeSet::from([
-        COMPILE_CONTEXT_ACTION.to_owned(),
-        DISCOVER_CAPABILITIES_ACTION.to_owned(),
-        RECORD_FEEDBACK_ACTION.to_owned(),
-    ])
 }
