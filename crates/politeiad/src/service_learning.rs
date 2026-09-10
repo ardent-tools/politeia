@@ -18,7 +18,7 @@ use politeia_core::{
     },
     trust::{AdmissionKind, SignedAdmissionWire},
 };
-use politeia_evidence::assessment::AssessmentRelation;
+use politeia_evidence::assessment::{AssessmentRelation, Projection};
 use politeia_storage::{ScopedCommit, SignedRecord, StateMutation, WorkspaceSnapshot};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,8 @@ pub struct LearningSourceRequest {
 pub struct CorrectionViewRequest {
     /// Subject over which the canonical assessment projection is requested.
     pub subject: Digest,
+    /// Earlier persisted feedback whose inert proposal this relation resolves.
+    pub feedback: CommissioningRecordId,
     /// Exact candidate correction/supersession relations.
     pub relations: Vec<AssessmentRelation>,
 }
@@ -192,6 +194,7 @@ impl PoliteiadService {
             .anchors()
             .admit_expected(AdmissionKind::LearningContext, wire)
             .map_err(refusal)?;
+        require_requester_signer(&admitted)?;
         let delegation = self
             .live_requester(
                 &admitted.payload().requester,
@@ -199,7 +202,9 @@ impl PoliteiadService {
             )
             .await?;
         let durable = self.durable_snapshot().await?;
-        let snapshot = self.learning_snapshot(&durable, &admitted.payload().input.generation)?;
+        let snapshot = self
+            .learning_snapshot(&durable, &admitted.payload().input.generation)
+            .await?;
         let result = crate::learning::compile_context(
             &snapshot,
             &admitted.payload().requester,
@@ -208,7 +213,7 @@ impl PoliteiadService {
             self.now().await?,
         )
         .map_err(refusal)?;
-        Ok(context_result(&result))
+        Ok(self.hydrate_context(&durable, &result)?)
     }
 
     async fn discover_capabilities(
@@ -219,6 +224,7 @@ impl PoliteiadService {
             .anchors()
             .admit_expected(AdmissionKind::LearningDiscovery, wire)
             .map_err(refusal)?;
+        require_requester_signer(&admitted)?;
         let delegation = self
             .live_requester(
                 &admitted.payload().requester,
@@ -226,7 +232,9 @@ impl PoliteiadService {
             )
             .await?;
         let durable = self.durable_snapshot().await?;
-        let snapshot = self.learning_snapshot(&durable, &admitted.payload().input.generation)?;
+        let snapshot = self
+            .learning_snapshot(&durable, &admitted.payload().input.generation)
+            .await?;
         let result = crate::learning::discover_capabilities(
             &snapshot,
             &admitted.payload().requester,
@@ -249,6 +257,7 @@ impl PoliteiadService {
             .anchors()
             .admit_expected(AdmissionKind::LearningFeedback, wire.clone())
             .map_err(refusal)?;
+        require_requester_signer(&admitted)?;
         let delegation = self
             .live_requester(
                 &admitted.payload().requester,
@@ -256,7 +265,9 @@ impl PoliteiadService {
             )
             .await?;
         let durable = self.durable_snapshot().await?;
-        let snapshot = self.learning_snapshot(&durable, &admitted.payload().input.generation)?;
+        let snapshot = self
+            .learning_snapshot(&durable, &admitted.payload().input.generation)
+            .await?;
         let proposal = crate::learning::record_feedback(
             &snapshot,
             &admitted.payload().requester,
@@ -287,8 +298,9 @@ impl PoliteiadService {
     ) -> Result<OperationResult, CoordinatorError> {
         let admitted = self
             .anchors()
-            .admit_expected(AdmissionKind::LearningCorrection, wire)
+            .admit_expected(AdmissionKind::LearningCorrection, wire.clone())
             .map_err(refusal)?;
+        require_requester_signer(&admitted)?;
         let delegation = self
             .live_requester(
                 &admitted.payload().requester,
@@ -306,6 +318,19 @@ impl PoliteiadService {
             }
         }
         let durable = self.durable_snapshot().await?;
+        let feedback = durable_feedback(
+            &self.anchors(),
+            &durable,
+            &admitted.payload().input.feedback,
+        )?;
+        if !admitted.payload().input.relations.iter().any(|relation| {
+            relation.prior == feedback.payload().input.source
+                || relation.successor == feedback.payload().input.source
+        }) {
+            return Err(CoordinatorError::Refused(
+                "correction relation does not resolve the persisted feedback source".to_string(),
+            ));
+        }
         let evidence = durable_evidence(self.anchors(), &durable)?;
         let delegations = durable_delegations(
             self,
@@ -320,9 +345,19 @@ impl PoliteiadService {
             &delegations,
         )
         .map_err(refusal)?;
-        Ok(OperationResult::Coordinated {
-            result: json!(projection),
-            evidence_refs: Vec::new(),
+        self.commit_learning(
+            &durable,
+            "learning_correction",
+            signed_wire_record(&wire)?,
+            format!("learning_correction:{}", admitted.payload().id.0),
+            signed_wire_record(&wire)?,
+        )
+        .await
+        .map(|mut outcome| {
+            if let OperationResult::Coordinated { result, .. } = &mut outcome {
+                *result = json!({"projection": projection, "committed": result});
+            }
+            outcome
         })
     }
 
@@ -385,7 +420,57 @@ impl PoliteiadService {
         })
     }
 
-    fn learning_snapshot(
+    fn hydrate_context(
+        &self,
+        durable: &WorkspaceSnapshot,
+        context: &CompiledContext,
+    ) -> Result<OperationResult, CoordinatorError> {
+        let mut bytes = BTreeMap::new();
+        for item in &context.items {
+            let payload = durable
+                .state
+                .get(&format!("learning_source:{}", item.source.0))
+                .ok_or_else(|| {
+                    CoordinatorError::Refused(
+                        "selected context source is absent from durable state".to_string(),
+                    )
+                })?;
+            let wire: SignedAdmissionWire<LearningSourceRequest> =
+                serde_json::from_slice(&payload.bytes).map_err(|_| {
+                    CoordinatorError::Refused(
+                        "selected context source is not a signed source wire".to_string(),
+                    )
+                })?;
+            let admitted = self
+                .anchors()
+                .admit_expected(AdmissionKind::LearningSource, wire)
+                .map_err(refusal)?;
+            let source = admitted.payload();
+            if admitted.signer() != &self.workspace().owner
+                || source.id != item.source
+                || source.claim != item.content.claim
+                || source.subject != item.content.subject
+                || source.proposition != item.content.proposition
+                || Digest::blake3(&source.content) != source.proposition
+            {
+                return Err(CoordinatorError::Refused(
+                    "selected context content differs from its durable approved reference"
+                        .to_string(),
+                ));
+            }
+            bytes.insert(source.id.clone(), source.content.clone());
+        }
+        Ok(OperationResult::Coordinated {
+            result: json!({"context": context, "content": bytes}),
+            evidence_refs: context
+                .items
+                .iter()
+                .flat_map(|item| item.evidence.iter().map(|id| id.0.to_string()))
+                .collect(),
+        })
+    }
+
+    async fn learning_snapshot(
         &self,
         durable: &WorkspaceSnapshot,
         generation: &politeia_core::RuntimeGenerationId,
@@ -401,12 +486,16 @@ impl PoliteiadService {
             generation: generation.clone(),
             trust_domain: self.workspace().trust_domain.clone(),
             compiler_version: "learning-v1".to_string(),
-            sources: self.learning_sources(durable)?.into_values().collect(),
+            sources: self
+                .learning_sources(durable)
+                .await?
+                .into_values()
+                .collect(),
             capabilities: ActiveCapabilities::default(),
         })
     }
 
-    fn learning_sources(
+    async fn learning_sources(
         &self,
         durable: &WorkspaceSnapshot,
     ) -> Result<BTreeMap<EvidenceId, ContextSource>, CoordinatorError> {
@@ -428,6 +517,7 @@ impl PoliteiadService {
             &candidates,
             durable,
         )?;
+        let corrections = durable_corrections(self, durable).await?;
         let mut sources = BTreeMap::new();
         for (key, payload) in &durable.state {
             if !key.starts_with("learning_source:") {
@@ -490,10 +580,14 @@ impl PoliteiadService {
                     .captures
                     .iter()
                     .any(|id| captures.resolve(id).is_none())
+                || !source.evidence.contains(&source.id)
             {
                 return Err(CoordinatorError::Refused(
                     "learning source provenance is absent from durable admission".to_string(),
                 ));
+            }
+            if !source_survives_corrections(&source, &evidence, &corrections)? {
+                continue;
             }
             if sources
                 .insert(
@@ -520,6 +614,103 @@ impl PoliteiadService {
             }
         }
         Ok(sources)
+    }
+}
+
+struct DurableCorrections {
+    relations: Vec<AssessmentRelation>,
+    delegations: BTreeMap<DelegationId, politeia_core::Delegation>,
+}
+
+async fn durable_corrections(
+    service: &PoliteiadService,
+    durable: &WorkspaceSnapshot,
+) -> Result<DurableCorrections, CoordinatorError> {
+    let mut relations = Vec::new();
+    let mut delegations = BTreeMap::new();
+    for (key, payload) in &durable.state {
+        if !key.starts_with("learning_correction:") {
+            continue;
+        }
+        let wire: SignedAdmissionWire<LearningIngress<CorrectionViewRequest>> =
+            serde_json::from_slice(&payload.bytes).map_err(|_| {
+                CoordinatorError::Refused(
+                    "durable correction is not a signed correction request".to_string(),
+                )
+            })?;
+        let admitted = service
+            .anchors()
+            .admit_expected(AdmissionKind::LearningCorrection, wire)
+            .map_err(refusal)?;
+        require_requester_signer(&admitted)?;
+        let feedback = durable_feedback(
+            service.anchors(),
+            durable,
+            &admitted.payload().input.feedback,
+        )?;
+        if !admitted.payload().input.relations.iter().any(|relation| {
+            relation.prior == feedback.payload().input.source
+                || relation.successor == feedback.payload().input.source
+        }) {
+            return Err(CoordinatorError::Refused(
+                "durable correction does not resolve its persisted feedback source".to_string(),
+            ));
+        }
+        let delegation = service
+            .admit_live_delegation(
+                &admitted.payload().delegation,
+                &admitted.payload().requester,
+            )
+            .await?;
+        for relation in &admitted.payload().input.relations {
+            if relation.authority != admitted.payload().requester
+                || relation.authority_delegation != admitted.payload().delegation
+                || relation.authority_delegation != delegation.payload().id
+            {
+                return Err(CoordinatorError::Refused(
+                    "durable correction relation differs from its signed live authority"
+                        .to_string(),
+                ));
+            }
+            relations.push(relation.clone());
+        }
+        delegations.insert(delegation.payload().id.clone(), delegation.into_payload());
+    }
+    Ok(DurableCorrections {
+        relations,
+        delegations,
+    })
+}
+
+fn source_survives_corrections(
+    source: &LearningSourceRequest,
+    evidence: &TrustedEvidenceRegistry,
+    corrections: &DurableCorrections,
+) -> Result<bool, CoordinatorError> {
+    let relevant: Vec<AssessmentRelation> = corrections
+        .relations
+        .iter()
+        .filter(|relation| {
+            evidence
+                .resolve(&relation.prior)
+                .is_some_and(|record| record.subject == source.subject)
+        })
+        .cloned()
+        .collect();
+    if relevant.is_empty() {
+        return Ok(true);
+    }
+    match crate::learning::correction_view(
+        &source.subject,
+        evidence,
+        &relevant,
+        &corrections.delegations,
+    )
+    .map_err(refusal)?
+    {
+        Projection::Current { record, .. } => Ok(source.id == record),
+        Projection::Unresolved(_) => Ok(false),
+        _ => Ok(false),
     }
 }
 
@@ -571,6 +762,7 @@ fn validate_new_source(
             .captures
             .iter()
             .any(|id| captures.resolve(id).is_none())
+        || !source.evidence.contains(&source.id)
     {
         return Err(CoordinatorError::Refused(
             "learning source does not resolve exact durable approved provenance".to_string(),
@@ -579,11 +771,44 @@ fn validate_new_source(
     Ok(())
 }
 
-fn context_result(result: &CompiledContext) -> OperationResult {
-    OperationResult::Coordinated {
-        result: json!(result),
-        evidence_refs: Vec::new(),
+fn durable_feedback(
+    anchors: &politeia_core::trust::InstitutionTrustAnchors,
+    durable: &WorkspaceSnapshot,
+    id: &CommissioningRecordId,
+) -> Result<politeia_core::trust::Admitted<LearningIngress<FeedbackRequest>>, CoordinatorError> {
+    let payload = durable
+        .state
+        .get(&format!("learning_feedback:{}", id.0))
+        .ok_or_else(|| {
+            CoordinatorError::Refused("correction feedback is not durably admitted".to_string())
+        })?;
+    let wire: SignedAdmissionWire<LearningIngress<FeedbackRequest>> =
+        serde_json::from_slice(&payload.bytes).map_err(|_| {
+            CoordinatorError::Refused(
+                "durable feedback is not a signed feedback request".to_string(),
+            )
+        })?;
+    let admitted = anchors
+        .admit_expected(AdmissionKind::LearningFeedback, wire)
+        .map_err(refusal)?;
+    require_requester_signer(&admitted)?;
+    if admitted.payload().id != *id {
+        return Err(CoordinatorError::Refused(
+            "durable feedback identity differs from its signed request".to_string(),
+        ));
     }
+    Ok(admitted)
+}
+
+fn require_requester_signer<T>(
+    admitted: &politeia_core::trust::Admitted<LearningIngress<T>>,
+) -> Result<(), CoordinatorError> {
+    if admitted.signer() != &admitted.payload().requester {
+        return Err(CoordinatorError::Refused(
+            "learning requester differs from the verified envelope signer".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn durable_evidence(
@@ -592,15 +817,26 @@ fn durable_evidence(
 ) -> Result<TrustedEvidenceRegistry, CoordinatorError> {
     let mut wires = Vec::new();
     for record in durable.evidence.values() {
-        let wire: SignedAdmissionWire<EvidenceRequest> = serde_json::from_slice(record.payload())
+        let envelope: SignedAdmissionWire<Value> = serde_json::from_slice(record.payload())
             .map_err(|_| {
-            CoordinatorError::Refused("durable evidence is not a signed evidence wire".to_string())
-        })?;
-        if wire.signer != *record.signer() || wire.signature != record.signature() {
+                CoordinatorError::Refused(
+                    "durable evidence journal entry is not a signed envelope".to_string(),
+                )
+            })?;
+        if envelope.signer != *record.signer() || envelope.signature != record.signature() {
             return Err(CoordinatorError::Refused(
                 "durable evidence record and wire binding differ".to_string(),
             ));
         }
+        if envelope.kind != AdmissionKind::Evidence {
+            continue;
+        }
+        let wire: SignedAdmissionWire<EvidenceRequest> = serde_json::from_slice(record.payload())
+            .map_err(|_| {
+            CoordinatorError::Refused(
+                "durable evidence wire has the wrong payload type".to_string(),
+            )
+        })?;
         wires.push(wire);
     }
     TrustedEvidenceRegistry::admit_signed(anchors, wires).map_err(refusal)
