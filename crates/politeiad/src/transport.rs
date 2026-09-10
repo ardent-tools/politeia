@@ -69,6 +69,8 @@ pub enum TransportError {
     RequestTooLarge,
     /// The socket directory permits a different local user to reach the endpoint.
     InsecureSocketDirectory,
+    /// The connecting Unix peer is not the daemon's local user.
+    UntrustedPeer,
     /// The request was not valid JSON for the typed envelope.
     InvalidRequest(String),
     /// Caller and server do not speak the same semantic protocol major version.
@@ -86,6 +88,9 @@ impl std::fmt::Display for TransportError {
             }
             Self::InsecureSocketDirectory => {
                 formatter.write_str("local socket parent must not grant group or other access")
+            }
+            Self::UntrustedPeer => {
+                formatter.write_str("local socket peer does not match the daemon user")
             }
             Self::InvalidRequest(error) => write!(formatter, "local request is invalid: {error}"),
             Self::IncompatibleProtocol => {
@@ -198,15 +203,18 @@ pub async fn serve_once(
     coordinator: &dyn CommissioningCoordinator,
 ) -> Result<(), TransportError> {
     let (mut stream, _) = listener.accept().await?;
-    let response = match read_request(&mut stream).await {
-        Ok(request) => {
-            let request_id = request.request_id.clone();
-            match handle(coordinator, request).await {
-                Ok(response) => response,
-                Err(error) => error_response(request_id, &error),
-            }
-        }
+    let response = match peer_is_daemon_user(&stream) {
         Err(error) => error_response(String::new(), &error),
+        Ok(()) => match read_request(&mut stream).await {
+            Ok(request) => {
+                let request_id = request.request_id.clone();
+                match handle(coordinator, request).await {
+                    Ok(response) => response,
+                    Err(error) => error_response(request_id, &error),
+                }
+            }
+            Err(error) => error_response(String::new(), &error),
+        },
     };
     let bytes = serde_json::to_vec(&response)
         .map_err(|error| TransportError::Encoding(error.to_string()))?;
@@ -230,6 +238,17 @@ pub async fn request(
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).await?;
     serde_json::from_str(&line).map_err(|error| TransportError::InvalidRequest(error.to_string()))
+}
+
+/// Require that a local peer belongs to the daemon's Unix user before it may
+/// supply a semantic frame. Signed request admission still establishes the
+/// institutional principal; peer credentials only enforce the local host edge.
+fn peer_is_daemon_user(stream: &UnixStream) -> Result<(), TransportError> {
+    let daemon_uid = std::fs::metadata("/proc/self")?.uid();
+    if stream.peer_cred()?.uid() != daemon_uid {
+        return Err(TransportError::UntrustedPeer);
+    }
+    Ok(())
 }
 
 async fn read_request(stream: &mut UnixStream) -> Result<LocalRequest, TransportError> {
@@ -285,6 +304,7 @@ fn error_response(request_id: String, error: &TransportError) -> LocalResponse {
     let code = match error {
         TransportError::RequestTooLarge => "request_too_large",
         TransportError::InsecureSocketDirectory => "insecure_socket_directory",
+        TransportError::UntrustedPeer => "untrusted_peer",
         TransportError::InvalidRequest(_) => "invalid_request",
         TransportError::IncompatibleProtocol => "incompatible_protocol",
         TransportError::Encoding(_) => "response_encoding_failed",
