@@ -9,7 +9,7 @@
 use std::{
     collections::BTreeSet,
     error::Error,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -25,6 +25,7 @@ use politeiad::service_operation::{OperationSubmission, RESOURCE_MANIFEST_OPERAT
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
+use super::evidence;
 use super::{
     Daemon, OperationalFixture, ReferenceFixture, TestResult, await_status, command,
     require_coordinated, require_refusal, run, serve, stop, submit_commissioning, write_request,
@@ -224,34 +225,42 @@ fn spawn_operate(
     fixture: &ReferenceFixture,
     request: &Path,
 ) -> TestResult<RunningChild> {
-    let mut command = command(
-        database_url,
-        &[
-            Path::new("operate"),
-            &fixture.prefix().join("run/politeiad.sock"),
-            request,
-        ],
-    );
+    let arguments = vec![
+        PathBuf::from("operate"),
+        fixture.prefix().join("run/politeiad.sock"),
+        request.to_path_buf(),
+    ];
+    let argument_refs: Vec<_> = arguments.iter().map(PathBuf::as_path).collect();
+    let mut command = command(database_url, &argument_refs);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    Ok(RunningChild(Some(command.spawn()?)))
+    Ok(RunningChild {
+        child: Some(command.spawn()?),
+        arguments,
+    })
 }
 
 /// A CLI child that is killed and reaped when an assertion returns early.
-struct RunningChild(Option<Child>);
+struct RunningChild {
+    child: Option<Child>,
+    arguments: Vec<PathBuf>,
+}
 
 impl RunningChild {
     fn wait_with_output(mut self) -> TestResult<Output> {
         let child = self
-            .0
+            .child
             .take()
             .ok_or("operation child was already consumed")?;
-        Ok(child.wait_with_output()?)
+        let output = child.wait_with_output()?;
+        let arguments: Vec<_> = self.arguments.iter().map(PathBuf::as_path).collect();
+        evidence::record_process(&arguments, &output)?;
+        Ok(output)
     }
 }
 
 impl Drop for RunningChild {
     fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -335,67 +344,80 @@ pub(crate) fn observe_completed_disclosure(
     fixture: &ReferenceFixture,
     completion: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn Error + Send + Sync>> {
-    let completion = completion.get("completion").unwrap_or(completion);
+    with_admin(database_url, |runtime, client| {
+        observe_completed_attempt(
+            runtime,
+            client,
+            fixture.host_trust.workspace.institution.0,
+            fixture.host_trust.workspace.id.0,
+            completion.get("completion").unwrap_or(completion),
+        )
+    })
+}
+
+fn observe_completed_attempt(
+    runtime: &tokio::runtime::Runtime,
+    client: &Client,
+    institution: Uuid,
+    workspace: Uuid,
+    completion: &serde_json::Value,
+) -> TestResult<serde_json::Value> {
     assert_completion_ids(completion)?;
     let reservation = Uuid::parse_str(
         completion["reservation"]
             .as_str()
-            .ok_or("disclosure completion omitted its reservation")?,
+            .ok_or("completion omitted its reservation")?,
     )?;
     let generation: Digest = serde_json::from_value(completion["generation"].clone())?;
     let receipt_digest: Digest = serde_json::from_value(completion["receipt_digest"].clone())?;
     let outbox = Uuid::parse_str(
         completion["outbox"]
             .as_str()
-            .ok_or("disclosure completion omitted its outbox")?,
+            .ok_or("completion omitted its outbox")?,
     )?;
-    with_admin(database_url, |runtime, client| {
-        let institution = fixture.host_trust.workspace.institution.0;
-        let workspace = fixture.host_trust.workspace.id.0;
-        let row = runtime.block_on(client.query_one(
-            "SELECT status::text, receipt_digest, receipt_payload
-             FROM operation_attempts
-             WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3",
-            &[&institution, &workspace, &reservation],
-        ))?;
-        assert_eq!(row.get::<_, String>(0), "completed");
-        let stored_digest: String = row.get(1);
-        let stored_payload: Vec<u8> = row.get(2);
-        assert_eq!(stored_digest, receipt_digest.as_str());
-        assert_eq!(Digest::blake3(&stored_payload), receipt_digest);
-        let receipt: serde_json::Value = serde_json::from_slice(&stored_payload)?;
-        assert_eq!(
-            receipt["generation"],
-            serde_json::json!(generation.clone()),
-            "durable disclosure receipt binds the returned active generation"
-        );
-        assert_eq!(
-            receipt["reservation"],
-            serde_json::json!(reservation),
-            "durable disclosure receipt binds the returned reservation"
-        );
-        assert_eq!(to_canonical_bytes(&receipt)?, stored_payload);
-        let outbox_row = runtime.block_on(client.query_one(
-            "SELECT payload_digest, payload FROM transactional_outbox
-             WHERE institution_id = $1 AND workspace_id = $2 AND outbox_id = $3",
-            &[&institution, &workspace, &outbox],
-        ))?;
-        let outbox_digest: String = outbox_row.get(0);
-        let outbox_payload: Vec<u8> = outbox_row.get(1);
-        assert_eq!(outbox_digest, receipt_digest.as_str());
-        assert_eq!(outbox_payload, stored_payload);
-        Ok(serde_json::json!({
-            "institution": institution,
-            "workspace": workspace,
-            "status": "completed",
-            "generation": generation,
-            "reservation": reservation,
-            "receipt_digest": receipt_digest,
-            "receipt": receipt,
-            "outbox": outbox,
-            "outbox_digest": outbox_digest,
-        }))
-    })
+    let row = runtime.block_on(client.query_one(
+        "SELECT status::text, receipt_digest, receipt_payload
+         FROM operation_attempts
+         WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3",
+        &[&institution, &workspace, &reservation],
+    ))?;
+    assert_eq!(row.get::<_, String>(0), "completed");
+    let stored_digest: String = row.get(1);
+    let stored_payload: Vec<u8> = row.get(2);
+    assert_eq!(stored_digest, receipt_digest.as_str());
+    assert_eq!(Digest::blake3(&stored_payload), receipt_digest);
+    let receipt: serde_json::Value = serde_json::from_slice(&stored_payload)?;
+    assert_eq!(
+        receipt["generation"],
+        serde_json::json!(generation.clone()),
+        "durable receipt binds the returned active generation"
+    );
+    assert_eq!(
+        receipt["reservation"],
+        serde_json::json!(reservation),
+        "durable receipt binds the returned reservation"
+    );
+    assert_eq!(to_canonical_bytes(&receipt)?, stored_payload);
+    let outbox_row = runtime.block_on(client.query_one(
+        "SELECT payload_digest, payload FROM transactional_outbox
+         WHERE institution_id = $1 AND workspace_id = $2 AND outbox_id = $3",
+        &[&institution, &workspace, &outbox],
+    ))?;
+    let outbox_digest: String = outbox_row.get(0);
+    let outbox_payload: Vec<u8> = outbox_row.get(1);
+    assert_eq!(outbox_digest, receipt_digest.as_str());
+    assert_eq!(outbox_payload, stored_payload);
+    Ok(serde_json::json!({
+        "institution": institution,
+        "workspace": workspace,
+        "status": "completed",
+        "generation": generation,
+        "reservation": reservation,
+        "receipt_digest": receipt_digest,
+        "receipt": receipt,
+        "outbox": outbox,
+        "outbox_digest": outbox_digest,
+    }))
 }
 
 /// Read one scoped signed-state record without using an application service.
@@ -421,6 +443,68 @@ pub(crate) fn observe_signed_state(
             "key": key,
             "digest": digest,
             "bytes": bytes,
+        }))
+    })
+}
+
+/// Read the durable handoff receipt without using an application service.
+///
+/// The daemon response is evidence of the accepted handoff; this reader proves
+/// that exact canonical receipt was atomically retained for the scoped runtime
+/// generation.
+pub(crate) fn observe_handoff_receipt(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    handoff_response: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn Error + Send + Sync>> {
+    let generation: Digest = serde_json::from_value(handoff_response["generation"].clone())?;
+    let continuity_reservation = Uuid::parse_str(
+        handoff_response["continuity_reservation"]
+            .as_str()
+            .ok_or("handoff response omitted its continuity reservation")?,
+    )?;
+    let continuity_receipt_digest: Digest =
+        serde_json::from_value(handoff_response["continuity_receipt_digest"].clone())?;
+    let handoff_receipt_digest: Digest =
+        serde_json::from_value(handoff_response["handoff_receipt_digest"].clone())?;
+    let returned_handoff = handoff_response
+        .get("handoff")
+        .cloned()
+        .ok_or("handoff response omitted its receipt")?;
+
+    with_admin(database_url, |runtime, client| {
+        let institution = fixture.host_trust.workspace.institution.0;
+        let workspace = fixture.host_trust.workspace.id.0;
+        let row = runtime.block_on(client.query_one(
+            "SELECT generation_digest, continuity_reservation_id, continuity_receipt_digest,
+                    handoff_receipt_digest, payload
+             FROM handoff_receipts
+             WHERE institution_id = $1 AND workspace_id = $2 AND generation_digest = $3",
+            &[&institution, &workspace, &generation.as_str()],
+        ))?;
+        let stored_generation: String = row.get(0);
+        let stored_reservation: Uuid = row.get(1);
+        let stored_continuity_digest: String = row.get(2);
+        let stored_handoff_digest: String = row.get(3);
+        let stored_payload: Vec<u8> = row.get(4);
+
+        assert_eq!(stored_generation, generation.as_str());
+        assert_eq!(stored_reservation, continuity_reservation);
+        assert_eq!(stored_continuity_digest, continuity_receipt_digest.as_str());
+        assert_eq!(stored_handoff_digest, handoff_receipt_digest.as_str());
+        assert_eq!(Digest::blake3(&stored_payload), handoff_receipt_digest);
+        let stored_handoff: serde_json::Value = serde_json::from_slice(&stored_payload)?;
+        assert_eq!(stored_handoff, returned_handoff);
+        assert_eq!(to_canonical_bytes(&stored_handoff)?, stored_payload);
+
+        Ok(serde_json::json!({
+            "institution": institution,
+            "workspace": workspace,
+            "generation": generation,
+            "continuity_reservation": continuity_reservation,
+            "continuity_receipt_digest": continuity_receipt_digest,
+            "handoff_receipt_digest": handoff_receipt_digest,
+            "handoff": stored_handoff,
         }))
     })
 }
@@ -499,7 +583,7 @@ impl CompletionBarrier {
 
     fn install_schema(&self) -> TestResult {
         self.runtime.block_on(self.client.batch_execute(&format!(
-            r#"
+            r"
 CREATE TABLE IF NOT EXISTS {BARRIER_TABLE} (
     institution_id UUID NOT NULL,
     workspace_id UUID NOT NULL,
@@ -525,7 +609,7 @@ DROP TRIGGER IF EXISTS {BARRIER_TRIGGER} ON operation_attempts;
 CREATE TRIGGER {BARRIER_TRIGGER}
     BEFORE UPDATE OF status ON operation_attempts
     FOR EACH ROW EXECUTE FUNCTION {BARRIER_FUNCTION}();
-"#
+"
         )))?;
         Ok(())
     }
@@ -598,9 +682,9 @@ CREATE TRIGGER {BARRIER_TRIGGER}
     }
 
     fn waiting_backend_at_barrier(&self) -> TestResult<Option<i32>> {
-        let key = self.lock_key as u64;
-        let class_id = (key >> 32) as u32;
-        let object_id = key as u32;
+        let bytes = self.lock_key.to_be_bytes();
+        let class_id = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let object_id = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         let rows = self.runtime.block_on(self.client.query(
             "SELECT pid FROM pg_locks
                  WHERE locktype = 'advisory'
@@ -657,59 +741,18 @@ CREATE TRIGGER {BARRIER_TRIGGER}
         reservation: &Uuid,
         completion: &serde_json::Value,
     ) -> TestResult<serde_json::Value> {
-        let row = self.runtime.block_on(self.client.query_one(
-            "SELECT status::text, receipt_digest IS NOT NULL, receipt_payload IS NOT NULL, completed_at IS NOT NULL
-             FROM operation_attempts
-             WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3",
-            &[&self.institution, &self.workspace, reservation],
-        ))?;
-        assert_eq!(row.get::<_, String>(0), "completed");
-        assert!(row.get::<_, bool>(1));
-        assert!(row.get::<_, bool>(2));
-        assert!(row.get::<_, bool>(3));
-        let receipt_digest: String = self
-            .runtime
-            .block_on(self.client.query_one(
-                "SELECT receipt_digest FROM operation_attempts
-             WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3",
-                &[&self.institution, &self.workspace, reservation],
-            ))?
-            .get(0);
-        let outbox = completion["outbox"]
-            .as_str()
-            .ok_or("completed operation omitted its outbox identifier")?;
-        let outbox = Uuid::parse_str(outbox)?;
-        let outbox_persisted: bool = self
-            .runtime
-            .block_on(self.client.query_one(
-                "SELECT EXISTS (
-                SELECT FROM transactional_outbox
-                 WHERE institution_id = $1 AND workspace_id = $2 AND outbox_id = $3
-            )",
-                &[&self.institution, &self.workspace, &outbox],
-            ))?
-            .get(0);
-        assert!(
-            outbox_persisted,
-            "completed operation committed its returned outbox row"
-        );
         assert_eq!(
             completion["reservation"],
             serde_json::json!(reservation),
             "completed operation returned the exact reservation observed at the barrier"
         );
-        assert_eq!(
-            completion["receipt_digest"],
-            serde_json::json!(receipt_digest),
-            "completed operation returned the durable canonical receipt digest"
-        );
-        Ok(serde_json::json!({
-            "reservation": reservation,
-            "receipt": completion["receipt"],
-            "receipt_digest": receipt_digest,
-            "outbox": outbox,
-            "outbox_persisted": outbox_persisted,
-        }))
+        observe_completed_attempt(
+            &self.runtime,
+            &self.client,
+            self.institution,
+            self.workspace,
+            completion,
+        )
     }
 
     fn release(&mut self) -> TestResult {
