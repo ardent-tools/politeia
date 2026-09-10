@@ -67,6 +67,7 @@ CREATE TABLE delegations (
     workspace_id UUID NOT NULL,
     delegation_id UUID NOT NULL,
     delegation_digest TEXT NOT NULL,
+    wire_digest TEXT NOT NULL,
     payload BYTEA NOT NULL,
     signature BYTEA NOT NULL,
     signer_id UUID NOT NULL,
@@ -75,7 +76,8 @@ CREATE TABLE delegations (
     FOREIGN KEY (institution_id, workspace_id)
         REFERENCES institution_workspaces (institution_id, workspace_id),
     UNIQUE (institution_id, workspace_id, delegation_digest),
-    CHECK (octet_length(delegation_digest) = 64)
+    CHECK (octet_length(delegation_digest) = 64),
+    CHECK (octet_length(wire_digest) = 64)
 );
 
 CREATE TABLE delegation_revocations (

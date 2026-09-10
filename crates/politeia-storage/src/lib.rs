@@ -12,8 +12,11 @@ use politeia_runtime::{AuthorizationLedger, ReservationRequest, RuntimeError};
 use jiff::Timestamp;
 
 use politeia_core::{
-    BudgetReservationId, DelegationId, Digest, EvidenceId, InstitutionId, InstitutionWorkspaceId,
-    PrincipalId, ResourceBudget, institution::TrustDomainId,
+    BudgetReservationId, Delegation, DelegationId, Digest, EvidenceId, InstitutionId,
+    InstitutionWorkspaceId, PrincipalId, ResourceBudget,
+    canonical::to_canonical_bytes,
+    institution::TrustDomainId,
+    trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use serde_json::Value;
 use tokio_postgres::{Client, Config, IsolationLevel, NoTls};
@@ -222,6 +225,25 @@ pub struct RuntimeGeneration {
     pub manifest: SignedRecord,
 }
 
+/// One compare-and-swap activation transition for an admitted generation.
+#[derive(Clone, Debug)]
+pub struct ActivationCommit {
+    /// Scope whose active generation changes.
+    pub scope: Scope,
+    /// Workspace revision observed before activation.
+    pub expected_revision: i64,
+    /// Active generation observed before activation, including an explicit empty state.
+    pub expected_active: Option<Digest>,
+    /// Already-admitted generation to make active.
+    pub generation: Digest,
+    /// Immutable transition record that binds the activation.
+    pub transition: SignedRecord,
+    /// Evidence admitted with activation.
+    pub evidence: Vec<EvidenceAdmission>,
+    /// External messages committed with activation.
+    pub outbox: Vec<OutboxMessage>,
+}
+
 /// One durable operation reservation before an effect port can run.
 #[derive(Clone, Debug)]
 pub struct AttemptReservation {
@@ -294,6 +316,8 @@ pub enum StorageError {
         /// Digest computed from supplied bytes.
         actual: Digest,
     },
+    /// A signed wire envelope did not match the anchor-admitted semantic value.
+    AdmissionMismatch,
     /// A compare-and-swap observed a different workspace revision.
     RevisionConflict,
     /// A required scoped record is absent.
@@ -317,6 +341,9 @@ impl std::fmt::Display for StorageError {
                 expected.as_str(),
                 actual.as_str()
             ),
+            Self::AdmissionMismatch => {
+                formatter.write_str("signed admission does not match its admitted value")
+            }
             Self::RevisionConflict => {
                 formatter.write_str("workspace revision changed concurrently")
             }
@@ -340,6 +367,7 @@ impl std::error::Error for StorageError {
             Self::Database(source) => Some(source),
             Self::Canonical(source) => Some(source),
             Self::DigestMismatch { .. }
+            | Self::AdmissionMismatch
             | Self::RevisionConflict
             | Self::NotFound
             | Self::ImmutableConflict
@@ -448,18 +476,34 @@ impl PostgresStorage {
         Err(StorageError::SerializationExhausted)
     }
 
-    /// Admit an immutable delegation after host validation.
+    /// Persist an anchor-admitted delegation and its exact signed wire envelope.
     pub async fn admit_delegation(
         &self,
         scope: &Scope,
-        delegation: DelegationId,
-        record: &SignedRecord,
+        admitted: &Admitted<Delegation>,
+        wire: &SignedAdmissionWire<Delegation>,
     ) -> Result<(), StorageError> {
+        if admitted.kind() != AdmissionKind::Delegation
+            || admitted.institution() != scope.institution()
+            || admitted.workspace() != scope.workspace()
+            || wire.institution != *scope.institution()
+            || wire.workspace != *scope.workspace()
+            || wire.signer != *admitted.signer()
+            || to_canonical_bytes(&wire.payload).map_err(StorageError::Canonical)?
+                != to_canonical_bytes(admitted.payload()).map_err(StorageError::Canonical)?
+        {
+            return Err(StorageError::AdmissionMismatch);
+        }
+        let delegation = admitted.payload();
+        let delegation_payload = to_canonical_bytes(delegation).map_err(StorageError::Canonical)?;
+        let delegation_digest = Digest::blake3(&delegation_payload);
+        let wire_payload = to_canonical_bytes(wire).map_err(StorageError::Canonical)?;
+        let wire_digest = Digest::blake3(&wire_payload);
         let client = self.client().await?;
         let scoped = scope_values(scope);
         let inserted = client.execute(
-            "INSERT INTO delegations (institution_id, workspace_id, delegation_id, delegation_digest, payload, signature, signer_id) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
-            &[&scoped.institution, &scoped.workspace, &delegation.0, &record.digest().as_str(), &record.payload(), &record.signature(), &record.signer().0],
+            "INSERT INTO delegations (institution_id, workspace_id, delegation_id, delegation_digest, wire_digest, payload, signature, signer_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
+            &[&scoped.institution, &scoped.workspace, &delegation.id.0, &delegation_digest.as_str(), &wire_digest.as_str(), &wire_payload, &wire.signature, &wire.signer.0],
         ).await.map_err(StorageError::Database)?;
         if inserted == 0 {
             return Err(StorageError::ImmutableConflict);
@@ -475,15 +519,29 @@ impl PostgresStorage {
         revocation_digest: &Digest,
         evidence: &EvidenceId,
     ) -> Result<(), StorageError> {
-        let client = self.client().await?;
+        let mut client = self.client().await?;
+        let transaction = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
+            .await
+            .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
-        let inserted = client.execute(
+        let admitted = transaction.query_opt(
+            "SELECT 1 FROM delegations WHERE institution_id = $1 AND workspace_id = $2 AND delegation_id = $3 FOR UPDATE",
+            &[&scoped.institution, &scoped.workspace, &delegation.0],
+        ).await.map_err(StorageError::Database)?;
+        if admitted.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        let inserted = transaction.execute(
             "INSERT INTO delegation_revocations (institution_id, workspace_id, delegation_id, revocation_digest, evidence_record_id) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
             &[&scoped.institution, &scoped.workspace, &delegation.0, &revocation_digest.as_str(), &evidence.0],
         ).await.map_err(StorageError::Database)?;
         if inserted == 0 {
             return Err(StorageError::ImmutableConflict);
         }
+        transaction.commit().await.map_err(StorageError::Database)?;
         Ok(())
     }
 
@@ -504,12 +562,11 @@ impl PostgresStorage {
         Ok(())
     }
 
-    /// Atomically select one already-admitted generation as active for its workspace.
+    /// Atomically compare-and-swap the active generation and append its evidence-bearing transition.
     pub async fn activate_generation(
         &self,
-        scope: &Scope,
-        generation: &Digest,
-    ) -> Result<(), StorageError> {
+        activation: &ActivationCommit,
+    ) -> Result<CommitReceipt, StorageError> {
         let mut client = self.client().await?;
         let transaction = client
             .build_transaction()
@@ -517,23 +574,51 @@ impl PostgresStorage {
             .start()
             .await
             .map_err(StorageError::Database)?;
-        let scoped = scope_values(scope);
+        let scoped = scope_values(&activation.scope);
         let generation_exists = transaction.query_opt(
             "SELECT 1 FROM runtime_generations WHERE institution_id = $1 AND workspace_id = $2 AND generation_digest = $3 FOR KEY SHARE",
-            &[&scoped.institution, &scoped.workspace, &generation.as_str()],
+            &[&scoped.institution, &scoped.workspace, &activation.generation.as_str()],
         ).await.map_err(StorageError::Database)?;
         if generation_exists.is_none() {
             return Err(StorageError::NotFound);
         }
+        let next_revision = activation
+            .expected_revision
+            .checked_add(1)
+            .ok_or(StorageError::RevisionConflict)?;
+        let expected_active = activation.expected_active.as_ref().map(Digest::as_str);
         let updated = transaction.execute(
-            "UPDATE institution_workspaces SET active_generation_digest = $3, updated_at = CURRENT_TIMESTAMP WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $4",
-            &[&scoped.institution, &scoped.workspace, &generation.as_str(), &scoped.trust_domain],
+            "UPDATE institution_workspaces SET active_generation_digest = $4, revision = $5, updated_at = CURRENT_TIMESTAMP WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $3 AND revision = $6 AND active_generation_digest IS NOT DISTINCT FROM $7",
+            &[&scoped.institution, &scoped.workspace, &scoped.trust_domain, &activation.generation.as_str(), &next_revision, &activation.expected_revision, &expected_active],
         ).await.map_err(StorageError::Database)?;
         if updated != 1 {
-            return Err(StorageError::NotFound);
+            return Err(StorageError::RevisionConflict);
+        }
+        let previous = transaction.query_opt(
+            "SELECT transition_digest FROM transition_journal WHERE institution_id = $1 AND workspace_id = $2 ORDER BY sequence DESC LIMIT 1 FOR KEY SHARE",
+            &[&scoped.institution, &scoped.workspace],
+        ).await.map_err(StorageError::Database)?.map(|row| row.get::<_, String>(0));
+        transaction.execute(
+            "INSERT INTO transition_journal (institution_id, workspace_id, transition_digest, previous_digest, payload) VALUES ($1, $2, $3, $4, $5)",
+            &[&scoped.institution, &scoped.workspace, &activation.transition.digest().as_str(), &previous, &activation.transition.payload()],
+        ).await.map_err(StorageError::Database)?;
+        for evidence in &activation.evidence {
+            transaction.execute(
+                "INSERT INTO evidence_journal (institution_id, workspace_id, evidence_id, evidence_digest, payload, signature, signer_id) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[&scoped.institution, &scoped.workspace, &evidence.id.0, &evidence.record.digest().as_str(), &evidence.record.payload(), &evidence.record.signature(), &evidence.record.signer().0],
+            ).await.map_err(StorageError::Database)?;
+        }
+        for message in &activation.outbox {
+            transaction.execute(
+                "INSERT INTO transactional_outbox (institution_id, workspace_id, outbox_id, topic, payload, payload_digest) VALUES ($1, $2, $3, $4, $5, $6)",
+                &[&scoped.institution, &scoped.workspace, &message.id, &message.topic, &message.payload.payload(), &message.payload.digest().as_str()],
+            ).await.map_err(StorageError::Database)?;
         }
         transaction.commit().await.map_err(StorageError::Database)?;
-        Ok(())
+        Ok(CommitReceipt {
+            revision: next_revision,
+            transition_digest: activation.transition.digest().clone(),
+        })
     }
 
     /// Reserve an exact replay subject before a dispatcher returns an effect lease.
@@ -859,8 +944,8 @@ impl PostgresStorage {
         }
         transaction
             .execute(
-                "DELETE FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND replay_key = $4 AND expires_at <= CURRENT_TIMESTAMP AND (status = 'reserved' OR (status = 'completed' AND retain_replay = FALSE))",
-                &[&scoped.institution, &scoped.workspace, &request.replay_domain(), &request.replay_key().as_str()],
+                "DELETE FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND expires_at <= CURRENT_TIMESTAMP AND (status = 'reserved' OR (status = 'completed' AND retain_replay = FALSE))",
+                &[&scoped.institution, &scoped.workspace, &request.replay_domain()],
             )
             .await
             .map_err(StorageError::Database)?;
@@ -873,7 +958,7 @@ impl PostgresStorage {
             }
             let admitted = transaction
                 .query_opt(
-                    "SELECT d.delegation_digest FROM delegations d LEFT JOIN delegation_revocations r ON r.institution_id = d.institution_id AND r.workspace_id = d.workspace_id AND r.delegation_id = d.delegation_id WHERE d.institution_id = $1 AND d.workspace_id = $2 AND d.delegation_id = $3 AND r.delegation_id IS NULL FOR KEY SHARE",
+                    "SELECT d.delegation_digest FROM delegations d LEFT JOIN delegation_revocations r ON r.institution_id = d.institution_id AND r.workspace_id = d.workspace_id AND r.delegation_id = d.delegation_id WHERE d.institution_id = $1 AND d.workspace_id = $2 AND d.delegation_id = $3 AND r.delegation_id IS NULL FOR KEY SHARE OF d",
                     &[&scoped.institution, &scoped.workspace, &budget_scope.delegation_id().0],
                 )
                 .await
@@ -907,7 +992,7 @@ impl PostgresStorage {
             }
             let pending = transaction
                 .query_one(
-                    "SELECT COALESCE(SUM(s.wall_ms), 0)::text, COALESCE(SUM(s.cpu_ms), 0)::text, COALESCE(SUM(s.memory_bytes), 0)::text, COALESCE(SUM(s.io_bytes), 0)::text, COALESCE(SUM(s.network_bytes), 0)::text, COALESCE(SUM(s.external_cost_microunits), 0)::text FROM attempt_budget_scopes s JOIN operation_attempts a ON a.institution_id = s.institution_id AND a.workspace_id = s.workspace_id AND a.reservation_id = s.reservation_id WHERE s.institution_id = $1 AND s.workspace_id = $2 AND s.replay_domain = $3 AND s.delegation_id = $4 AND a.status = 'reserved'",
+                    "SELECT COALESCE(SUM(s.wall_ms), 0)::text, COALESCE(SUM(s.cpu_ms), 0)::text, COALESCE(SUM(s.memory_bytes), 0)::text, COALESCE(SUM(s.io_bytes), 0)::text, COALESCE(SUM(s.network_bytes), 0)::text, COALESCE(SUM(s.external_cost_microunits), 0)::text FROM attempt_budget_scopes s JOIN operation_attempts a ON a.institution_id = s.institution_id AND a.workspace_id = s.workspace_id AND a.reservation_id = s.reservation_id WHERE s.institution_id = $1 AND s.workspace_id = $2 AND s.replay_domain = $3 AND s.delegation_id = $4 AND a.status = 'reserved' AND a.expires_at > CURRENT_TIMESTAMP",
                     &[&scoped.institution, &scoped.workspace, &request.replay_domain(), &budget_scope.delegation_id().0],
                 )
                 .await
@@ -956,6 +1041,30 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
+        let workspace = transaction
+            .query_opt(
+                "SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $3 FOR KEY SHARE",
+                &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
+            )
+            .await
+            .map_err(StorageError::Database)?;
+        if workspace.is_none() {
+            return Err(StorageError::NotFound);
+        }
+        for budget_scope in request.budget_scopes() {
+            let admitted = transaction
+                .query_opt(
+                    "SELECT d.delegation_digest FROM delegations d LEFT JOIN delegation_revocations r ON r.institution_id = d.institution_id AND r.workspace_id = d.workspace_id AND r.delegation_id = d.delegation_id WHERE d.institution_id = $1 AND d.workspace_id = $2 AND d.delegation_id = $3 AND r.delegation_id IS NULL FOR UPDATE OF d",
+                    &[&scoped.institution, &scoped.workspace, &budget_scope.delegation_id().0],
+                )
+                .await
+                .map_err(StorageError::Database)?;
+            if admitted.is_none_or(|row| {
+                row.get::<_, String>(0) != budget_scope.delegation_digest().as_str()
+            }) {
+                return Err(StorageError::AttemptUnavailable);
+            }
+        }
         let claimed = transaction
             .execute(
                 "UPDATE operation_attempts SET status = 'claimed' WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND replay_domain = $4 AND replay_key = $5 AND claims_digest = $6 AND status = 'reserved' AND expires_at > CURRENT_TIMESTAMP",
@@ -1305,7 +1414,15 @@ mod tests {
             .await
             .expect("generation admits");
         storage
-            .activate_generation(&scope, &generation.generation_digest)
+            .activate_generation(&ActivationCommit {
+                scope: scope.clone(),
+                expected_revision: 1,
+                expected_active: None,
+                generation: generation.generation_digest.clone(),
+                transition: signed(&owner, serde_json::json!({"transition": "activate"})),
+                evidence: vec![],
+                outbox: vec![],
+            })
             .await
             .expect("generation activates atomically");
         assert_eq!(
