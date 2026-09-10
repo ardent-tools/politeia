@@ -8,9 +8,10 @@ use std::{
 use jiff::Timestamp;
 use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::{
-    AdapterId, BudgetReservationId, DataClass, Delegation, Digest, Effect, EffectLeaseId,
-    EvidenceId, ExecutionLocality, ExecutionResourceId, InstitutionId, InstitutionWorkspaceId,
-    OperationId, OperationSpec, PrincipalId, RoutingDecisionId, RuntimeGenerationId,
+    AdapterId, BudgetReservationId, CapabilityVerificationId, DataClass, Delegation, Digest,
+    Effect, EffectLeaseId, EvidenceId, ExecutionLocality, ExecutionResourceId, InstitutionId,
+    InstitutionWorkspaceId, OperationId, OperationSpec, PrincipalId, RoutingDecisionId,
+    RuntimeGenerationId,
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
@@ -29,7 +30,10 @@ use politeia_runtime::{
         RoutingDecision, RoutingError,
     },
 };
-use politeia_storage::{CanonicalPayload, OperationOutboxMessage, PostgresAuthorizationLedger};
+use politeia_storage::{
+    CanonicalPayload, EvidenceAdmission, OperationOutboxMessage, PostgresAuthorizationLedger,
+    ScopedCommit,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,6 +55,14 @@ pub const DISCOVER_CAPABILITIES_OPERATION: &str = "discover_institutional_capabi
 pub const CAPTURE_SOURCE_OPERATION: &str = "capture_authorized_source";
 /// Exact direct-owner action that authorizes one capability verification.
 pub const VERIFY_EXECUTION_CAPABILITY_ACTION: &str = "verify-execution-capability";
+/// Exact signed-evidence method for the reproducible public capability probe.
+pub const CAPABILITY_QUALIFICATION_METHOD: &str = "politeia.public-capability-qualification.v1";
+/// Bounded task class demonstrated by the installed local-handler probe.
+pub const BOUNDED_LOCAL_OPERATION_TASK_CLASS: &str = "politeia.bounded-local-operation.v1";
+/// Capability demonstrated by the installed deterministic manifest probe.
+pub const BOUNDED_LOCAL_OPERATION_CAPABILITY: &str = "dispatcher-mediated-deterministic-handler";
+/// Known-good public resource exercised by capability qualification.
+pub const CAPABILITY_PROBE_KNOWN_GOOD_RESOURCE: &str = "public:capability-probe";
 
 /// Derive the singleton delegation resource for an exact capability verification.
 ///
@@ -73,6 +85,80 @@ pub struct CapabilityVerificationEvidence {
     pub verification: SignedAdmissionWire<CapabilityVerificationRecord>,
     /// Current direct owner grant for this exact verification digest.
     pub authority: SignedAdmissionWire<Delegation>,
+}
+
+/// Reproducible public qualification behind one capability verification.
+///
+/// The local case contains the actual output of the installed deterministic
+/// manifest algorithm and an input that must cross its declared count bound.
+/// An ineligible reference resource may declare no executable claims; that
+/// empty claim is retained explicitly rather than dressing metadata up as a
+/// successful probe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityQualificationEvidence {
+    /// Qualification payload schema.
+    pub schema: String,
+    /// Exact verification record whose claims this payload demonstrates.
+    pub verification: CapabilityVerificationId,
+    /// Immutable resource definition covered by the verification.
+    pub resource: ExecutionResource,
+    /// Exact profile whose claims are copied into the verification record.
+    pub profile: CapabilityProfile,
+    /// Concrete probe result, or an explicit absence of executable claims.
+    pub probe: CapabilityQualificationProbe,
+}
+
+/// Actual public probe retained by capability qualification.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CapabilityQualificationProbe {
+    /// The deterministic resource-manifest handler accepted a known-good input
+    /// and refused an input just beyond its declared resource-count bound.
+    ResourceManifest {
+        /// Exact registered handler contract exercised by the probe.
+        operation: RegisteredOperation,
+        /// Public known-good input supplied to the real manifest algorithm.
+        known_good_resources: BTreeSet<String>,
+        /// Actual deterministic output observed for the known-good input.
+        known_good_manifest: ResourceManifest,
+        /// Public planted input that exceeds the handler's count bound.
+        planted_resources: BTreeSet<String>,
+        /// Typed refusal returned by the real algorithm for the planted input.
+        planted_refusal: ResourceManifestProbeRefusal,
+    },
+    /// This profile deliberately asserts no task class or capability.
+    NoExecutableClaims,
+}
+
+/// A stable refusal produced by the public manifest qualification algorithm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceManifestProbeRefusal {
+    /// The input contains more resource identities than the handler permits.
+    ResourceCountExceeded,
+    /// The input contains more UTF-8 resource bytes than the handler permits.
+    ResourceBytesExceeded,
+    /// A platform integer boundary prevented a faithful size calculation.
+    SizeUnrepresentable,
+}
+
+/// Capability-specific evidence admission carried by commissioning transport.
+///
+/// This cannot insert arbitrary evidence: the daemon re-admits the exact
+/// verification and grant, reproduces `qualification`, and accepts only the
+/// evidence IDs and producer binding named by that verification.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityEvidenceSubmission {
+    /// Verifier-signed capability record later declared by a generation.
+    pub verification: SignedAdmissionWire<CapabilityVerificationRecord>,
+    /// Already admitted direct owner grant for this exact verification digest.
+    pub authority: SignedAdmissionWire<Delegation>,
+    /// Signed evidence records whose IDs exactly equal `verification.evidence`.
+    pub evidence: Vec<SignedAdmissionWire<EvidenceRequest>>,
+    /// Public probe payload whose canonical digest every evidence record signs.
+    pub qualification: CapabilityQualificationEvidence,
 }
 
 /// Signed assurance material accompanying one principal-authenticated operation.
@@ -260,6 +346,103 @@ pub struct RegisteredOperation {
     pub handler: InstalledOperationHandler,
 }
 
+impl CapabilityQualificationEvidence {
+    /// Execute and capture the public qualification implied by exact registry
+    /// objects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapabilityQualificationRefusal`] when the profile does not
+    /// exactly bind the verification/resource or when its executable claims
+    /// cannot be demonstrated by the installed deterministic handler.
+    pub fn reproduce(
+        verification: &CapabilityVerificationRecord,
+        resource: &ExecutionResource,
+        profile: &CapabilityProfile,
+        manifest_operation: Option<&RegisteredOperation>,
+    ) -> Result<Self, CapabilityQualificationRefusal> {
+        validate_profile_binding(verification, resource, profile)?;
+        let probe = if profile.task_classes.is_empty() && profile.capabilities.is_empty() {
+            if manifest_operation.is_some() {
+                return Err(CapabilityQualificationRefusal::UnexpectedManifestOperation);
+            }
+            CapabilityQualificationProbe::NoExecutableClaims
+        } else {
+            if profile.task_classes
+                != BTreeSet::from([BOUNDED_LOCAL_OPERATION_TASK_CLASS.to_string()])
+                || profile.capabilities
+                    != BTreeSet::from([BOUNDED_LOCAL_OPERATION_CAPABILITY.to_string()])
+                || !matches!(
+                    &resource.descriptor,
+                    ExecutionResourceDescriptor::DeterministicTool { .. }
+                )
+            {
+                return Err(CapabilityQualificationRefusal::UnsupportedExecutableClaim);
+            }
+            let operation = manifest_operation
+                .ok_or(CapabilityQualificationRefusal::ManifestOperationAbsent)?;
+            let InstalledOperationHandler::ResourceManifest {
+                maximum_resources,
+                maximum_resource_bytes,
+            } = &operation.handler
+            else {
+                return Err(CapabilityQualificationRefusal::ManifestOperationMismatch);
+            };
+            let known_good_resources =
+                BTreeSet::from([CAPABILITY_PROBE_KNOWN_GOOD_RESOURCE.to_string()]);
+            let known_good_manifest = derive_resource_manifest(
+                &operation.spec,
+                &known_good_resources,
+                *maximum_resources,
+                *maximum_resource_bytes,
+            )?;
+            let planted_count = maximum_resources
+                .checked_add(1)
+                .ok_or(CapabilityQualificationRefusal::ProbePopulationTooLarge)?;
+            if planted_count > 1_024 {
+                return Err(CapabilityQualificationRefusal::ProbePopulationTooLarge);
+            }
+            let planted_resources = (0..planted_count)
+                .map(|index| format!("public:capability-probe:{index:04}"))
+                .collect();
+            let planted_refusal = match derive_resource_manifest(
+                &operation.spec,
+                &planted_resources,
+                *maximum_resources,
+                *maximum_resource_bytes,
+            ) {
+                Err(refusal) => refusal,
+                Ok(_) => {
+                    return Err(CapabilityQualificationRefusal::ManifestOperationMismatch);
+                }
+            };
+            CapabilityQualificationProbe::ResourceManifest {
+                operation: operation.clone(),
+                known_good_resources,
+                known_good_manifest,
+                planted_resources,
+                planted_refusal,
+            }
+        };
+        Ok(Self {
+            schema: "politeia.capability-qualification.v1".to_string(),
+            verification: verification.id.clone(),
+            resource: resource.clone(),
+            profile: profile.clone(),
+            probe,
+        })
+    }
+
+    /// Canonical digest signed by every evidence record for this qualification.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonical encoding error if the typed payload cannot be encoded.
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
+        to_canonical_bytes(self).map(|bytes| Digest::blake3(&bytes))
+    }
+}
+
 /// Authority-neutral capability view derived from an execution registry.
 ///
 /// A learning coordinator must still filter this inventory through the
@@ -419,6 +602,32 @@ impl OperationalExecutionRegistry {
             .binary_search_by(|resource| resource.id.cmp(id))
             .ok()
             .map(|index| &self.document.resources[index])
+    }
+
+    /// Reproduce the public qualification expected for one declared
+    /// capability verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapabilityQualificationRefusal`] if registry identities do
+    /// not bind exactly or the executable claim cannot reproduce its probe.
+    pub fn capability_qualification(
+        &self,
+        verification: &CapabilityVerificationRecord,
+    ) -> Result<CapabilityQualificationEvidence, CapabilityQualificationRefusal> {
+        let profile = self
+            .document
+            .profiles
+            .iter()
+            .find(|profile| profile.verification == verification.id)
+            .ok_or(CapabilityQualificationRefusal::ProfileAbsent)?;
+        let resource = self
+            .resource(&verification.resource)
+            .ok_or(CapabilityQualificationRefusal::ResourceAbsent)?;
+        let manifest = (!profile.task_classes.is_empty() || !profile.capabilities.is_empty())
+            .then(|| self.operation_named(RESOURCE_MANIFEST_OPERATION))
+            .flatten();
+        CapabilityQualificationEvidence::reproduce(verification, resource, profile, manifest)
     }
 
     /// Reproduce a routing decision with a caller-selected inert identity.
@@ -679,6 +888,154 @@ impl PoliteiadService {
             .map_err(|error| operational_refusal(error.to_string()))
     }
 
+    /// Reproduce and durably admit evidence for one exact capability record.
+    ///
+    /// The authority must already be present as a live direct owner grant.
+    /// Its liveness is checked again inside the same transaction that retains
+    /// the signed evidence, closing the revocation race between admission and
+    /// commit.
+    pub(crate) async fn admit_capability_evidence(
+        &self,
+        submission: CapabilityEvidenceSubmission,
+    ) -> Result<crate::OperationResult, CoordinatorError> {
+        let durable = self.durable_snapshot().await?;
+        let now = PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone())
+            .observed_at()
+            .await
+            .map_err(operational_refusal)?;
+        let verification = self
+            .anchors()
+            .admit_expected(AdmissionKind::Verification, submission.verification.clone())
+            .map_err(operational_refusal)?;
+        if verification.signer() != &verification.payload().verifier
+            || verification.payload().observed_at > now
+            || verification.payload().expires_at <= now
+        {
+            return Err(operational_refusal(
+                "capability verification signer or validity interval is invalid",
+            ));
+        }
+        let authority = self.admit_exact_direct_authority(
+            &durable,
+            &submission.authority,
+            verification.signer(),
+        )?;
+        let authority_resource = capability_verification_resource(verification.payload())
+            .map_err(operational_refusal)?;
+        DirectGrant::admit(
+            &authority,
+            &AuthorityContext::new(
+                self.workspace().institution.clone(),
+                self.workspace().id.clone(),
+                durable.owner.clone(),
+                now,
+            ),
+            verification.signer(),
+            VERIFY_EXECUTION_CAPABILITY_ACTION,
+            &authority_resource,
+        )
+        .map_err(operational_refusal)?;
+
+        let reproduced = CapabilityQualificationEvidence::reproduce(
+            verification.payload(),
+            &submission.qualification.resource,
+            &submission.qualification.profile,
+            match &submission.qualification.probe {
+                CapabilityQualificationProbe::ResourceManifest { operation, .. } => Some(operation),
+                CapabilityQualificationProbe::NoExecutableClaims => None,
+            },
+        )
+        .map_err(operational_refusal)?;
+        if reproduced != submission.qualification {
+            return Err(operational_refusal(
+                "capability qualification differs from the reproduced public probe",
+            ));
+        }
+        let qualification_digest = reproduced.digest().map_err(operational_refusal)?;
+        let expected_ids = &verification.payload().evidence;
+        let supplied_ids: BTreeSet<_> = submission
+            .evidence
+            .iter()
+            .map(|wire| wire.payload.id.clone())
+            .collect();
+        if expected_ids.is_empty()
+            || supplied_ids.len() != submission.evidence.len()
+            || &supplied_ids != expected_ids
+        {
+            return Err(operational_refusal(
+                "capability evidence IDs differ from the signed verification",
+            ));
+        }
+        let evidence = submission
+            .evidence
+            .iter()
+            .map(|wire| {
+                let admitted = self
+                    .anchors()
+                    .admit_expected(AdmissionKind::Evidence, wire.clone())
+                    .map_err(operational_refusal)?;
+                let payload = admitted.payload();
+                if admitted.signer() != verification.signer()
+                    || payload.subject
+                        != verification
+                            .payload()
+                            .digest()
+                            .map_err(operational_refusal)?
+                    || payload.producer_delegation != authority.payload().id
+                    || payload.method != CAPABILITY_QUALIFICATION_METHOD
+                    || payload.payload_digest != qualification_digest
+                    || payload.observed_at > verification.payload().observed_at
+                    || payload.independence
+                        != politeia_core::evidence::IndependenceClass::IndependentAgent
+                {
+                    return Err(operational_refusal(
+                        "capability evidence does not bind the reproduced probe, verifier, and authority",
+                    ));
+                }
+                Ok(EvidenceAdmission {
+                    id: payload.id.clone(),
+                    record: crate::service::signed_wire_record(wire)?,
+                })
+            })
+            .collect::<Result<Vec<_>, CoordinatorError>>()?;
+        if supplied_ids
+            .iter()
+            .any(|id| durable.evidence.contains_key(id))
+        {
+            return Err(operational_refusal(
+                "capability evidence is already durably admitted",
+            ));
+        }
+        let transition = crate::service::signed_wire_record(&submission.verification)?;
+        let receipt = self
+            .storage()
+            .commit_authorized(
+                &ScopedCommit {
+                    scope: self.scope().clone(),
+                    expected_revision: durable.revision,
+                    model: durable.model,
+                    model_kind: "capability_evidence".to_string(),
+                    transition,
+                    state: Vec::new(),
+                    evidence,
+                    outbox: Vec::new(),
+                },
+                std::slice::from_ref(&authority),
+            )
+            .await
+            .map_err(|error| operational_refusal(error.to_string()))?;
+        Ok(crate::OperationResult::Coordinated {
+            result: serde_json::json!({
+                "verification": verification.payload().id,
+                "qualification": qualification_digest,
+                "evidence": supplied_ids,
+                "revision": receipt.revision,
+                "admitted": true,
+            }),
+            evidence_refs: supplied_ids.iter().map(|id| id.0.to_string()).collect(),
+        })
+    }
+
     /// Admit one complete active-generation submission for a typed effect port.
     ///
     /// This is the shared authority seam for the manifest, source-capture, and
@@ -725,6 +1082,7 @@ impl PoliteiadService {
         let now = ledger.observed_at().await.map_err(operational_refusal)?;
         let admitted_capabilities = self.admit_capability_verifications(
             durable,
+            registry.execution(),
             &submission.capability_verifications,
             now,
         )?;
@@ -1116,6 +1474,7 @@ impl PoliteiadService {
     fn admit_capability_verifications(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
+        registry: &OperationalExecutionRegistry,
         submitted: &[CapabilityVerificationEvidence],
         at: Timestamp,
     ) -> Result<AdmittedCapabilityVerifications, CoordinatorError> {
@@ -1165,6 +1524,14 @@ impl PoliteiadService {
                 .payload()
                 .digest()
                 .map_err(operational_refusal)?;
+            let qualification_digest = registry
+                .capability_qualification(verification.payload())
+                .and_then(|qualification| {
+                    qualification
+                        .digest()
+                        .map_err(CapabilityQualificationRefusal::Canonical)
+                })
+                .map_err(operational_refusal)?;
             let evidence_wires = verification
                 .payload()
                 .evidence
@@ -1181,7 +1548,11 @@ impl PoliteiadService {
                 if record.subject != verification_digest
                     || record.producer != *verification.signer()
                     || record.producer_delegation != authority.payload().id
+                    || record.method != CAPABILITY_QUALIFICATION_METHOD
+                    || record.payload_digest != qualification_digest
                     || record.observed_at > verification.payload().observed_at
+                    || record.independence
+                        != politeia_core::evidence::IndependenceClass::IndependentAgent
                 {
                     return Err(operational_refusal(
                         "capability verification evidence does not bind its signed verifier and current authority",
@@ -1311,46 +1682,53 @@ impl EffectPort for ResourceManifestPort {
                     "manifest lease differs from the installed bounded handler".to_string(),
                 ));
             }
-            let resource_count = u32::try_from(self.resources.len()).map_err(|_| {
-                ResourceManifestError("manifest resource count cannot be represented".to_string())
-            })?;
-            if resource_count > self.maximum_resources {
-                return Err(ResourceManifestError(
-                    "manifest resource count exceeds the installed bound".to_string(),
-                ));
-            }
-            let resource_bytes = self.resources.iter().try_fold(0_u64, |total, resource| {
-                let length = u64::try_from(resource.len()).map_err(|_| {
-                    ResourceManifestError(
-                        "manifest resource length cannot be represented".to_string(),
-                    )
-                })?;
-                total.checked_add(length).ok_or_else(|| {
-                    ResourceManifestError("manifest resource length overflowed".to_string())
-                })
-            })?;
-            if resource_bytes > self.maximum_resource_bytes {
-                return Err(ResourceManifestError(
-                    "manifest resource bytes exceed the installed bound".to_string(),
-                ));
-            }
-            let resources: Vec<_> = self.resources.iter().cloned().collect();
-            let manifest_digest = Digest::blake3(
-                &to_canonical_bytes(&ResourceManifestSubject {
-                    schema: "politeia.resource-manifest.v1",
-                    operation: &self.operation.id,
-                    resources: &resources,
-                })
-                .map_err(|error| ResourceManifestError(error.to_string()))?,
-            );
-            Ok(ResourceManifest {
-                operation: self.operation.id.clone(),
-                resources,
-                resource_count,
-                manifest_digest,
-            })
+            derive_resource_manifest(
+                &self.operation,
+                &self.resources,
+                self.maximum_resources,
+                self.maximum_resource_bytes,
+            )
+            .map_err(|error| ResourceManifestError(error.to_string()))
         })())
     }
+}
+
+fn derive_resource_manifest(
+    operation: &OperationSpec,
+    resources: &BTreeSet<String>,
+    maximum_resources: u32,
+    maximum_resource_bytes: u64,
+) -> Result<ResourceManifest, ResourceManifestProbeRefusal> {
+    let resource_count = u32::try_from(resources.len())
+        .map_err(|_| ResourceManifestProbeRefusal::SizeUnrepresentable)?;
+    if resource_count > maximum_resources {
+        return Err(ResourceManifestProbeRefusal::ResourceCountExceeded);
+    }
+    let resource_bytes = resources.iter().try_fold(0_u64, |total, resource| {
+        let length = u64::try_from(resource.len())
+            .map_err(|_| ResourceManifestProbeRefusal::SizeUnrepresentable)?;
+        total
+            .checked_add(length)
+            .ok_or(ResourceManifestProbeRefusal::SizeUnrepresentable)
+    })?;
+    if resource_bytes > maximum_resource_bytes {
+        return Err(ResourceManifestProbeRefusal::ResourceBytesExceeded);
+    }
+    let resources: Vec<_> = resources.iter().cloned().collect();
+    let manifest_digest = Digest::blake3(
+        &to_canonical_bytes(&ResourceManifestSubject {
+            schema: "politeia.resource-manifest.v1",
+            operation: &operation.id,
+            resources: &resources,
+        })
+        .map_err(|_| ResourceManifestProbeRefusal::SizeUnrepresentable)?,
+    );
+    Ok(ResourceManifest {
+        operation: operation.id.clone(),
+        resources,
+        resource_count,
+        manifest_digest,
+    })
 }
 
 #[derive(Serialize)]
@@ -1370,6 +1748,44 @@ impl std::fmt::Display for ResourceManifestError {
 }
 
 impl std::error::Error for ResourceManifestError {}
+
+impl std::fmt::Display for ResourceManifestProbeRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ResourceCountExceeded => "manifest resource count exceeds the installed bound",
+            Self::ResourceBytesExceeded => "manifest resource bytes exceed the installed bound",
+            Self::SizeUnrepresentable => "manifest resource size cannot be represented",
+        })
+    }
+}
+
+impl std::error::Error for ResourceManifestProbeRefusal {}
+
+fn validate_profile_binding(
+    verification: &CapabilityVerificationRecord,
+    resource: &ExecutionResource,
+    profile: &CapabilityProfile,
+) -> Result<(), CapabilityQualificationRefusal> {
+    let resource_digest = resource
+        .digest()
+        .map_err(CapabilityQualificationRefusal::Canonical)?;
+    let verification_digest = verification
+        .digest()
+        .map_err(CapabilityQualificationRefusal::Canonical)?;
+    if verification.resource != resource.id
+        || verification.resource_digest != resource_digest
+        || verification.profile != profile.id
+        || profile.resource != resource.id
+        || profile.resource_digest != resource_digest
+        || profile.verification != verification.id
+        || profile.verification_digest != verification_digest
+        || verification.task_classes != profile.task_classes
+        || verification.capabilities != profile.capabilities
+    {
+        return Err(CapabilityQualificationRefusal::BindingMismatch);
+    }
+    Ok(())
+}
 
 fn validate_execution_document(
     document: &OperationalExecutionDocument,
@@ -1506,7 +1922,83 @@ fn validate_execution_document(
 }
 
 fn operational_refusal(reason: impl std::fmt::Display) -> CoordinatorError {
-    CoordinatorError::Refused(format!("active operational registry refused: {}", reason))
+    CoordinatorError::Refused(format!("active operational registry refused: {reason}"))
+}
+
+/// Why a capability claim could not be tied to a reproducible public probe.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CapabilityQualificationRefusal {
+    /// Verification, resource, and profile identities or digests differ.
+    BindingMismatch,
+    /// The execution registry does not contain the verification's resource.
+    ResourceAbsent,
+    /// The execution registry does not contain the verification's profile.
+    ProfileAbsent,
+    /// A non-empty executable claim is outside the public probe's narrow contract.
+    UnsupportedExecutableClaim,
+    /// An executable claim did not supply the resource-manifest operation.
+    ManifestOperationAbsent,
+    /// A supplied operation is not the installed resource-manifest handler.
+    ManifestOperationMismatch,
+    /// An empty capability claim improperly supplied an executable operation.
+    UnexpectedManifestOperation,
+    /// A declared bound is too large for the finite public planted probe.
+    ProbePopulationTooLarge,
+    /// The real manifest algorithm refused an input required to be known-good.
+    ManifestProbe(ResourceManifestProbeRefusal),
+    /// A canonical typed payload could not be encoded.
+    Canonical(CanonicalError),
+}
+
+impl From<ResourceManifestProbeRefusal> for CapabilityQualificationRefusal {
+    fn from(value: ResourceManifestProbeRefusal) -> Self {
+        Self::ManifestProbe(value)
+    }
+}
+
+impl std::fmt::Display for CapabilityQualificationRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BindingMismatch => formatter
+                .write_str("capability verification, resource, and profile do not bind exactly"),
+            Self::ResourceAbsent => {
+                formatter.write_str("capability resource is absent from the execution registry")
+            }
+            Self::ProfileAbsent => {
+                formatter.write_str("capability profile is absent from the execution registry")
+            }
+            Self::UnsupportedExecutableClaim => {
+                formatter.write_str("capability claim is outside the public probe contract")
+            }
+            Self::ManifestOperationAbsent => {
+                formatter.write_str("resource-manifest probe operation is absent")
+            }
+            Self::ManifestOperationMismatch => {
+                formatter.write_str("capability probe operation is not the manifest handler")
+            }
+            Self::UnexpectedManifestOperation => {
+                formatter.write_str("an empty capability claim supplied an executable operation")
+            }
+            Self::ProbePopulationTooLarge => {
+                formatter.write_str("capability probe population is not safely bounded")
+            }
+            Self::ManifestProbe(source) => write!(formatter, "capability probe failed: {source}"),
+            Self::Canonical(_) => {
+                formatter.write_str("capability qualification cannot be encoded canonically")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CapabilityQualificationRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ManifestProbe(source) => Some(source),
+            Self::Canonical(source) => Some(source),
+            _ => None,
+        }
+    }
 }
 
 /// Digest the exact direct-owner delegation that authorizes one control run.

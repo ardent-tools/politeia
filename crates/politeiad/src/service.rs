@@ -43,7 +43,10 @@ use serde_json::{Value, json};
 use crate::{
     CommissioningCoordinator, CoordinatorError, OperationResult, SemanticOperation,
     config::InstallationLayout,
-    service_operation::{CAPTURE_SOURCE_OPERATION, InstalledOperationHandler, OperationSubmission},
+    service_operation::{
+        CAPTURE_SOURCE_OPERATION, CapabilityEvidenceSubmission, InstalledOperationHandler,
+        OperationSubmission,
+    },
 };
 
 /// One configured, single-workspace Politeia service.
@@ -119,6 +122,12 @@ pub enum CommissioningRequest {
     CommissioningApproval {
         /// Owner-signed evidence for one typed commissioning subject.
         evidence: SignedAdmissionWire<EvidenceRequest>,
+    },
+    /// Reproduce and retain verifier-signed evidence for one exact execution
+    /// capability record under its already admitted owner grant.
+    CapabilityEvidence {
+        /// Exact verification, grant, signed evidence, and public probe result.
+        submission: Box<CapabilityEvidenceSubmission>,
     },
 }
 
@@ -1075,6 +1084,9 @@ impl PoliteiadService {
             } => self.approve_candidate(*candidate, approval).await,
             CommissioningRequest::CommissioningApproval { evidence } => {
                 self.admit_commissioning_approval(evidence).await
+            }
+            CommissioningRequest::CapabilityEvidence { submission } => {
+                self.admit_capability_evidence(*submission).await
             }
             CommissioningRequest::AdmitDelegation { delegation } => {
                 let admitted = self
