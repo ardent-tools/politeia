@@ -12,6 +12,7 @@ pub mod config;
 pub mod learning;
 pub mod service;
 pub mod service_generation;
+pub mod service_learning;
 pub mod source;
 pub mod transport;
 

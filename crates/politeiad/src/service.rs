@@ -74,7 +74,12 @@ pub enum CommissioningRequest {
     /// Persist a signed delegation after installed-key admission.
     AdmitDelegation {
         /// Exact signed delegation wire, retained for restart re-admission.
-        delegation: SignedAdmissionWire<Delegation>,
+        delegation: Box<SignedAdmissionWire<Delegation>>,
+    },
+    /// Handle a typed institutional learning request.
+    Learning {
+        /// Opaque transport JSON parsed only by the learning service boundary.
+        request: Value,
     },
     /// Execute a typed signed generation lifecycle request.
     Generation {
@@ -523,10 +528,11 @@ impl PoliteiadService {
         })?;
         match request {
             CommissioningRequest::Generation { request } => self.handle_generation(request).await,
+            CommissioningRequest::Learning { request } => self.handle_learning(request).await,
             CommissioningRequest::AdmitDelegation { delegation } => {
                 let admitted = self
                     .anchors
-                    .admit_expected(AdmissionKind::Delegation, delegation.clone())
+                    .admit_expected(AdmissionKind::Delegation, (*delegation).clone())
                     .map_err(refusal)?;
                 let durable = self.durable_snapshot().await?;
                 self.validate_delegation_authority(&durable, &admitted)?;
@@ -555,7 +561,7 @@ impl CommissioningCoordinator for PoliteiadService {
     }
 }
 
-fn storage_refusal(error: &politeia_storage::StorageError) -> CoordinatorError {
+pub(crate) fn storage_refusal(error: &politeia_storage::StorageError) -> CoordinatorError {
     CoordinatorError::Refused(format!("durable authority refused operation: {error}"))
 }
 
@@ -565,11 +571,11 @@ fn runtime_refusal(error: &RuntimeError) -> CoordinatorError {
     ))
 }
 
-fn refusal(error: impl std::fmt::Display) -> CoordinatorError {
+pub(crate) fn refusal(error: impl std::fmt::Display) -> CoordinatorError {
     CoordinatorError::Refused(error.to_string())
 }
 
-fn signed_wire_record<T: Serialize>(
+pub(crate) fn signed_wire_record<T: Serialize>(
     wire: &SignedAdmissionWire<T>,
 ) -> Result<SignedRecord, CoordinatorError> {
     let value = serde_json::to_value(wire).map_err(|error| {

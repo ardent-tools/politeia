@@ -186,8 +186,9 @@ impl std::fmt::Display for AssessmentError {
 impl std::error::Error for AssessmentError {}
 
 /// Why no unique current record follows from a valid relation set.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Unresolved {
     /// The subject has no admitted records at all.
     NoRecords,
@@ -246,8 +247,9 @@ impl std::fmt::Display for Unresolved {
 /// digested and admitted would become a record about the subject, and the next
 /// projection would read it -- at which point the derived view is an input to
 /// itself and its provenance no longer reaches the observations underneath.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Projection {
     /// Exactly one record is current, with the corrections that amend it.
     Current {

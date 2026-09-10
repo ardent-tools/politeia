@@ -49,6 +49,16 @@ pub enum AdmissionKind {
     Verification,
     /// Inputs that identify an operational generation.
     Generation,
+    /// An owner-pinned approved fact and its eligible context provenance.
+    LearningSource,
+    /// A requester-bound institutional context compilation request.
+    LearningContext,
+    /// A requester-bound active-generation capability discovery request.
+    LearningDiscovery,
+    /// A requester-bound feedback observation and inert correction proposal.
+    LearningFeedback,
+    /// A requester-bound, evidence-resolved correction or supersession relation.
+    LearningCorrection,
 }
 
 /// One public key installed by the institution, together with its narrow use.
