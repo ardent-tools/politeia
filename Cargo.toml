@@ -7,6 +7,7 @@ members = [
   "crates/politeia-runtime",
   "crates/politeia-protocol",
   "crates/politeia-sdk",
+  "crates/politeia-storage",
   "crates/politeiad",
   "xtask",
 ]
@@ -33,6 +34,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 snafu = "0.9"
 uuid = { version = "1", features = ["v7", "serde"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1"] }
 
 [workspace.dependencies.tokio]
 version = "1"

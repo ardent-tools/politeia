@@ -1,0 +1,24 @@
+[package]
+name = "politeia-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+politeia-core.workspace = true
+politeia-runtime.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.kanon]
+maturity = "prototype"
+since = "2026-09-09"
+exit-criteria = "PostgreSQL transactions atomically commit scoped current state, immutable journals, runtime activation, operation reservations, and outbox rows for the commissioning slice"
