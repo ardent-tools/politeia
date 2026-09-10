@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use jiff::Timestamp;
 use politeia_core::{
     AdapterId, CommissioningRecordId, DataClass, DelegationId, Digest, EvidenceId, ObservationId,
-    PrincipalId, SourceCaptureId,
+    PrincipalId, ResourceBudget, SourceCaptureId,
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     knowledge::{
         FactApprovalRequest, SourceCaptureRequest, TrustedCandidateClaimRegistry,
@@ -45,6 +45,27 @@ pub struct LearningIngress<T> {
     /// Durable delegation the requester claims to hold.
     pub delegation: DelegationId,
     /// Exact inert operation input.
+    pub input: T,
+}
+
+/// A signed request whose result can disclose institutional context.
+///
+/// Unlike feedback, a disclosure reserves a finite durable budget and replay
+/// key before its effect port may return any selected bytes or capability
+/// identities.  Keeping this distinct from [`LearningIngress`] makes a
+/// missing budget unrepresentable at the protected read boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LearningDisclosureIngress<T> {
+    /// Stable request identity used as the durable replay key.
+    pub id: CommissioningRecordId,
+    /// Principal that signs and requests this exact disclosure.
+    pub requester: PrincipalId,
+    /// Durable delegation the requester claims to hold.
+    pub delegation: DelegationId,
+    /// Finite maximum consumption reserved before disclosure.
+    pub budget: ResourceBudget,
+    /// Exact inert context or discovery input.
     pub input: T,
 }
 
@@ -117,12 +138,12 @@ pub enum LearningRequest {
     /// Compile context from durable approved content only.
     CompileContext {
         /// Signed requester/delegation-bound request.
-        request: SignedAdmissionWire<LearningIngress<ContextRequest>>,
+        request: SignedAdmissionWire<LearningDisclosureIngress<ContextRequest>>,
     },
     /// Discover descriptive active-generation capabilities.
     DiscoverCapabilities {
         /// Signed requester/delegation-bound request.
-        request: SignedAdmissionWire<LearningIngress<CapabilityRequest>>,
+        request: SignedAdmissionWire<LearningDisclosureIngress<CapabilityRequest>>,
     },
     /// Record feedback as an inert, append-only correction proposal.
     RecordFeedback {
@@ -200,13 +221,14 @@ impl PoliteiadService {
 
     async fn compile_context(
         &self,
-        wire: SignedAdmissionWire<LearningIngress<ContextRequest>>,
+        wire: SignedAdmissionWire<LearningDisclosureIngress<ContextRequest>>,
     ) -> Result<OperationResult, CoordinatorError> {
         let admitted = self
             .anchors()
             .admit_expected(AdmissionKind::LearningContext, wire)
             .map_err(refusal)?;
-        require_requester_signer(&admitted)?;
+        require_disclosure_requester_signer(&admitted)?;
+        require_finite_disclosure_budget(&admitted)?;
         let delegation = self
             .live_requester(
                 &admitted.payload().requester,
@@ -230,13 +252,14 @@ impl PoliteiadService {
 
     async fn discover_capabilities(
         &self,
-        wire: SignedAdmissionWire<LearningIngress<CapabilityRequest>>,
+        wire: SignedAdmissionWire<LearningDisclosureIngress<CapabilityRequest>>,
     ) -> Result<OperationResult, CoordinatorError> {
         let admitted = self
             .anchors()
             .admit_expected(AdmissionKind::LearningDiscovery, wire)
             .map_err(refusal)?;
-        require_requester_signer(&admitted)?;
+        require_disclosure_requester_signer(&admitted)?;
+        require_finite_disclosure_budget(&admitted)?;
         let delegation = self
             .live_requester(
                 &admitted.payload().requester,
@@ -376,6 +399,55 @@ impl PoliteiadService {
         delegation: &DelegationId,
     ) -> Result<politeia_core::trust::Admitted<politeia_core::Delegation>, CoordinatorError> {
         self.admit_live_delegation(delegation, requester).await
+    }
+
+    /// Recover the exact root-to-leaf grants that an authorized commit or
+    /// dispatcher reservation must retain.  The leaf is first recovered by
+    /// the service's only live-delegation boundary, which validates the whole
+    /// attenuation chain.  We then re-admit each immutable durable ancestor
+    /// from the same snapshot used to derive the learning projection.
+    ///
+    /// The durable commit/ledger is still the linearization point: it locks
+    /// and rechecks this exact chain before a mutation or protected disclosure
+    /// can proceed.  This reconstruction supplies the dispatcher with every
+    /// budget scope rather than incorrectly treating the leaf as ambient
+    /// authority.
+    async fn live_requester_chain(
+        &self,
+        durable: &WorkspaceSnapshot,
+        requester: &PrincipalId,
+        delegation_id: &DelegationId,
+    ) -> Result<Vec<politeia_core::trust::Admitted<politeia_core::Delegation>>, CoordinatorError>
+    {
+        let leaf = self.live_requester(requester, delegation_id).await?;
+        let mut reverse = vec![leaf];
+        while let Some(parent_id) = reverse
+            .last()
+            .and_then(|grant| grant.payload().parent.clone())
+        {
+            let persisted = durable.delegations.get(&parent_id).ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "delegation parent is not durably admitted for learning".to_string(),
+                )
+            })?;
+            if persisted.revoked {
+                return Err(CoordinatorError::Refused(
+                    "delegation parent is revoked for learning".to_string(),
+                ));
+            }
+            let parent = self
+                .anchors()
+                .admit_expected(AdmissionKind::Delegation, persisted.wire.clone())
+                .map_err(refusal)?;
+            if parent.payload().id != parent_id {
+                return Err(CoordinatorError::Refused(
+                    "durable delegation parent identity differs from its signed wire".to_string(),
+                ));
+            }
+            reverse.push(parent);
+        }
+        reverse.reverse();
+        Ok(reverse)
     }
 
     async fn now(&self) -> Result<Timestamp, CoordinatorError> {
@@ -840,6 +912,28 @@ fn require_requester_signer<T>(
     if admitted.signer() != &admitted.payload().requester {
         return Err(CoordinatorError::Refused(
             "learning requester differs from the verified envelope signer".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_disclosure_requester_signer<T>(
+    admitted: &politeia_core::trust::Admitted<LearningDisclosureIngress<T>>,
+) -> Result<(), CoordinatorError> {
+    if admitted.signer() != &admitted.payload().requester {
+        return Err(CoordinatorError::Refused(
+            "learning requester differs from the verified disclosure envelope signer".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_finite_disclosure_budget<T>(
+    admitted: &politeia_core::trust::Admitted<LearningDisclosureIngress<T>>,
+) -> Result<(), CoordinatorError> {
+    if !admitted.payload().budget.is_finite() {
+        return Err(CoordinatorError::Refused(
+            "learning disclosure budget must be finite".to_string(),
         ));
     }
     Ok(())
