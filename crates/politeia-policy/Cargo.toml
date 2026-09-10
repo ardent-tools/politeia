@@ -10,8 +10,10 @@ jiff.workspace = true
 serde.workspace = true
 schemars.workspace = true
 politeia-core.workspace = true
+politeia-evidence.workspace = true
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 serde_json.workspace = true
 
 [lints]

@@ -8,8 +8,12 @@
 
 pub mod evaluate;
 pub mod hardening;
+pub mod waiver;
 
-use politeia_core::{Digest, PolicyBundleId, PrincipalId};
+use std::collections::BTreeSet;
+
+use jiff::Timestamp;
+use politeia_core::{Digest, EvidenceId, PolicyBundleId, PrincipalId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -75,17 +79,18 @@ pub struct DetectorSpec {
     pub id: String,
     /// The evidence class it produces.
     pub evidence_class: EvidenceClass,
+    /// Exact control version expected in a run and activation proof.
+    pub control_version: String,
+    /// Digest of the exact control configuration.
+    pub configuration_digest: Digest,
+    /// Mediation path on which the control must run.
+    pub mediation_path: String,
+    /// Scopes this control is designed to observe.
+    pub supported_scopes: BTreeSet<String>,
+    /// Digest of the adversarial population used to calibrate this control.
+    pub calibration_population: Digest,
     /// Its known blind spots.
     pub known_blind_spots: Vec<String>,
-    /// Whether it has been calibrated against adversarial fixtures.
-    ///
-    /// WHY the qualifier: a bare `calibrated` collided with
-    /// [`hardening::HardeningState::Calibrated`], a rung of a binding's climb
-    /// toward blocking authority. The two are different facts about different
-    /// subjects -- `06-POLICY_COMPILER.md` is explicit that blocking authority
-    /// belongs to the binding and is not inherent in the detector -- and a
-    /// shared word made them read as one.
-    pub adversarially_calibrated: bool,
 }
 
 /// The consequence a binding applies when its clause is evaluated, from
@@ -144,30 +149,46 @@ pub struct PolicyDecision {
     pub policy_digest: Digest,
     /// Digest of the exact normalized operation intent that was decided.
     pub intent_digest: Digest,
+    /// Digest of the exact subject the controls judged.
+    pub subject: Digest,
+    /// Digest of the exact population whose coverage was evaluated.
+    pub population: Digest,
     /// The principal the decision is for.
     pub principal: PrincipalId,
     /// Whether the operation is allowed.
     pub allowed: bool,
     /// The bindings that contributed to the decision.
     pub binding_ids: Vec<String>,
+    /// Exact admitted control runs that contributed.
+    pub control_runs: Vec<EvidenceId>,
+    /// Exact admitted activation proofs used for blocking authority.
+    pub activation_proofs: Vec<EvidenceId>,
+    /// Exact delegated waivers that excused findings.
+    pub waiver_ids: Vec<String>,
     /// Human-readable reasons.
     pub reasons: Vec<String>,
 }
 
 /// An authorized, scoped, expiring exception to a binding.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Waiver {
     /// Waiver identity.
     pub id: String,
     /// The binding being waived.
     pub binding_id: String,
+    /// Exact policy bundle containing the binding.
+    pub policy: PolicyBundleId,
+    /// Digest of the exact policy bytes containing the binding.
+    pub policy_digest: Digest,
+    /// Digest of the exact subject for which the exception was granted.
+    pub subject: Digest,
+    /// Digest of the exact population for which the exception was granted.
+    pub population: Digest,
     /// The scope the waiver covers.
     pub scope: String,
     /// Why the waiver was granted.
     pub reason: String,
-    /// The principal that granted it.
-    pub issuer: PrincipalId,
-    /// Expiry time (RFC 3339).
-    pub expires_at_rfc3339: String,
+    /// Expiry instant; the waiver fails closed at and after it.
+    pub expires_at: Timestamp,
 }
