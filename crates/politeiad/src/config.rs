@@ -5,7 +5,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use politeia_core::{InstitutionId, InstitutionWorkspaceId};
+use politeia_core::{
+    InstitutionId, InstitutionWorkspaceId, PrincipalId,
+    institution::InstitutionWorkspace,
+    trust::{AdmissionKind, InstitutionTrustAnchors, TrustedSigningKey},
+};
 use serde::{Deserialize, Serialize};
 
 /// Persistent local paths for one single-tenant Politeia installation.
@@ -28,6 +32,31 @@ pub struct InstallationLayout {
     pub workspace_dir: PathBuf,
 }
 
+/// One public verification key installed by the explicit host action.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledTrustAnchor {
+    /// Institution principal whose statements this key can authenticate.
+    pub principal: PrincipalId,
+    /// Ed25519 public key bytes. Private keys never enter this configuration.
+    pub public_key: [u8; 32],
+    /// The exact signed statement kinds this principal may submit.
+    pub permitted: std::collections::BTreeSet<AdmissionKind>,
+}
+
+/// The non-secret, host-installed trust configuration for one workspace.
+///
+/// Supplying this document to the local initialization command is an explicit
+/// host-custody action. It is not accepted by the daemon transport.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostTrustConfiguration {
+    /// Client-owned workspace that the host will serve.
+    pub workspace: InstitutionWorkspace,
+    /// Installed public verification keys for the exact workspace.
+    pub anchors: Vec<InstalledTrustAnchor>,
+}
+
 /// Why an installation layout could not be initialized safely.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -38,6 +67,8 @@ pub enum InstallationError {
     InvalidLayout,
     /// Filesystem setup failed.
     Io(io::Error),
+    /// The requested public-key trust configuration was not valid.
+    InvalidTrust(String),
 }
 
 impl std::fmt::Display for InstallationError {
@@ -55,6 +86,12 @@ impl std::fmt::Display for InstallationError {
                 formatter,
                 "installation filesystem operation failed: {error}"
             ),
+            Self::InvalidTrust(reason) => {
+                write!(
+                    formatter,
+                    "installed trust configuration is invalid: {reason}"
+                )
+            }
         }
     }
 }
@@ -133,6 +170,65 @@ impl InstallationLayout {
     }
 }
 
+impl HostTrustConfiguration {
+    /// Install this public-key configuration under a fresh institution prefix.
+    pub fn install(&self, prefix: PathBuf) -> Result<InstallationLayout, InstallationError> {
+        let layout = InstallationLayout::new(
+            self.workspace.institution.clone(),
+            self.workspace.id.clone(),
+            prefix,
+        );
+        let _anchors = self.anchors()?;
+        layout.initialize_filesystem()?;
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| InstallationError::Io(io::Error::other(error)))?;
+        let path = layout.trust_configuration_path();
+        fs::write(&path, bytes)?;
+        set_private_file(&path)?;
+        Ok(layout)
+    }
+
+    /// Load public trust configuration from an already-installed layout.
+    pub fn load(layout: &InstallationLayout) -> Result<Self, InstallationError> {
+        let bytes = fs::read(layout.trust_configuration_path())?;
+        let configuration: Self = serde_json::from_slice(&bytes)
+            .map_err(|error| InstallationError::Io(io::Error::other(error)))?;
+        if configuration.workspace.institution != layout.institution
+            || configuration.workspace.id != layout.workspace
+        {
+            return Err(InstallationError::InvalidLayout);
+        }
+        let _anchors = configuration.anchors()?;
+        Ok(configuration)
+    }
+
+    /// Reconstruct the non-serializable core trust boundary from installed keys.
+    pub fn anchors(&self) -> Result<InstitutionTrustAnchors, InstallationError> {
+        let keys = self
+            .anchors
+            .iter()
+            .cloned()
+            .map(|anchor| {
+                TrustedSigningKey::new(anchor.principal, anchor.public_key, anchor.permitted)
+                    .map_err(|error| InstallationError::InvalidTrust(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        InstitutionTrustAnchors::from_trusted_bootstrap(
+            self.workspace.institution.clone(),
+            self.workspace.id.clone(),
+            keys,
+        )
+        .map_err(|error| InstallationError::InvalidTrust(error.to_string()))
+    }
+}
+
+impl InstallationLayout {
+    /// Return the fixed location of the installed non-secret public key set.
+    pub fn trust_configuration_path(&self) -> PathBuf {
+        self.key_dir.join("trust-anchors.json")
+    }
+}
+
 #[cfg(unix)]
 fn set_private_directory(path: &Path) -> Result<(), io::Error> {
     use std::os::unix::fs::PermissionsExt;
@@ -163,7 +259,18 @@ fn set_private_file(_path: &Path) -> Result<(), io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+    };
+
+    use politeia_core::{
+        DelegationId, Digest, PolicyBundleId, PrincipalId,
+        generation::{ApprovedGenerationInputs, CommissioningCapability, ReproducibilityContract},
+        institution::{InstitutionWorkspace, TrustDomainId},
+        lifecycle::{DeploymentTopology, LifecycleProfile},
+        trust::AdmissionKind,
+    };
 
     use super::*;
 
@@ -187,6 +294,64 @@ mod tests {
             layout.initialize_filesystem(),
             Err(InstallationError::AlreadyInitialized(_))
         ));
+        fs::remove_dir_all(prefix).expect("fixture is removable");
+    }
+
+    #[test]
+    fn host_initialization_installs_only_public_workspace_trust() {
+        let prefix =
+            std::env::temp_dir().join(format!("politeiad-host-install-{}", uuid::Uuid::now_v7()));
+        let institution = InstitutionId::new();
+        let workspace = InstitutionWorkspace {
+            id: InstitutionWorkspaceId::new(),
+            institution: institution.clone(),
+            trust_domain: "client-a:production"
+                .parse::<TrustDomainId>()
+                .expect("fixture trust domain is canonical"),
+            owner: PrincipalId::new(),
+            owner_delegation: DelegationId::new(),
+            approved_model_digest: Digest::blake3(b"installed-skeleton"),
+            policy_bundle: PolicyBundleId::new(),
+            policy_digest: Digest::blake3(b"installed-policy"),
+            approved_generation: ApprovedGenerationInputs {
+                source_digest: Digest::blake3(b"source"),
+                lifecycle: LifecycleProfile::Operational,
+                topology: DeploymentTopology::ClientControlledSingleTenant,
+                schema_digests: BTreeMap::new(),
+                adapter_digests: BTreeMap::new(),
+                pack_digests: BTreeMap::new(),
+                component_digests: BTreeMap::new(),
+                excluded_commissioning_capabilities: BTreeSet::from([
+                    CommissioningCapability::GenericReconnaissance,
+                    CommissioningCapability::InstitutionAuthoring,
+                    CommissioningCapability::AdapterDevelopment,
+                    CommissioningCapability::PolicyAuthoring,
+                    CommissioningCapability::GenerationDerivation,
+                ]),
+                specializer_digest: Digest::blake3(b"specializer"),
+                toolchain_digest: Digest::blake3(b"toolchain"),
+                reproducibility: ReproducibilityContract::Deterministic,
+            },
+            secret_references: BTreeSet::new(),
+        };
+        let configuration = HostTrustConfiguration {
+            anchors: vec![InstalledTrustAnchor {
+                principal: workspace.owner.clone(),
+                public_key: [42; 32],
+                permitted: BTreeSet::from([AdmissionKind::FactApproval]),
+            }],
+            workspace,
+        };
+        let layout = configuration
+            .install(prefix.clone())
+            .expect("fresh host trust action succeeds");
+        let restored = HostTrustConfiguration::load(&layout)
+            .expect("installed public trust configuration reloads");
+        let anchors = restored
+            .anchors()
+            .expect("installed public key reconstructs trust anchors");
+        assert_eq!(anchors.institution(), &institution);
+        assert_eq!(anchors.workspace(), &layout.workspace);
         fs::remove_dir_all(prefix).expect("fixture is removable");
     }
 }
