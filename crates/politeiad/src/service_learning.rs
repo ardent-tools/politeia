@@ -1102,6 +1102,8 @@ struct LearningDisclosurePolicy<'policy, P> {
     resources: BTreeSet<String>,
     budget: ResourceBudget,
     idempotency_key: String,
+    subject: Digest,
+    population: Digest,
 }
 
 impl<'policy, P> LearningDisclosurePolicy<'policy, P> {
@@ -1113,6 +1115,8 @@ impl<'policy, P> LearningDisclosurePolicy<'policy, P> {
         action: impl Into<String>,
         resources: BTreeSet<String>,
         request: &LearningDisclosureIngress<T>,
+        subject: Digest,
+        population: Digest,
     ) -> Self {
         Self {
             policy,
@@ -1123,6 +1127,8 @@ impl<'policy, P> LearningDisclosurePolicy<'policy, P> {
             resources,
             budget: request.budget.clone(),
             idempotency_key: format!("learning:{}", request.id.0),
+            subject,
+            population,
         }
     }
 
@@ -1171,10 +1177,17 @@ where
     ) -> Result<politeia_policy::PolicyDecision, Self::Error> {
         self.verify(intent)
             .map_err(LearningDisclosurePolicyError::Binding)?;
-        self.policy
+        let decision = self
+            .policy
             .decide(intent)
             .await
-            .map_err(LearningDisclosurePolicyError::Policy)
+            .map_err(LearningDisclosurePolicyError::Policy)?;
+        if decision.subject != self.subject || decision.population != self.population {
+            return Err(LearningDisclosurePolicyError::Binding(
+                LearningDisclosureRefusal::DecisionBindingMismatch,
+            ));
+        }
+        Ok(decision)
     }
 }
 
@@ -1188,6 +1201,7 @@ enum LearningDisclosureRefusal {
     BudgetMismatch,
     ReplayKeyMismatch,
     ExecutionAssignment,
+    DecisionBindingMismatch,
 }
 
 impl fmt::Display for LearningDisclosureRefusal {
@@ -1210,6 +1224,9 @@ impl fmt::Display for LearningDisclosureRefusal {
             }
             Self::ExecutionAssignment => {
                 "institutional disclosure cannot substitute an execution assignment"
+            }
+            Self::DecisionBindingMismatch => {
+                "policy decision does not bind the signed request and selected source population"
             }
         };
         formatter.write_str(message)
