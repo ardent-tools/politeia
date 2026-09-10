@@ -580,34 +580,241 @@ pub enum ClaimStatus {
 }
 
 /// An interpreted proposition, with the observations behind and against it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CandidateClaim {
+    id: ClaimId,
+    workspace: InstitutionWorkspaceId,
+    subject: Digest,
+    proposition: Digest,
+    supported_by: BTreeMap<String, BTreeSet<ObservationId>>,
+    contradicted_by: BTreeMap<String, BTreeSet<ObservationId>>,
+    missed_axes: BTreeSet<String>,
+    interpreter: PrincipalId,
+    interpreter_delegation: DelegationId,
+}
+
+/// Inert wire representation of a candidate claim before installed-key admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct CandidateClaim {
-    /// This claim's identity.
+pub struct CandidateClaimRequest {
+    /// Stable identity of the candidate claim.
     pub id: ClaimId,
-    /// Institution workspace in which this claim may be evaluated.
+    /// Workspace in which the claim may be evaluated.
     pub workspace: InstitutionWorkspaceId,
-    /// Digest of the subject the proposition is about.
+    /// Digest of the subject the proposition concerns.
     pub subject: Digest,
-    /// Digest of the proposition.
+    /// Digest of the proposed interpretation.
     pub proposition: Digest,
-    /// Observations that support it, by the source that made each.
+    /// Supporting observations grouped by their asserted source.
     pub supported_by: BTreeMap<String, BTreeSet<ObservationId>>,
-    /// Observations that contradict it, by the source that made each.
+    /// Contradicting observations grouped by their asserted source.
     pub contradicted_by: BTreeMap<String, BTreeSet<ObservationId>>,
-    /// Axes the reconnaissance that produced this claim did not cover.
-    ///
-    /// Declared by the interpreter, because only it knows what it did not look
-    /// at. An empty set is a claim that nothing was missed, which is a
-    /// statement rather than a default -- and one an approver has to accept.
+    /// Reconnaissance axes the interpreter declares missing.
     pub missed_axes: BTreeSet<String>,
-    /// The principal that interpreted the observations.
+    /// Principal that interpreted the observations.
     pub interpreter: PrincipalId,
-    /// The exact delegation it interpreted under.
+    /// Exact delegation used for the interpretation.
     pub interpreter_delegation: DelegationId,
 }
 
+impl From<CandidateClaimRequest> for CandidateClaim {
+    fn from(request: CandidateClaimRequest) -> Self {
+        Self {
+            id: request.id,
+            workspace: request.workspace,
+            subject: request.subject,
+            proposition: request.proposition,
+            supported_by: request.supported_by,
+            contradicted_by: request.contradicted_by,
+            missed_axes: request.missed_axes,
+            interpreter: request.interpreter,
+            interpreter_delegation: request.interpreter_delegation,
+        }
+    }
+}
+
+impl From<&CandidateClaim> for CandidateClaimRequest {
+    fn from(claim: &CandidateClaim) -> Self {
+        Self {
+            id: claim.id.clone(),
+            workspace: claim.workspace.clone(),
+            subject: claim.subject.clone(),
+            proposition: claim.proposition.clone(),
+            supported_by: claim.supported_by.clone(),
+            contradicted_by: claim.contradicted_by.clone(),
+            missed_axes: claim.missed_axes.clone(),
+            interpreter: claim.interpreter.clone(),
+            interpreter_delegation: claim.interpreter_delegation.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CandidateClaimDigestPayload<'a> {
+    kind: &'static str,
+    claim: &'a CandidateClaimRequest,
+}
+
+/// Derive the canonical digest an owner approval binds to one candidate claim.
+///
+/// This covers every candidate field, including support, contradiction,
+/// interpreter, delegation, and declared gaps. It does not authenticate the
+/// request; callers must admit the signed candidate through installed anchors.
+///
+/// # Errors
+///
+/// Returns an error when the fixed candidate payload cannot be canonically
+/// encoded.
+pub fn candidate_claim_digest(
+    request: &CandidateClaimRequest,
+) -> Result<Digest, crate::canonical::CanonicalError> {
+    to_canonical_bytes(&CandidateClaimDigestPayload {
+        kind: "candidate_claim_v1",
+        claim: request,
+    })
+    .map(|bytes| Digest::blake3(&bytes))
+}
+
+/// Installed-key-admitted candidate claims for exactly one workspace.
+#[derive(Clone, Debug, Default)]
+pub struct TrustedCandidateClaimRegistry {
+    workspace: Option<InstitutionWorkspaceId>,
+    claims: BTreeMap<ClaimId, (CandidateClaim, Digest)>,
+}
+
+impl TrustedCandidateClaimRegistry {
+    /// Admit interpreter-signed candidates after resolving every cited observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CandidateAdmissionRefusal`] when a wire is unauthenticated,
+    /// outside the installed workspace, signed by someone other than its named
+    /// interpreter, or cites absent/rebound observations.
+    pub fn admit_signed(
+        workspace: &InstitutionWorkspace,
+        anchors: &InstitutionTrustAnchors,
+        observations: &TrustedObservationRegistry,
+        statements: impl IntoIterator<Item = SignedAdmissionWire<CandidateClaimRequest>>,
+    ) -> Result<Self, CandidateAdmissionRefusal> {
+        if anchors.institution() != &workspace.institution || anchors.workspace() != &workspace.id {
+            return Err(CandidateAdmissionRefusal::ForeignTrustScope);
+        }
+        if observations.workspace() != Some(&workspace.id) {
+            return Err(CandidateAdmissionRefusal::ForeignWorkspace);
+        }
+        let mut claims = BTreeMap::new();
+        for statement in statements {
+            let admitted = anchors
+                .admit_expected(AdmissionKind::CandidateClaim, statement)
+                .map_err(CandidateAdmissionRefusal::Authentication)?;
+            let signer = admitted.signer().clone();
+            let digest = candidate_claim_digest(admitted.payload())
+                .map_err(CandidateAdmissionRefusal::Encoding)?;
+            let candidate = CandidateClaim::from(admitted.into_payload());
+            if candidate.workspace != workspace.id {
+                return Err(CandidateAdmissionRefusal::ForeignWorkspace);
+            }
+            if signer != candidate.interpreter {
+                return Err(CandidateAdmissionRefusal::SignerInterpreterMismatch);
+            }
+            validate_claim_observations(&candidate, observations)
+                .map_err(CandidateAdmissionRefusal::Observations)?;
+            if claims
+                .insert(candidate.id.clone(), (candidate, digest))
+                .is_some()
+            {
+                return Err(CandidateAdmissionRefusal::DuplicateIdentity);
+            }
+        }
+        Ok(Self {
+            workspace: Some(workspace.id.clone()),
+            claims,
+        })
+    }
+
+    /// Resolve an exact admitted candidate claim.
+    pub fn resolve(&self, id: &ClaimId) -> Option<&CandidateClaim> {
+        self.claims.get(id).map(|(claim, _)| claim)
+    }
+
+    /// Return the canonical digest bound by a fact approval for this claim.
+    pub fn digest(&self, id: &ClaimId) -> Option<&Digest> {
+        self.claims.get(id).map(|(_, digest)| digest)
+    }
+
+    fn workspace(&self) -> Option<&InstitutionWorkspaceId> {
+        self.workspace.as_ref()
+    }
+}
+
+/// Why a candidate wire did not become an admitted candidate claim.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CandidateAdmissionRefusal {
+    /// Installed-key authentication failed.
+    Authentication(AdmissionError),
+    /// Candidate admission anchors belong to another workspace.
+    ForeignTrustScope,
+    /// Candidate or observation registry belongs to another workspace.
+    ForeignWorkspace,
+    /// The installed signer differs from the candidate's named interpreter.
+    SignerInterpreterMismatch,
+    /// A candidate identity was repeated in the admitted input.
+    DuplicateIdentity,
+    /// Candidate support or contradiction did not resolve to trusted observations.
+    Observations(ApprovalRefusal),
+    /// Candidate digest canonicalization failed.
+    Encoding(crate::canonical::CanonicalError),
+}
+
+impl std::fmt::Display for CandidateAdmissionRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Authentication(error) => {
+                write!(formatter, "candidate authentication failed: {error}")
+            }
+            Self::ForeignTrustScope => {
+                formatter.write_str("installed anchors do not match candidate workspace")
+            }
+            Self::ForeignWorkspace => {
+                formatter.write_str("candidate or observations belong to another workspace")
+            }
+            Self::SignerInterpreterMismatch => {
+                formatter.write_str("candidate signer differs from named interpreter")
+            }
+            Self::DuplicateIdentity => {
+                formatter.write_str("candidate registry repeats an identity")
+            }
+            Self::Observations(error) => {
+                write!(formatter, "candidate observations are invalid: {error}")
+            }
+            Self::Encoding(error) => write!(formatter, "candidate digest encoding failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for CandidateAdmissionRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Authentication(error) => Some(error),
+            Self::Observations(error) => Some(error),
+            Self::Encoding(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 impl CandidateClaim {
+    /// Candidate identity admitted from the signed request.
+    pub fn id(&self) -> &ClaimId {
+        &self.id
+    }
+
+    /// Workspace in which this candidate was admitted.
+    pub fn workspace(&self) -> &InstitutionWorkspaceId {
+        &self.workspace
+    }
+
     /// How well-supported the claim is.
     pub fn support(&self) -> Support {
         match self.supported_by.len() {
@@ -640,6 +847,8 @@ impl CandidateClaim {
 pub struct FactApprovalRequest {
     /// The claim being accepted.
     pub claim: ClaimId,
+    /// Canonical digest of the complete admitted candidate the owner saw.
+    pub candidate_digest: Digest,
     /// The subject as the approver saw it.
     pub subject: Digest,
     /// The proposition as the approver saw it.
@@ -658,8 +867,12 @@ pub struct FactApprovalRequest {
 pub enum ApprovalRefusal {
     /// Installed signing-key verification failed.
     Authentication(AdmissionError),
-    /// The candidate or its observations belongs to another workspace.
+    /// The candidate, registry, or observations belongs to another workspace.
     ForeignWorkspace,
+    /// The authenticated approval names no admitted candidate.
+    CandidateNotAdmitted,
+    /// The owner approval does not bind the admitted candidate's full digest.
+    CandidateChanged,
     /// The installed anchors belong to another institution or workspace.
     ForeignTrustScope,
     /// The signed approver is not the workspace's installed owner.
@@ -723,8 +936,14 @@ impl std::fmt::Display for ApprovalRefusal {
             ApprovalRefusal::Authentication(error) => {
                 write!(formatter, "approval authentication failed: {error}")
             }
-            ApprovalRefusal::ForeignWorkspace => {
-                formatter.write_str("claim or observation belongs to another workspace")
+            ApprovalRefusal::ForeignWorkspace => formatter.write_str(
+                "claim, candidate registry, or observation belongs to another workspace",
+            ),
+            ApprovalRefusal::CandidateNotAdmitted => {
+                formatter.write_str("approval names no admitted candidate claim")
+            }
+            ApprovalRefusal::CandidateChanged => {
+                formatter.write_str("approval does not bind the admitted candidate claim")
             }
             ApprovalRefusal::ForeignTrustScope => {
                 formatter.write_str("installed anchors do not match approval workspace")
@@ -857,16 +1076,17 @@ pub fn approve_claim(
     workspace: &InstitutionWorkspace,
     observations: &TrustedObservationRegistry,
     anchors: &InstitutionTrustAnchors,
-    claim: &CandidateClaim,
+    candidates: &TrustedCandidateClaimRegistry,
     approval: SignedAdmissionWire<FactApprovalRequest>,
 ) -> Result<ApprovedFact, ApprovalRefusal> {
     if anchors.institution() != &workspace.institution || anchors.workspace() != &workspace.id {
         return Err(ApprovalRefusal::ForeignTrustScope);
     }
-    if claim.workspace != workspace.id || observations.workspace() != Some(&workspace.id) {
+    if candidates.workspace() != Some(&workspace.id)
+        || observations.workspace() != Some(&workspace.id)
+    {
         return Err(ApprovalRefusal::ForeignWorkspace);
     }
-    validate_claim_observations(claim, observations)?;
 
     let admitted = anchors
         .admit_expected(AdmissionKind::FactApproval, approval)
@@ -875,6 +1095,13 @@ pub fn approve_claim(
         return Err(ApprovalRefusal::NotInstitutionOwner);
     }
     let approval = admitted.payload();
+    let claim = candidates
+        .resolve(&approval.claim)
+        .ok_or(ApprovalRefusal::CandidateNotAdmitted)?;
+    if candidates.digest(&approval.claim) != Some(&approval.candidate_digest) {
+        return Err(ApprovalRefusal::CandidateChanged);
+    }
+    validate_claim_observations(claim, observations)?;
     if approval.claim != claim.id {
         return Err(ApprovalRefusal::WrongClaim {
             claim: claim.id.clone(),
@@ -1038,7 +1265,7 @@ mod tests {
             [TrustedSigningKey::new(
                 owner.clone(),
                 owner_key.verifying_key().to_bytes(),
-                BTreeSet::from([AdmissionKind::FactApproval]),
+                BTreeSet::from([AdmissionKind::CandidateClaim, AdmissionKind::FactApproval]),
             )
             .expect("fixture key is valid")],
         )
@@ -1072,9 +1299,37 @@ mod tests {
                 BTreeMap::new()
             },
             missed_axes: BTreeSet::from(["subsidiaries".to_string()]),
-            interpreter: PrincipalId::new(),
-            interpreter_delegation: DelegationId::new(),
+            interpreter: fixture.owner.clone(),
+            interpreter_delegation: fixture.workspace.owner_delegation.clone(),
         }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "authenticated fixture candidates must encode canonically"
+    )]
+    fn candidates(fixture: &Fixture, claim: &CandidateClaim) -> TrustedCandidateClaimRegistry {
+        admit_candidate(fixture, claim).expect("fixture candidate is admitted")
+    }
+
+    fn admit_candidate(
+        fixture: &Fixture,
+        claim: &CandidateClaim,
+    ) -> Result<TrustedCandidateClaimRegistry, CandidateAdmissionRefusal> {
+        TrustedCandidateClaimRegistry::admit_signed(
+            &fixture.workspace,
+            &fixture.anchors,
+            &fixture.registry,
+            [SignedAdmissionWire::sign(
+                AdmissionKind::CandidateClaim,
+                fixture.workspace.institution.clone(),
+                fixture.workspace.id.clone(),
+                fixture.owner.clone(),
+                CandidateClaimRequest::from(claim),
+                &fixture.owner_key,
+            )
+            .expect("fixture candidate encodes")],
+        )
     }
 
     #[expect(
@@ -1094,6 +1349,8 @@ mod tests {
             signer,
             FactApprovalRequest {
                 claim: claim.id.clone(),
+                candidate_digest: candidate_claim_digest(&CandidateClaimRequest::from(claim))
+                    .expect("fixture candidate encodes"),
                 subject: claim.subject.clone(),
                 proposition: claim.proposition.clone(),
                 acknowledged_status: claim.status(),
@@ -1113,7 +1370,7 @@ mod tests {
             &fixture.workspace,
             &fixture.registry,
             &fixture.anchors,
-            &candidate,
+            &candidates(&fixture, &candidate),
             approval(
                 &fixture,
                 &candidate,
@@ -1133,6 +1390,41 @@ mod tests {
     }
 
     #[test]
+    fn approval_binds_the_exact_signed_candidate_for_restart_re_admission() {
+        let fixture = fixture_with_observation();
+        let original = claim(&fixture, false);
+        let approval = approval(
+            &fixture,
+            &original,
+            fixture.owner.clone(),
+            &fixture.owner_key,
+        );
+        let reloaded = candidates(&fixture, &original);
+        let fact = approve_claim(
+            &fixture.workspace,
+            &fixture.registry,
+            &fixture.anchors,
+            &reloaded,
+            approval.clone(),
+        )
+        .expect("the same signed candidate re-admits after restart");
+        assert_eq!(fact.claim(), &original.id);
+
+        let mut altered = original;
+        altered.contradicted_by = altered.supported_by.clone();
+        assert!(matches!(
+            approve_claim(
+                &fixture.workspace,
+                &fixture.registry,
+                &fixture.anchors,
+                &candidates(&fixture, &altered),
+                approval,
+            ),
+            Err(ApprovalRefusal::CandidateChanged)
+        ));
+    }
+
+    #[test]
     fn a_raw_or_wrongly_signed_approval_cannot_create_a_fact() {
         let fixture = fixture_with_observation();
         let candidate = claim(&fixture, false);
@@ -1143,7 +1435,7 @@ mod tests {
                 &fixture.workspace,
                 &fixture.registry,
                 &fixture.anchors,
-                &candidate,
+                &candidates(&fixture, &candidate),
                 approval(&fixture, &candidate, imposter, &imposter_key),
             ),
             Err(ApprovalRefusal::Authentication(
@@ -1163,6 +1455,8 @@ mod tests {
             fixture.owner.clone(),
             FactApprovalRequest {
                 claim: candidate.id.clone(),
+                candidate_digest: candidate_claim_digest(&CandidateClaimRequest::from(&candidate))
+                    .expect("fixture candidate encodes"),
                 subject: candidate.subject.clone(),
                 proposition: candidate.proposition.clone(),
                 acknowledged_status: candidate.status(),
@@ -1177,7 +1471,7 @@ mod tests {
                 &fixture.workspace,
                 &fixture.registry,
                 &fixture.anchors,
-                &candidate,
+                &candidates(&fixture, &candidate),
                 wire
             ),
             Err(ApprovalRefusal::Authentication(
@@ -1197,6 +1491,8 @@ mod tests {
             fixture.owner.clone(),
             FactApprovalRequest {
                 claim: candidate.id.clone(),
+                candidate_digest: candidate_claim_digest(&CandidateClaimRequest::from(&candidate))
+                    .expect("fixture candidate encodes"),
                 subject: Digest::blake3(b"a later subject"),
                 proposition: candidate.proposition.clone(),
                 acknowledged_status: candidate.status(),
@@ -1211,7 +1507,7 @@ mod tests {
                 &fixture.workspace,
                 &fixture.registry,
                 &fixture.anchors,
-                &candidate,
+                &candidates(&fixture, &candidate),
                 wire
             ),
             Err(ApprovalRefusal::SubjectChanged)
@@ -1488,7 +1784,7 @@ mod tests {
                 &fixture.workspace,
                 &fixture.registry,
                 &fixture.anchors,
-                &candidate,
+                &candidates(&fixture, &candidate),
                 approval(
                     &fixture,
                     &candidate,
@@ -1510,7 +1806,7 @@ mod tests {
                 &fixture.workspace,
                 &fixture.registry,
                 &fixture.anchors,
-                &candidate,
+                &candidates(&fixture, &candidate),
                 approval(
                     &fixture,
                     &candidate,
@@ -1525,19 +1821,10 @@ mod tests {
         fabricated.supported_by =
             BTreeMap::from([("ledger".to_string(), BTreeSet::from([ObservationId::new()]))]);
         assert!(matches!(
-            approve_claim(
-                &fixture.workspace,
-                &fixture.registry,
-                &fixture.anchors,
-                &fabricated,
-                approval(
-                    &fixture,
-                    &fabricated,
-                    fixture.owner.clone(),
-                    &fixture.owner_key
-                ),
-            ),
-            Err(ApprovalRefusal::ObservationNotAdmitted { .. })
+            admit_candidate(&fixture, &fabricated),
+            Err(CandidateAdmissionRefusal::Observations(
+                ApprovalRefusal::ObservationNotAdmitted { .. }
+            ))
         ));
     }
 }

@@ -19,8 +19,9 @@ use politeia_core::{
     generation::{ApprovedGenerationInputs, ReproducibilityContract},
     institution::{InstitutionWorkspace, TrustDomainId},
     knowledge::{
-        CandidateClaim, ClaimStatus, FactApprovalRequest, Observation, TrustedObservationRegistry,
-        approve_claim,
+        CandidateClaimRequest, ClaimStatus, FactApprovalRequest, Observation,
+        TrustedCandidateClaimRegistry, TrustedObservationRegistry, approve_claim,
+        candidate_claim_digest,
     },
     lifecycle::{DeploymentTopology, LifecycleProfile},
     trust::{AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire, TrustedSigningKey},
@@ -112,7 +113,7 @@ fn approved_fact(
         [observation.clone()],
     )
     .expect("bound observation");
-    let claim = CandidateClaim {
+    let claim = CandidateClaimRequest {
         id: ClaimId::new(),
         workspace: workspace.id.clone(),
         subject: subject.clone(),
@@ -123,8 +124,8 @@ fn approved_fact(
         )]),
         contradicted_by: BTreeMap::new(),
         missed_axes: BTreeSet::new(),
-        interpreter: PrincipalId::new(),
-        interpreter_delegation: DelegationId::new(),
+        interpreter: workspace.owner.clone(),
+        interpreter_delegation: workspace.owner_delegation.clone(),
     };
     let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
         workspace.institution.clone(),
@@ -132,16 +133,31 @@ fn approved_fact(
         [TrustedSigningKey::new(
             workspace.owner.clone(),
             key.verifying_key().to_bytes(),
-            BTreeSet::from([AdmissionKind::FactApproval]),
+            BTreeSet::from([AdmissionKind::CandidateClaim, AdmissionKind::FactApproval]),
         )
         .expect("valid key")],
     )
     .expect("one owner");
+    let candidates = TrustedCandidateClaimRegistry::admit_signed(
+        workspace,
+        &anchors,
+        &observations,
+        [SignedAdmissionWire::sign(
+            AdmissionKind::CandidateClaim,
+            workspace.institution.clone(),
+            workspace.id.clone(),
+            workspace.owner.clone(),
+            claim.clone(),
+            &key,
+        )
+        .expect("signed candidate")],
+    )
+    .expect("admitted candidate");
     approve_claim(
         workspace,
         &observations,
         &anchors,
-        &claim,
+        &candidates,
         SignedAdmissionWire::sign(
             AdmissionKind::FactApproval,
             workspace.institution.clone(),
@@ -149,6 +165,7 @@ fn approved_fact(
             workspace.owner.clone(),
             FactApprovalRequest {
                 claim: claim.id.clone(),
+                candidate_digest: candidate_claim_digest(&claim).expect("candidate digest"),
                 subject,
                 proposition: claim.proposition.clone(),
                 acknowledged_status: ClaimStatus::Candidate,

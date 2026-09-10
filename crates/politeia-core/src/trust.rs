@@ -29,6 +29,8 @@ pub enum AdmissionKind {
     WorkspaceBootstrap,
     /// A provenance-bearing evidence record.
     Evidence,
+    /// An interpreter-signed candidate claim with exact observation provenance.
+    CandidateClaim,
     /// An owner approval of an institutional claim.
     FactApproval,
     /// A temporary commissioning grant.
