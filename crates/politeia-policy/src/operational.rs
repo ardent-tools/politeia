@@ -153,6 +153,78 @@ pub struct OperationalDetector {
     pub rule: PublicDetectorRule,
 }
 
+/// Reproducible known-good and planted-violation output from one public detector.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PublicDetectorCalibration {
+    /// Calibration payload schema.
+    pub schema: String,
+    /// Stable detector identity.
+    pub control: String,
+    /// Exact public detector version.
+    pub control_version: String,
+    /// Digest of the executable detector configuration.
+    pub configuration_digest: Digest,
+    /// Policy bundle in which the detector is installed.
+    pub policy: PolicyBundleId,
+    /// Digest of the exact canonical policy bytes.
+    pub policy_digest: Digest,
+    /// Digest of both public calibration inputs.
+    pub population: Digest,
+    /// Installed mediation path exercised by the detector.
+    pub mediation_path: String,
+    /// Exact public known-good resource set.
+    pub known_good_resources: BTreeSet<String>,
+    /// Actual result returned for the known-good set.
+    pub known_good_result: ControlResult,
+    /// Exact public planted-violation resource set.
+    pub planted_violation_resources: BTreeSet<String>,
+    /// Actual result returned for the planted violation.
+    pub planted_violation_result: ControlResult,
+}
+
+impl PublicDetectorCalibration {
+    /// Digest this exact public calibration report.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonical encoding error if the report cannot be represented.
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
+        digest(self)
+    }
+
+    /// Construct the activation proof that cites one retained report.
+    pub fn activation_proof(
+        &self,
+        id: politeia_core::EvidenceId,
+        retained_evidence: politeia_core::EvidenceId,
+        proved_at: Timestamp,
+    ) -> Result<ActivationProof, CanonicalError> {
+        Ok(ActivationProof {
+            id,
+            control: self.control.clone(),
+            control_version: self.control_version.clone(),
+            configuration_digest: self.configuration_digest.clone(),
+            policy: self.policy.clone(),
+            policy_digest: self.policy_digest.clone(),
+            population: self.population.clone(),
+            mediation_path: self.mediation_path.clone(),
+            planted_violation: digest(&DetectorInput {
+                kind: "politeia.public-detector.input.v1",
+                resources: &self.planted_violation_resources,
+            })?,
+            planted_violation_result: self.planted_violation_result,
+            known_good: digest(&DetectorInput {
+                kind: "politeia.public-detector.input.v1",
+                resources: &self.known_good_resources,
+            })?,
+            known_good_result: self.known_good_result,
+            retained_evidence,
+            proved_at,
+        })
+    }
+}
+
 /// An immutable, generation-bound operational policy registry.
 #[derive(Clone, Debug)]
 pub struct OperationalPolicyRegistry {
@@ -247,6 +319,38 @@ impl OperationalPolicyRegistry {
             .iter()
             .map(|(id, detector)| (id.clone(), detector.spec.clone()))
             .collect()
+    }
+
+    /// Execute both public calibration vectors for one installed detector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OperationalPolicyRefusal::UnknownDetector`] when `control`
+    /// is absent or a canonical error when its population cannot be digested.
+    pub fn calibrate_detector(
+        &self,
+        control: &str,
+    ) -> Result<PublicDetectorCalibration, OperationalPolicyRefusal> {
+        let detector = self
+            .document
+            .detectors
+            .get(control)
+            .ok_or(OperationalPolicyRefusal::UnknownDetector)?;
+        let (known_good, planted_violation) = detector.rule.calibration_inputs();
+        Ok(PublicDetectorCalibration {
+            schema: "politeia.public-detector-calibration.v1".to_string(),
+            control: control.to_string(),
+            control_version: detector.spec.control_version.clone(),
+            configuration_digest: detector.spec.configuration_digest.clone(),
+            policy: self.bundle().clone(),
+            policy_digest: self.digest().clone(),
+            population: detector.spec.calibration_population.clone(),
+            mediation_path: detector.spec.mediation_path.clone(),
+            known_good_resources: known_good.clone(),
+            known_good_result: detector.rule.evaluate(known_good).0,
+            planted_violation_resources: planted_violation.clone(),
+            planted_violation_result: detector.rule.evaluate(planted_violation).0,
+        })
     }
 
     /// Verify that a signed run reports the public rule's actual result.

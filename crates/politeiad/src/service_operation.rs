@@ -16,10 +16,15 @@ use politeia_core::{
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use politeia_evidence::{
-    assurance::{ActivationProof, AuthorizedControlRun, ControlRun, VerifiedActivation},
+    assurance::{
+        ActivationProof, AuthorizedControlRun, ControlRun, VERIFY_POLICY_CONTROL_ACTION,
+        VerifiedActivation, policy_control_resource,
+    },
     authority::{AuthorityContext, DirectGrant, institution_audience},
 };
-use politeia_policy::operational::{OperationalPolicyRegistry, operation_scope};
+use politeia_policy::operational::{
+    OperationalPolicyRegistry, PublicDetectorCalibration, operation_scope,
+};
 use politeia_policy::{PolicyDecision, evaluate::EvaluationEvidence};
 use politeia_runtime::{
     AuthorizationLedger, AuthorizedEffect, Dispatcher, DispatcherConfig, EffectPort,
@@ -57,6 +62,8 @@ pub const CAPTURE_SOURCE_OPERATION: &str = "capture_authorized_source";
 pub const VERIFY_EXECUTION_CAPABILITY_ACTION: &str = "verify-execution-capability";
 /// Exact signed-evidence method for the reproducible public capability probe.
 pub const CAPABILITY_QUALIFICATION_METHOD: &str = "politeia.public-capability-qualification.v1";
+/// Exact signed-evidence method for a reproduced public detector calibration.
+pub const DETECTOR_CALIBRATION_METHOD: &str = "politeia.public-detector-calibration.v1";
 /// Bounded task class demonstrated by the installed local-handler probe.
 pub const BOUNDED_LOCAL_OPERATION_TASK_CLASS: &str = "politeia.bounded-local-operation.v1";
 /// Capability demonstrated by the installed deterministic manifest probe.
@@ -159,6 +166,20 @@ pub struct CapabilityEvidenceSubmission {
     pub evidence: Vec<SignedAdmissionWire<EvidenceRequest>>,
     /// Public probe payload whose canonical digest every evidence record signs.
     pub qualification: CapabilityQualificationEvidence,
+}
+
+/// Narrow commissioning input for one reproduced public detector calibration.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DetectorCalibrationEvidenceSubmission {
+    /// Exact canonical policy artifact under the owner-signed workspace digest.
+    pub policy_bytes: Vec<u8>,
+    /// Actual known-good and planted-violation detector output.
+    pub calibration: PublicDetectorCalibration,
+    /// Already admitted direct owner grant for verifying this exact control.
+    pub authority: SignedAdmissionWire<Delegation>,
+    /// Verifier-signed retained evidence for this exact calibration digest.
+    pub evidence: SignedAdmissionWire<EvidenceRequest>,
 }
 
 /// Signed assurance material accompanying one principal-authenticated operation.
@@ -1036,6 +1057,96 @@ impl PoliteiadService {
         })
     }
 
+    /// Reproduce and retain one verifier-signed public detector calibration.
+    pub(crate) async fn admit_detector_calibration_evidence(
+        &self,
+        submission: DetectorCalibrationEvidenceSubmission,
+    ) -> Result<crate::OperationResult, CoordinatorError> {
+        let durable = self.durable_snapshot().await?;
+        let now = PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone())
+            .observed_at()
+            .await
+            .map_err(operational_refusal)?;
+        let policy = OperationalPolicyRegistry::from_artifact_bytes(
+            &submission.policy_bytes,
+            &self.workspace().policy_bundle,
+            &self.workspace().policy_digest,
+        )
+        .map_err(operational_refusal)?;
+        let reproduced = policy
+            .calibrate_detector(&submission.calibration.control)
+            .map_err(operational_refusal)?;
+        if reproduced != submission.calibration {
+            return Err(operational_refusal(
+                "detector calibration differs from actual public detector output",
+            ));
+        }
+        let evidence = self
+            .anchors()
+            .admit_expected(AdmissionKind::Evidence, submission.evidence.clone())
+            .map_err(operational_refusal)?;
+        let authority =
+            self.admit_exact_direct_authority(&durable, &submission.authority, evidence.signer())?;
+        DirectGrant::admit(
+            &authority,
+            &AuthorityContext::new(
+                self.workspace().institution.clone(),
+                self.workspace().id.clone(),
+                durable.owner.clone(),
+                now,
+            ),
+            evidence.signer(),
+            VERIFY_POLICY_CONTROL_ACTION,
+            &policy_control_resource(&submission.calibration.control),
+        )
+        .map_err(operational_refusal)?;
+        let calibration_digest = reproduced.digest().map_err(operational_refusal)?;
+        if evidence.payload().subject != calibration_digest
+            || evidence.payload().producer_delegation != authority.payload().id
+            || evidence.payload().method != DETECTOR_CALIBRATION_METHOD
+            || evidence.payload().payload_digest != calibration_digest
+            || evidence.payload().observed_at > now
+            || evidence.payload().independence
+                != politeia_core::evidence::IndependenceClass::IndependentAgent
+            || durable.evidence.contains_key(&evidence.payload().id)
+        {
+            return Err(operational_refusal(
+                "detector calibration evidence does not bind its public report and live verifier",
+            ));
+        }
+        let transition = crate::service::signed_wire_record(&submission.evidence)?;
+        let receipt = self
+            .storage()
+            .commit_authorized(
+                &ScopedCommit {
+                    scope: self.scope().clone(),
+                    expected_revision: durable.revision,
+                    model: durable.model,
+                    model_kind: "detector_calibration_evidence".to_string(),
+                    transition: transition.clone(),
+                    state: Vec::new(),
+                    evidence: vec![EvidenceAdmission {
+                        id: evidence.payload().id.clone(),
+                        record: transition,
+                    }],
+                    outbox: Vec::new(),
+                },
+                std::slice::from_ref(&authority),
+            )
+            .await
+            .map_err(|error| operational_refusal(error.to_string()))?;
+        Ok(crate::OperationResult::Coordinated {
+            result: serde_json::json!({
+                "control": submission.calibration.control,
+                "calibration": calibration_digest,
+                "evidence": evidence.payload().id,
+                "revision": receipt.revision,
+                "admitted": true,
+            }),
+            evidence_refs: vec![evidence.payload().id.0.to_string()],
+        })
+    }
+
     /// Admit one complete active-generation submission for a typed effect port.
     ///
     /// This is the shared authority seam for the manifest, source-capture, and
@@ -1385,6 +1496,30 @@ impl PoliteiadService {
                 &evidence.activation_authority,
                 activation.signer(),
             )?;
+            let calibration = registry
+                .policy()
+                .calibrate_detector(&activation.payload().control)
+                .map_err(operational_refusal)?;
+            let calibration_digest = calibration.digest().map_err(operational_refusal)?;
+            let retained_wire =
+                Self::durable_evidence_wire(durable, &activation.payload().retained_evidence)?;
+            let retained = self
+                .anchors()
+                .admit_expected(AdmissionKind::Evidence, retained_wire)
+                .map_err(operational_refusal)?;
+            if retained.signer() != activation.signer()
+                || retained.payload().subject != calibration_digest
+                || retained.payload().producer_delegation != activation_authority.payload().id
+                || retained.payload().method != DETECTOR_CALIBRATION_METHOD
+                || retained.payload().payload_digest != calibration_digest
+                || retained.payload().observed_at > activation.payload().proved_at
+                || retained.payload().independence
+                    != politeia_core::evidence::IndependenceClass::IndependentAgent
+            {
+                return Err(operational_refusal(
+                    "activation proof does not resolve its retained public calibration evidence",
+                ));
+            }
             let authorization = direct_grant_authorization_digest(run_authority.payload())
                 .map_err(operational_refusal)?;
             if run.payload().authorization != authorization {
@@ -1536,7 +1671,7 @@ impl PoliteiadService {
                 .payload()
                 .evidence
                 .iter()
-                .map(|id| self.durable_evidence_wire(durable, id))
+                .map(|id| Self::durable_evidence_wire(durable, id))
                 .collect::<Result<Vec<_>, _>>()?;
             let admitted_evidence =
                 TrustedEvidenceRegistry::admit_signed(self.anchors(), evidence_wires)
@@ -1571,7 +1706,6 @@ impl PoliteiadService {
     }
 
     fn durable_evidence_wire(
-        &self,
         durable: &politeia_storage::WorkspaceSnapshot,
         id: &EvidenceId,
     ) -> Result<SignedAdmissionWire<EvidenceRequest>, CoordinatorError> {

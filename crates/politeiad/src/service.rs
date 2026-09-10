@@ -44,8 +44,8 @@ use crate::{
     CommissioningCoordinator, CoordinatorError, OperationResult, SemanticOperation,
     config::InstallationLayout,
     service_operation::{
-        CAPTURE_SOURCE_OPERATION, CapabilityEvidenceSubmission, InstalledOperationHandler,
-        OperationSubmission,
+        CAPTURE_SOURCE_OPERATION, CapabilityEvidenceSubmission,
+        DetectorCalibrationEvidenceSubmission, InstalledOperationHandler, OperationSubmission,
     },
 };
 
@@ -128,6 +128,12 @@ pub enum CommissioningRequest {
     CapabilityEvidence {
         /// Exact verification, grant, signed evidence, and public probe result.
         submission: Box<CapabilityEvidenceSubmission>,
+    },
+    /// Reproduce and retain signed activation evidence for one exact public
+    /// operational detector.
+    DetectorCalibrationEvidence {
+        /// Policy bytes, actual calibration report, live grant, and signed evidence.
+        submission: Box<DetectorCalibrationEvidenceSubmission>,
     },
 }
 
@@ -1087,6 +1093,9 @@ impl PoliteiadService {
             }
             CommissioningRequest::CapabilityEvidence { submission } => {
                 self.admit_capability_evidence(*submission).await
+            }
+            CommissioningRequest::DetectorCalibrationEvidence { submission } => {
+                self.admit_detector_calibration_evidence(*submission).await
             }
             CommissioningRequest::AdmitDelegation { delegation } => {
                 let admitted = self
