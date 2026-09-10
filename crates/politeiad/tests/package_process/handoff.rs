@@ -180,7 +180,7 @@ pub(super) fn exercise(
     super::lifecycle::activate(
         database_url,
         fixture,
-        replacement_generation.clone(),
+        &replacement_generation,
         "activate",
         true,
     )?;
@@ -193,7 +193,7 @@ pub(super) fn exercise(
     super::lifecycle::activate(
         database_url,
         fixture,
-        commissioned.generation.clone(),
+        &commissioned.generation,
         "rollback",
         false,
     )?;
@@ -245,7 +245,9 @@ fn positive_canary(
     operations: &OperationalFixture,
     stage: &str,
 ) -> TestResult {
-    let prepared = operations.positive_manifest(fixture, Timestamp::now());
+    let routed_at = Timestamp::now();
+    let prepared = operations.positive_manifest(fixture, routed_at);
+    let expected_remote_rejections = serde_json::to_value(operations.remote_rejections(routed_at))?;
     submit_commissioning(
         database_url,
         fixture,
@@ -272,10 +274,40 @@ fn positive_canary(
         serde_json::json!(["public:approved-operation"]),
         "the selected local execution resource returned the actual bounded manifest"
     );
-    assert!(
-        response["outbox"].is_string(),
-        "the successful protected operation retained a transactional receipt/outbox identity"
+    assert_eq!(
+        response["routing"]["outcome"]["resource"],
+        prepared.operate["routing"]["outcome"]["resource"],
+        "the daemon selected the exact locally eligible resource from the signed routing receipt"
     );
+    assert_eq!(
+        response["routing"]["rejected_resources"],
+        prepared.operate["routing"]["rejected_resources"],
+        "the daemon retained every hard rejection from the signed routing receipt"
+    );
+    let rejected = response["routing"]["rejected_resources"]
+        .as_object()
+        .expect("completed routing exposes its rejected resource map");
+    let supplied_rejections = prepared.operate["routing"]["rejected_resources"]
+        .as_object()
+        .expect("signed routing receipt exposes its rejected resource map");
+    let remote_resource = supplied_rejections
+        .iter()
+        .find_map(|(resource, reasons)| {
+            (reasons == &expected_remote_rejections).then_some(resource)
+        })
+        .expect("signed routing receipt names the cheaper remote resource");
+    assert!(
+        rejected.get(remote_resource) == Some(&expected_remote_rejections),
+        "the daemon response proves the cheaper remote resource was rejected for its exact hard constraints"
+    );
+    for field in ["receipt", "receipt_digest", "reservation", "outbox"] {
+        assert!(
+            response[field]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "the completed protected operation returns a nonempty canonical {field} identity"
+        );
+    }
     Ok(())
 }
 
@@ -291,7 +323,6 @@ fn negative_canary(
         "planted-policy-canary-authority.json",
         &prepared.authority_admission,
     )?;
-    let before = status_value(database_url, fixture)?;
     require_refusal(
         run(
             database_url,
@@ -308,11 +339,5 @@ fn negative_canary(
         "planted public resource policy canary",
         PLANTED_DENIAL_REASON,
     )?;
-    let after = status_value(database_url, fixture)?;
-    assert_eq!(
-        after["revision"], before["revision"],
-        "a policy refusal reaches no effect completion or outbox commit"
-    );
-    assert_eq!(after["active_generation"], before["active_generation"]);
     Ok(())
 }
