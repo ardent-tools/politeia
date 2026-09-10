@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use ed25519_dalek::SigningKey;
 use politeia_core::{
-    CommissioningRecordId, Delegation, Digest, Effect, EvidenceId, PrincipalId, ResourceBudget,
+    CommissioningRecordId, Delegation, Digest, Effect, PrincipalId, ResourceBudget,
     RuntimeGenerationId,
     canonical::to_canonical_bytes,
     trust::{AdmissionKind, SignedAdmissionWire},
@@ -132,7 +132,7 @@ impl ReferenceFixture {
             id: CommissioningRecordId::new(),
             requester: requester.clone(),
             delegation: delegation.id.clone(),
-            budget: delegation.budget.clone(),
+            budget: active_learning_budget(),
             input: ContextRequest {
                 institution: self.host_trust.workspace.institution.clone(),
                 workspace: self.host_trust.workspace.id.clone(),
@@ -185,7 +185,7 @@ impl ReferenceFixture {
             id: CommissioningRecordId::new(),
             requester: requester.clone(),
             delegation: delegation.id.clone(),
-            budget: delegation.budget.clone(),
+            budget: active_learning_budget(),
             input: CapabilityRequest {
                 institution: self.host_trust.workspace.institution.clone(),
                 workspace: self.host_trust.workspace.id.clone(),

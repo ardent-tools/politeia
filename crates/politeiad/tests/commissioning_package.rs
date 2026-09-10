@@ -14,6 +14,8 @@
 #[path = "package_support/mod.rs"]
 mod package_support;
 
+#[path = "package_process/evidence.rs"]
+mod evidence;
 #[path = "package_process/handoff.rs"]
 mod handoff;
 #[path = "package_process/learning.rs"]
@@ -78,7 +80,9 @@ fn command(database_url: &str, arguments: &[&Path]) -> Command {
 }
 
 fn run(database_url: &str, arguments: &[&Path]) -> TestResult<Output> {
-    Ok(command(database_url, arguments).output()?)
+    let output = command(database_url, arguments).output()?;
+    evidence::record_process(arguments, &output)?;
+    Ok(output)
 }
 
 fn require_success(output: Output, phase: &str) -> TestResult<String> {
@@ -233,6 +237,7 @@ fn staged_generation_inputs_bind_complete_public_artifacts() -> TestResult {
 #[test]
 #[ignore = "requires POLITEIA_STORAGE_TEST_DATABASE_URL and a disposable PostgreSQL instance"]
 fn two_institution_installations_start_disjoint_daemons() -> TestResult {
+    let evidence = evidence::Session::begin(client_binary(), daemon_binary())?;
     let database_url = database_url()?;
     assert_ne!(client_binary(), daemon_binary());
     let executable = Path::new(daemon_binary());
@@ -241,6 +246,13 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     let mut analytics = ReferenceFixture::new(ReferenceInstitutionKind::Analytics, executable);
     let software_operations = OperationalFixture::install(&mut software);
     let analytics_operations = OperationalFixture::install(&mut analytics);
+    evidence::record_observation(
+        "installed_trust",
+        &serde_json::json!({
+            "software_development": software.host_trust,
+            "analytics": analytics.host_trust,
+        }),
+    )?;
     assert_ne!(software.kind.directory(), analytics.kind.directory());
     assert_ne!(
         fs::read(&software.source_document)?,
@@ -737,7 +749,12 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         analytics_result["active_generation"],
         serde_json::json!(analytics_generation.generation)
     );
-    Ok(())
+    evidence.finish(&serde_json::json!({
+        "software_development": software_result,
+        "analytics": analytics_result,
+        "software_replacement_generation": software_replacement,
+        "analytics_replacement_generation": analytics_replacement,
+    }))
 }
 
 fn submit_commissioning(

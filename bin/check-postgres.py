@@ -20,6 +20,10 @@ import uuid
 
 def run_tests(database_url: str) -> int:
     environment = dict(os.environ, POLITEIA_STORAGE_TEST_DATABASE_URL=database_url)
+    environment.setdefault(
+        "POLITEIA_ACCEPTANCE_ARTIFACT_DIR",
+        str(Path(__file__).resolve().parent.parent / "target" / "package-acceptance"),
+    )
     suites = [
         ["-p", "politeia-storage"],
         ["-p", "politeiad", "--test", "commissioning_package"],

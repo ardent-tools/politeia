@@ -98,7 +98,7 @@ pub(crate) fn exercise(
         context.input_digest().clone(),
         vec![context_grant.clone()],
         context.resources().clone(),
-        context_grant.budget.clone(),
+        active_learning_budget(),
         now,
         Some(context.idempotency_key()),
     );
@@ -144,7 +144,7 @@ pub(crate) fn exercise(
         discovery.input_digest().clone(),
         vec![discovery_grant.clone()],
         discovery.resources().clone(),
-        discovery_grant.budget.clone(),
+        active_learning_budget(),
         now,
         Some(discovery.idempotency_key()),
     );
@@ -183,7 +183,7 @@ pub(crate) fn exercise(
         Digest::blake3(b"substituted active learning input"),
         vec![context_grant.clone()],
         substituted.resources().clone(),
-        context_grant.budget.clone(),
+        active_learning_budget(),
         now,
         Some(substituted.idempotency_key()),
     );
@@ -315,7 +315,7 @@ pub(crate) fn exercise(
         before_correction.input_digest().clone(),
         vec![broad_context_grant.clone()],
         before_correction.resources().clone(),
-        broad_context_grant.budget.clone(),
+        active_learning_budget(),
         Timestamp::now(),
         Some(before_correction.idempotency_key()),
     );
@@ -391,7 +391,7 @@ pub(crate) fn exercise(
         replacement_context.input_digest().clone(),
         vec![broad_context_grant.clone()],
         replacement_context.resources().clone(),
-        broad_context_grant.budget.clone(),
+        active_learning_budget(),
         Timestamp::now(),
         Some(replacement_context.idempotency_key()),
     );
@@ -448,6 +448,23 @@ fn learning_grant(
     resources: BTreeSet<String>,
     at: Timestamp,
 ) -> Delegation {
+    // Leave room for repeated legitimate disclosures and a replay attempt.
+    // A spent one-call budget must not substitute for replay protection.
+    let mut budget = active_learning_budget();
+    for cap in [
+        &mut budget.wall_ms,
+        &mut budget.cpu_ms,
+        &mut budget.memory_bytes,
+        &mut budget.io_bytes,
+        &mut budget.network_bytes,
+        &mut budget.external_cost_microunits,
+    ] {
+        *cap = cap.map(|value| {
+            value
+                .checked_mul(4)
+                .expect("fixture budget has room for four requests")
+        });
+    }
     Delegation {
         id: DelegationId::new(),
         issuer: fixture.identities.owner.clone(),
@@ -459,7 +476,7 @@ fn learning_grant(
         data_classes: BTreeSet::from([DataClass::Internal]),
         audience: BTreeSet::from(["commissioning".to_owned()]),
         expires_at: at + SignedDuration::from_hours(1),
-        budget: active_learning_budget(),
+        budget,
     }
 }
 

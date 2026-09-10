@@ -66,7 +66,8 @@ pub(crate) const PUBLIC_RESOURCE_DETECTOR: &str = "public-resource-boundary";
 /// Stable forbidden input used to demonstrate an actual policy denial.
 pub(crate) const PLANTED_FORBIDDEN_RESOURCE: &str = "forbidden:planted-operation";
 /// Exact normalized denial reason emitted by the enforced binding.
-pub(crate) const PLANTED_DENIAL_REASON: &str = "public-resource-boundary violation applies Deny";
+pub(crate) const PLANTED_DENIAL_REASON: &str =
+    "public-resource-boundary:operation:derive_resource_manifest violation applies Deny";
 
 /// Signed daemon admission and operation request for one manifest canary.
 pub(crate) struct PreparedManifestOperation {

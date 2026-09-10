@@ -107,10 +107,20 @@ jobs:
       - run: cargo check --workspace --all-targets --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - name: Prove durable admission and daemon package against PostgreSQL
+      - id: package
+        name: Prove durable admission and daemon package against PostgreSQL
         env:
           POLITEIA_STORAGE_TEST_DATABASE_URL: postgresql://politeia:politeia_ci_fixture@127.0.0.1:5432/politeia_test
+          POLITEIA_ACCEPTANCE_ARTIFACT_DIR: ${{ runner.temp }}/politeia-package
         run: python3 bin/check-postgres.py
+      - name: Retain executable package observations
+        if: always() && steps.package.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: politeia-package-${{ github.sha }}
+          path: ${{ runner.temp }}/politeia-package
+          if-no-files-found: error
+          retention-days: 30
       - id: derive-schemas
         name: Derive public projections
         shell: bash
