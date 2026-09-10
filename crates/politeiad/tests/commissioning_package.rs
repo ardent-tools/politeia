@@ -509,19 +509,34 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     require_coordinated(
         run(
             &database_url,
-            &[Path::new("commissioning"), &software_socket, &software_context_delegation_request],
+            &[
+                Path::new("commissioning"),
+                &software_socket,
+                &software_context_delegation_request,
+            ],
         )?,
         "software context delegation admission",
     )?;
-    let software_context_request = write_request(&software, "software-bootstrap-context.json", &software_context)?;
+    let software_context_request = write_request(
+        &software,
+        "software-bootstrap-context.json",
+        &software_context,
+    )?;
     let context = require_coordinated(
         run(
             &database_url,
-            &[Path::new("commissioning"), &software_socket, &software_context_request],
+            &[
+                Path::new("commissioning"),
+                &software_socket,
+                &software_context_request,
+            ],
         )?,
         "software bootstrap context disclosure",
     )?;
-    assert_eq!(context["context"]["input_ids"][0], serde_json::json!(software_learning.source));
+    assert_eq!(
+        context["context"]["input_ids"][0],
+        serde_json::json!(software_learning.source)
+    );
     assert_eq!(
         context["content"][software_learning.source.0.to_string()],
         serde_json::json!(fs::read(&software.source_document)?)
@@ -529,7 +544,11 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     require_refusal(
         run(
             &database_url,
-            &[Path::new("commissioning"), &software_socket, &software_context_request],
+            &[
+                Path::new("commissioning"),
+                &software_socket,
+                &software_context_request,
+            ],
         )?,
         "software bootstrap context replay",
         "replay",

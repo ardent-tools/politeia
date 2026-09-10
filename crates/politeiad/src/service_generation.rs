@@ -50,6 +50,8 @@ use crate::{
 const ACTIVATE_CONTROL: &str = "generation:activate";
 const ROLLBACK_CONTROL: &str = "generation:rollback";
 
+mod reproduction;
+
 /// Paths to complete artifact inputs, relative to the installed workspace.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +162,11 @@ pub enum GenerationRequest {
         /// Generation digest returned by publish.
         generation: Digest,
     },
+    /// Materialize the retained inputs again and compare the complete bundle.
+    Reproduce {
+        /// Generation digest returned by publish.
+        generation: Digest,
+    },
     /// Compare-and-swap an admitted generation into the active slot.
     Activate {
         /// Target generation digest.
@@ -213,6 +220,9 @@ impl PoliteiadService {
                     .await
             }
             GenerationRequest::Verify { generation } => self.verify_generation(generation).await,
+            GenerationRequest::Reproduce { generation } => {
+                self.reproduce_generation(generation).await
+            }
             GenerationRequest::Activate {
                 generation,
                 expected_revision,

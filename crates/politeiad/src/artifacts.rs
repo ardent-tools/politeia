@@ -17,6 +17,9 @@ use politeia_core::{
 };
 use serde::{Deserialize, Serialize};
 
+mod reproduction;
+pub use reproduction::GenerationReproduction;
+
 const REQUIRED_COMPONENTS: &[&str] = &[
     "executable",
     "migrations",
@@ -399,7 +402,7 @@ impl GenerationArtifactBuilder {
         generation_digest: &Digest,
     ) -> Result<VerifiedGenerationArtifact, ArtifactError> {
         let directory = self.artifact_dir.join(generation_digest.as_str());
-        let bytes = fs::read(directory.join("manifest.json"))?;
+        let bytes = read_source(&directory.join("manifest.json"))?;
         let manifest: BundleManifest =
             serde_json::from_slice(&bytes).map_err(|e| ArtifactError::Encoding(e.to_string()))?;
         if &manifest.generation_digest != generation_digest {
@@ -432,7 +435,7 @@ impl GenerationArtifactBuilder {
             ));
         }
         for digest in manifest.components.values() {
-            let value = fs::read(directory.join("components").join(digest.as_str()))?;
+            let value = read_source(&directory.join("components").join(digest.as_str()))?;
             if Digest::blake3(&value) != *digest {
                 return Err(ArtifactError::Substitution(digest.as_str().to_owned()));
             }
@@ -452,8 +455,9 @@ impl GenerationArtifactBuilder {
         &self,
         generation_digest: &Digest,
     ) -> Result<CommissioningProvenance, ArtifactError> {
-        let bytes = fs::read(
-            self.artifact_dir
+        let bytes = read_source(
+            &self
+                .artifact_dir
                 .join(generation_digest.as_str())
                 .join("manifest.json"),
         )?;
@@ -489,7 +493,7 @@ impl VerifiedGenerationArtifact {
         let digest = expected
             .get(role)
             .ok_or_else(|| ArtifactError::MissingComponent(role.to_owned()))?;
-        let bytes = fs::read(self.directory.join("components").join(digest.as_str()))?;
+        let bytes = read_source(&self.directory.join("components").join(digest.as_str()))?;
         if Digest::blake3(&bytes) != *digest {
             return Err(ArtifactError::Substitution(role.to_owned()));
         }
@@ -874,6 +878,77 @@ mod tests {
         assert_eq!(artifact.directory(), reread.directory());
         assert_eq!(artifact.manifest_digest(), reread.manifest_digest());
         assert!(reread.directory().join("components").is_dir());
+    }
+
+    #[test]
+    fn reproduces_from_retained_inputs_after_original_sources_are_removed() {
+        let directory = TestDirectory::new();
+        let fixture = fixture(true);
+        let (builder, _, artifact) = publish_fixture(&fixture, directory.path());
+        let trust = anchors(&fixture);
+        fs::remove_dir_all(directory.path().join("source-inputs"))
+            .expect("original commissioning source tree is no longer available");
+        let generation = artifact.generation().id().digest();
+        let reproduced = builder
+            .reproduce(
+                &trust,
+                &fixture.workspace,
+                &fixture.commissioning,
+                generation,
+            )
+            .expect("retained signed inputs reproduce without signing another request");
+        assert_eq!(&reproduced.generation, generation);
+        assert_eq!(&reproduced.artifact_manifest, artifact.manifest_digest());
+        assert_eq!(
+            reproduced.components_compared,
+            super::expected_components(artifact.generation())
+                .expect("complete component set resolves")
+                .len()
+        );
+        let outputs: Vec<_> = fs::read_dir(directory.path().join("artifacts"))
+            .expect("artifact directory remains readable")
+            .map(|entry| entry.expect("artifact entry reads").file_name())
+            .collect();
+        assert_eq!(outputs, vec![std::ffi::OsString::from(generation.as_str())]);
+
+        let policy = Digest::blake3(b"policy");
+        fs::write(
+            artifact
+                .directory()
+                .join("components")
+                .join(policy.as_str()),
+            b"substituted",
+        )
+        .expect("adversary can modify retained inputs");
+        assert!(matches!(builder.reproduce(
+            &trust, &fixture.workspace, &fixture.commissioning, generation,
+        ), Err(ArtifactError::Substitution(role)) if role == policy.as_str()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verified_reads_refuse_a_symlink_even_to_identical_component_bytes() {
+        let directory = TestDirectory::new();
+        let fixture = fixture(true);
+        let (builder, _, artifact) = publish_fixture(&fixture, directory.path());
+        let policy = artifact
+            .directory()
+            .join("components")
+            .join(Digest::blake3(b"policy").as_str());
+        let outside = directory.path().join("outside-policy");
+        fs::rename(&policy, &outside)
+            .expect("adversary moves the approved bytes outside the bundle");
+        std::os::unix::fs::symlink(&outside, &policy)
+            .expect("adversary installs a matching symlink");
+        assert!(
+            matches!(artifact.policy_bytes(), Err(ArtifactError::Io(error))
+            if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()))
+        );
+        assert!(matches!(builder.verify(
+            &anchors(&fixture), &fixture.workspace, &fixture.commissioning,
+            artifact.generation().id().digest(),
+        ), Err(ArtifactError::Io(error))
+            if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())));
     }
 
     #[test]
