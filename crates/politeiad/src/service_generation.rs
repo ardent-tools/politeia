@@ -36,7 +36,10 @@ use serde_json::{Value, json};
 
 use crate::{
     CoordinatorError, OperationResult,
-    artifacts::{ArtifactSources, CommissioningProvenance, GenerationArtifactBuilder},
+    artifacts::{
+        ArtifactSources, CommissioningProvenance, GenerationArtifactBuilder,
+        VerifiedGenerationArtifact,
+    },
     service::PoliteiadService,
 };
 
@@ -320,9 +323,26 @@ impl PoliteiadService {
         &self,
         generation: Digest,
     ) -> Result<OperationResult, CoordinatorError> {
+        let artifact = self.verified_generation(&generation).await?;
+        Ok(OperationResult::Coordinated {
+            result: json!({
+                "generation": generation,
+                "artifact_manifest": artifact.manifest_digest(),
+                "verified": true,
+                "build_reproducibility": "not_claimed",
+            }),
+            evidence_refs: Vec::new(),
+        })
+    }
+
+    /// Re-admit provenance and reread every byte of one durable generation.
+    pub(crate) async fn verified_generation(
+        &self,
+        generation: &Digest,
+    ) -> Result<VerifiedGenerationArtifact, CoordinatorError> {
         let stored = self
             .storage()
-            .load_generation(self.scope(), &generation)
+            .load_generation(self.scope(), generation)
             .await
             .map_err(storage_refusal)?;
         let inputs = stored_inputs(&stored)?;
@@ -351,27 +371,14 @@ impl PoliteiadService {
             )
             .await?;
         let artifact = builder
-            .verify(
-                self.anchors(),
-                self.workspace(),
-                &commissioning,
-                &generation,
-            )
+            .verify(self.anchors(), self.workspace(), &commissioning, generation)
             .map_err(refusal)?;
         if artifact.manifest_digest() != &stored.artifact_digest {
             return Err(CoordinatorError::Refused(
                 "stored artifact manifest differs from immutable artifact bytes".to_string(),
             ));
         }
-        Ok(OperationResult::Coordinated {
-            result: json!({
-                "generation": generation,
-                "artifact_manifest": artifact.manifest_digest(),
-                "verified": true,
-                "build_reproducibility": "not_claimed",
-            }),
-            evidence_refs: Vec::new(),
-        })
+        Ok(artifact)
     }
 
     async fn activate_generation(
