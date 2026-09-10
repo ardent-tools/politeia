@@ -159,10 +159,10 @@ pub async fn serve_once(
             let request_id = request.request_id.clone();
             match handle(coordinator, request).await {
                 Ok(response) => response,
-                Err(error) => error_response(request_id, error),
+                Err(error) => error_response(request_id, &error),
             }
         }
-        Err(error) => error_response(String::new(), error),
+        Err(error) => error_response(String::new(), &error),
     };
     let bytes = serde_json::to_vec(&response)
         .map_err(|error| TransportError::Encoding(error.to_string()))?;
@@ -237,7 +237,7 @@ async fn handle(
     })
 }
 
-fn error_response(request_id: String, error: TransportError) -> LocalResponse {
+fn error_response(request_id: String, error: &TransportError) -> LocalResponse {
     let code = match error {
         TransportError::RequestTooLarge => "request_too_large",
         TransportError::InsecureSocketDirectory => "insecure_socket_directory",
@@ -339,6 +339,62 @@ mod tests {
         .expect("local semantic request succeeds");
         server.await.expect("server task finishes");
         assert!(matches!(response.outcome, LocalOutcome::Ok { .. }));
+        fs::remove_dir_all(root).expect("fixture is removable");
+    }
+
+    #[tokio::test]
+    async fn malformed_frame_is_refused_without_stopping_the_next_connection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let root = std::env::temp_dir().join(format!(
+            "politeiad-transport-error-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let run = root.join("run");
+        fs::create_dir_all(&run).expect("fixture directory is creatable");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700))
+            .expect("fixture run directory becomes private");
+        let socket = run.join("politeiad.sock");
+        let listener = bind(&socket).await.expect("fixture socket binds");
+        let server = tokio::spawn(async move {
+            let coordinator = crate::UnavailableCoordinator;
+            serve_once(&listener, &coordinator)
+                .await
+                .expect("malformed connection receives a refusal");
+            serve_once(&listener, &coordinator)
+                .await
+                .expect("next connection remains servable");
+        });
+
+        let mut stream = UnixStream::connect(&socket)
+            .await
+            .expect("fixture client connects");
+        stream
+            .write_all(b"{not-json}\n")
+            .await
+            .expect("fixture malformed frame writes");
+        let mut line = String::new();
+        BufReader::new(stream)
+            .read_line(&mut line)
+            .await
+            .expect("malformed frame receives response");
+        let malformed: LocalResponse = serde_json::from_str(&line).expect("refusal is JSON");
+        assert!(matches!(
+            malformed.outcome,
+            LocalOutcome::Error { ref code, .. } if code == "invalid_request"
+        ));
+
+        let valid = request(
+            &socket,
+            &current_request("after-error".to_string(), SemanticOperation::Status),
+        )
+        .await
+        .expect("later request receives a response");
+        assert!(matches!(
+            valid.outcome,
+            LocalOutcome::Error { ref code, .. } if code == "coordinator_unavailable"
+        ));
+        server.await.expect("server task finishes");
         fs::remove_dir_all(root).expect("fixture is removable");
     }
 }

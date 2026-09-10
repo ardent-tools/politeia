@@ -98,7 +98,7 @@ impl PoliteiadService {
         );
         let storage = PostgresStorage::connect(database_url)
             .await
-            .map_err(storage_refusal)?;
+            .map_err(|error| storage_refusal(&error))?;
         Ok(Self {
             layout,
             workspace,
@@ -111,7 +111,10 @@ impl PoliteiadService {
 
     /// Apply PostgreSQL migrations as part of an explicit host setup action.
     pub async fn migrate(&self) -> Result<(), CoordinatorError> {
-        self.storage.migrate().await.map_err(storage_refusal)
+        self.storage
+            .migrate()
+            .await
+            .map_err(|error| storage_refusal(&error))
     }
 
     /// Create or verify the owner-signed workspace skeleton in PostgreSQL.
@@ -146,8 +149,8 @@ impl PoliteiadService {
                     model: record,
                 })
                 .await
-                .map_err(storage_refusal),
-            Err(error) => Err(storage_refusal(error)),
+                .map_err(|error| storage_refusal(&error)),
+            Err(error) => Err(storage_refusal(&error)),
         }
     }
 
@@ -193,7 +196,7 @@ impl PoliteiadService {
             .storage
             .load_active_generation(&self.scope)
             .await
-            .map_err(storage_refusal)?
+            .map_err(|error| storage_refusal(&error))?
             .map(|digest| digest.as_str().to_string());
         Ok(OperationResult::Coordinated {
             result: json!({
@@ -227,7 +230,7 @@ impl PoliteiadService {
             .storage
             .load_workspace(&self.scope)
             .await
-            .map_err(storage_refusal)?;
+            .map_err(|error| storage_refusal(&error))?;
         if durable.owner != self.workspace.owner
             || durable.owner_delegation != self.workspace.owner_delegation
         {
@@ -260,7 +263,7 @@ impl PoliteiadService {
         let now = PostgresAuthorizationLedger::new(self.storage.clone(), self.scope.clone())
             .observed_at()
             .await
-            .map_err(runtime_refusal)?;
+            .map_err(|error| runtime_refusal(&error))?;
         submission
             .reconnaissance
             .admit_authority(delegation.payload(), now)
@@ -346,7 +349,7 @@ impl PoliteiadService {
                 outbox: Vec::new(),
             })
             .await
-            .map_err(storage_refusal)?;
+            .map_err(|error| storage_refusal(&error))?;
         Ok(OperationResult::Coordinated {
             result: json!({
                 "capture": request.id,
@@ -369,11 +372,11 @@ impl CommissioningCoordinator for PoliteiadService {
     }
 }
 
-fn storage_refusal(error: politeia_storage::StorageError) -> CoordinatorError {
+fn storage_refusal(error: &politeia_storage::StorageError) -> CoordinatorError {
     CoordinatorError::Refused(format!("durable authority refused operation: {error}"))
 }
 
-fn runtime_refusal(error: RuntimeError) -> CoordinatorError {
+fn runtime_refusal(error: &RuntimeError) -> CoordinatorError {
     CoordinatorError::Refused(format!(
         "durable authorization clock refused operation: {error}"
     ))
@@ -390,5 +393,5 @@ fn signed_wire_record<T: Serialize>(
         CoordinatorError::Refused(format!("signed wire encoding failed: {error}"))
     })?;
     SignedRecord::from_json(&value, wire.signer.clone(), wire.signature.clone())
-        .map_err(storage_refusal)
+        .map_err(|error| storage_refusal(&error))
 }
