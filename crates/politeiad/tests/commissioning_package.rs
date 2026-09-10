@@ -24,7 +24,6 @@ use std::{
 };
 
 use package_support::{ReferenceFixture, ReferenceInstitutionKind};
-use politeia_core::{CommissioningRecordId, Digest, EvidenceId};
 use politeiad::transport::{LocalOutcome, LocalResponse};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -138,9 +137,9 @@ fn stop(mut daemon: Daemon) -> TestResult {
 }
 
 /// Stage every byte required by an operational generation before any daemon
-/// call. The synthetic commissioning receipt below is intentionally never
-/// submitted: it demonstrates only that the public client can serialize a
-/// complete request once the daemon has returned real admitted evidence.
+/// call. This proves only the public source artifact inventory; publication
+/// remains in the process acceptance below and requires a daemon-derived
+/// commissioning record.
 #[test]
 fn staged_generation_inputs_bind_complete_public_artifacts() -> TestResult {
     let fixture = ReferenceFixture::new(
@@ -148,23 +147,7 @@ fn staged_generation_inputs_bind_complete_public_artifacts() -> TestResult {
         Path::new(daemon_binary()),
     );
     fs::create_dir_all(fixture.prefix().join("workspace"))?;
-    let owner = fixture.owner_root_delegation();
-    let commissioner = fixture.commissioner_delegation(&owner);
-    let documents = fixture.generation_documents(
-        &commissioner,
-        package_support::CommissioningReceipt {
-            record: CommissioningRecordId::new(),
-            record_digest: Digest::blake3(b"unsubmitted transport receipt"),
-            observations: std::collections::BTreeSet::from([EvidenceId::new()]),
-            approvals: std::collections::BTreeSet::from([
-                EvidenceId::new(),
-                EvidenceId::new(),
-                EvidenceId::new(),
-                EvidenceId::new(),
-            ]),
-            unresolved_obligations: std::collections::BTreeSet::new(),
-        },
-    );
+    fixture.stage_generation_artifacts();
     let generation = fixture.prefix().join("workspace/generation");
     for path in [
         "public-source.tar",
@@ -186,28 +169,14 @@ fn staged_generation_inputs_bind_complete_public_artifacts() -> TestResult {
         assert!(generation.join(path).is_file(), "staged {path}");
     }
     assert_eq!(
-        documents.inputs.payload.approved.component_digests.len(),
+        fixture
+            .host_trust
+            .workspace
+            .approved_generation
+            .component_digests
+            .len(),
         8,
         "the generation plan names every mandatory component role"
-    );
-    assert_eq!(
-        documents.publish["kind"],
-        serde_json::Value::String("generation".to_owned())
-    );
-    assert_eq!(
-        documents.publish["request"]["kind"],
-        serde_json::Value::String("publish".to_owned())
-    );
-    assert!(
-        documents.publish["request"]["sources"]["public_source"]
-            .as_str()
-            .is_some_and(|path| !path.starts_with('/') && !path.contains("..")),
-        "artifact inputs are confined workspace-relative paths"
-    );
-    let recommission = fixture.recommission_request(fixture.replacement_delegation(&owner));
-    assert_eq!(
-        recommission["request"]["kind"],
-        serde_json::Value::String("recommission".to_owned())
     );
     Ok(())
 }
