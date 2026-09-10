@@ -20,7 +20,10 @@ use politeia_core::{
     evidence::{EvidenceRequest, IndependenceClass},
     generation::{ApprovedGenerationInputs, ReproducibilityContract},
     institution::{InstitutionWorkspace, TrustDomainId},
-    knowledge::{ObservationRequest, SourceCaptureRequest, observation_evidence_payload_digest},
+    knowledge::{
+        CandidateClaimRequest, ClaimStatus, FactApprovalRequest, ObservationRequest,
+        SourceCaptureRequest, candidate_claim_digest, observation_evidence_payload_digest,
+    },
     lifecycle::{DeploymentTopology, LifecycleProfile},
     reconnaissance::{RECONNOITRE_ACTION, ReconnaissanceScope},
     trust::{AdmissionKind, SignedAdmissionWire, WorkspaceBootstrapRequest},
@@ -122,6 +125,22 @@ pub(crate) struct ReferenceFixture {
     pub(crate) host_trust: HostTrustConfiguration,
     /// Separate signing material retained by the test process, never written to the host config.
     pub(crate) identities: SigningIdentities,
+}
+
+/// Raw signed capture material, still inert until daemon admission.
+pub(crate) struct CaptureDocuments {
+    /// JSON supplied to the daemon snapshot operation.
+    pub(crate) document: serde_json::Value,
+    /// Observation identity a later candidate may cite.
+    observation: ObservationRequest,
+}
+
+/// Raw candidate and owner approval documents, still inert until daemon admission.
+pub(crate) struct CandidateDocuments {
+    /// Interpreter-signed candidate wire.
+    pub(crate) candidate: SignedAdmissionWire<CandidateClaimRequest>,
+    /// Owner-signed exact candidate approval wire.
+    pub(crate) approval: SignedAdmissionWire<FactApprovalRequest>,
 }
 
 impl ReferenceFixture {
@@ -238,6 +257,7 @@ impl ReferenceFixture {
                     AdmissionKind::SourceCapture,
                     AdmissionKind::Evidence,
                     AdmissionKind::Observation,
+                    AdmissionKind::CandidateClaim,
                     AdmissionKind::Delegation,
                 ],
             ),
@@ -356,7 +376,7 @@ impl ReferenceFixture {
     /// The caller copies `source_document` into the installed workspace before
     /// it sends this document. The daemon independently reads that installed
     /// file through its descriptor-bound adapter and compares this manifest.
-    pub(crate) fn source_capture_submission(&self, delegation: &Delegation) -> serde_json::Value {
+    pub(crate) fn source_capture_submission(&self, delegation: &Delegation) -> CaptureDocuments {
         let member = "institution.md".to_owned();
         let bytes =
             fs::read(&self.source_document).expect("public source document remains readable");
@@ -442,12 +462,70 @@ impl ReferenceFixture {
             self.identities.commissioner_key(),
         )
         .expect("commissioner signs source observation");
-        serde_json::json!({
-            "capture": capture,
-            "evidence": evidence,
-            "observation": observation,
-            "reconnaissance": scope,
-        })
+        CaptureDocuments {
+            document: serde_json::json!({
+                "capture": capture,
+                "evidence": evidence,
+                "observation": observation,
+                "reconnaissance": scope,
+            }),
+            observation: observation.payload,
+        }
+    }
+
+    /// Build a candidate and exact owner approval over one future admitted observation.
+    pub(crate) fn candidate_documents(
+        &self,
+        delegation: &Delegation,
+        capture: &CaptureDocuments,
+    ) -> CandidateDocuments {
+        let candidate = CandidateClaimRequest {
+            id: politeia_core::ClaimId::new(),
+            workspace: self.host_trust.workspace.id.clone(),
+            subject: capture.observation.subject.clone(),
+            proposition: Digest::blake3(
+                format!("{} public runbook approved", self.kind.directory()).as_bytes(),
+            ),
+            supported_by: BTreeMap::from([(
+                capture.observation.source.clone(),
+                BTreeSet::from([capture.observation.id.clone()]),
+            )]),
+            contradicted_by: BTreeMap::new(),
+            missed_axes: BTreeSet::from(["future institution change".to_owned()]),
+            interpreter: self.identities.commissioner.clone(),
+            interpreter_delegation: delegation.id.clone(),
+        };
+        let candidate_wire = SignedAdmissionWire::sign(
+            AdmissionKind::CandidateClaim,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.commissioner.clone(),
+            candidate.clone(),
+            self.identities.commissioner_key(),
+        )
+        .expect("commissioner signs candidate claim");
+        let approval = FactApprovalRequest {
+            claim: candidate.id.clone(),
+            candidate_digest: candidate_claim_digest(&candidate)
+                .expect("candidate claim canonically digests"),
+            subject: candidate.subject.clone(),
+            proposition: candidate.proposition.clone(),
+            acknowledged_status: ClaimStatus::Candidate,
+            acknowledged_missed_axes: candidate.missed_axes.clone(),
+            approved_at: Timestamp::now(),
+        };
+        CandidateDocuments {
+            candidate: candidate_wire,
+            approval: SignedAdmissionWire::sign(
+                AdmissionKind::FactApproval,
+                self.host_trust.workspace.institution.clone(),
+                self.host_trust.workspace.id.clone(),
+                self.identities.owner.clone(),
+                approval,
+                self.identities.owner_key(),
+            )
+            .expect("owner signs exact candidate approval"),
+        }
     }
 
     /// Write inert installed public-key configuration for the administrative CLI.

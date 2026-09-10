@@ -277,18 +277,32 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         &analytics.source_document,
         analytics.prefix().join("workspace/institution.md"),
     )?;
+    let software_capture_documents = software.source_capture_submission(&software_delegation);
+    let analytics_capture_documents = analytics.source_capture_submission(&analytics_delegation);
     let software_capture = write_request(
         &software,
         "software-capture.json",
-        &software.source_capture_submission(&software_delegation),
+        &software_capture_documents.document,
     )?;
     let analytics_capture = write_request(
         &analytics,
         "analytics-capture.json",
-        &analytics.source_capture_submission(&analytics_delegation),
+        &analytics_capture_documents.document,
     )?;
+    let software_candidate =
+        software.candidate_documents(&software_delegation, &software_capture_documents);
+    let analytics_candidate =
+        analytics.candidate_documents(&analytics_delegation, &analytics_capture_documents);
     assert!(software_capture.is_file());
     assert!(analytics_capture.is_file());
+    assert_ne!(
+        software_candidate.candidate.payload.id,
+        analytics_candidate.candidate.payload.id
+    );
+    assert_ne!(
+        software_candidate.approval.payload.candidate_digest,
+        analytics_candidate.approval.payload.candidate_digest
+    );
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;
     stop(software_daemon)?;
