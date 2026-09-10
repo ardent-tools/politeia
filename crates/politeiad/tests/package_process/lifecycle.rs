@@ -6,7 +6,10 @@ use politeia_core::{
     trust::{AdmissionKind, SignedAdmissionWire},
 };
 use politeia_evidence::assurance::ControlResult;
-use politeiad::service_generation_validation::GenerationValidationReport;
+use politeiad::{
+    service_generation::GenerationTransitionAction,
+    service_generation_validation::GenerationValidationReport,
+};
 
 use super::{
     ReferenceFixture, TestResult, require_refusal, run, status_value, submit_commissioning,
@@ -49,6 +52,112 @@ pub(crate) fn activate(
     let active: Option<Digest> = serde_json::from_value(snapshot["active_generation"].clone())?;
 
     if exercise_refusals {
+        let requested_action = match kind {
+            "activate" => GenerationTransitionAction::Activate,
+            "rollback" => GenerationTransitionAction::Rollback,
+            _ => return Err("lifecycle action must be activate or rollback".into()),
+        };
+        let swapped_action = match requested_action {
+            GenerationTransitionAction::Activate => GenerationTransitionAction::Rollback,
+            GenerationTransitionAction::Rollback => GenerationTransitionAction::Activate,
+        };
+        let mut missing_transition = fixture.activation_request(
+            kind,
+            generation.clone(),
+            revision,
+            active.clone(),
+            assurance.clone(),
+        );
+        missing_transition["request"]
+            .as_object_mut()
+            .ok_or("activation request is an object")?
+            .remove("transition");
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-missing-owner-transition.json",
+            &missing_transition,
+            "generation transition requires an installed-owner signed authorization",
+        )?;
+
+        let owner_transition = fixture.generation_transition_authorization(
+            requested_action,
+            generation.clone(),
+            revision,
+            active.clone(),
+            &assurance,
+        );
+        let wrong_owner = SignedAdmissionWire::sign(
+            AdmissionKind::GenerationTransition,
+            fixture.host_trust.workspace.institution.clone(),
+            fixture.host_trust.workspace.id.clone(),
+            fixture.identities.commissioner.clone(),
+            owner_transition.payload,
+            fixture.identities.commissioner_key(),
+        )?;
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-wrong-owner-transition.json",
+            &fixture.activation_request_with_transition(assurance.clone(), wrong_owner),
+            "only the installed institution owner may authorize a generation transition",
+        )?;
+
+        let wrong_action = fixture.generation_transition_authorization(
+            swapped_action,
+            generation.clone(),
+            revision,
+            active.clone(),
+            &assurance,
+        );
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-swapped-action-transition.json",
+            &fixture.activation_request_with_transition(assurance.clone(), wrong_action),
+            "signed lifecycle assurance control differs from owner transition action",
+        )?;
+
+        let wrong_target = fixture.generation_transition_authorization(
+            requested_action,
+            Digest::blake3(b"different signed generation target"),
+            revision,
+            active.clone(),
+            &assurance,
+        );
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-swapped-target-transition.json",
+            &fixture.activation_request_with_transition(assurance.clone(), wrong_target),
+            "signed lifecycle assurance target differs from owner transition target",
+        )?;
+
+        let owner_transition = fixture.generation_transition_authorization(
+            requested_action,
+            generation.clone(),
+            revision,
+            active.clone(),
+            &assurance,
+        );
+        let mut altered_assurance = assurance.clone();
+        altered_assurance.run.payload.result = ControlResult::Violation;
+        altered_assurance.run = SignedAdmissionWire::sign(
+            AdmissionKind::ControlRun,
+            fixture.host_trust.workspace.institution.clone(),
+            fixture.host_trust.workspace.id.clone(),
+            fixture.identities.control_producer.clone(),
+            altered_assurance.run.payload,
+            fixture.identities.control_producer_key(),
+        )?;
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-swapped-assurance-transition.json",
+            &fixture.activation_request_with_transition(altered_assurance, owner_transition),
+            "owner generation transition assurance digest differs from supplied assurance",
+        )?;
+
         // Every non-clean state reaches the real lifecycle boundary. A parse
         // failure or an unreachable detector cannot count as this witness.
         for result in ControlResult::all()
