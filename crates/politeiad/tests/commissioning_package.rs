@@ -168,8 +168,28 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
 
     let software_daemon = serve(&database_url, &software)?;
     let analytics_daemon = serve(&database_url, &analytics)?;
-    let software_delegation = software.commissioner_delegation();
-    let analytics_delegation = analytics.commissioner_delegation();
+    let _ = await_status(&database_url, &software)?;
+    let _ = await_status(&database_url, &analytics)?;
+    let software_owner_grant = software.owner_root_delegation();
+    let analytics_owner_grant = analytics.owner_root_delegation();
+    let software_delegation = software.commissioner_delegation(&software_owner_grant);
+    let analytics_delegation = analytics.commissioner_delegation(&analytics_owner_grant);
+    let software_owner_request = write_request(
+        &software,
+        "software-owner-grant.json",
+        &serde_json::json!({
+            "kind": "admit_delegation",
+            "delegation": software.signed_commissioner_delegation(software_owner_grant),
+        }),
+    )?;
+    let analytics_owner_request = write_request(
+        &analytics,
+        "analytics-owner-grant.json",
+        &serde_json::json!({
+            "kind": "admit_delegation",
+            "delegation": analytics.signed_commissioner_delegation(analytics_owner_grant),
+        }),
+    )?;
     let software_delegation_request = write_request(
         &software,
         "software-delegation.json",
@@ -188,6 +208,28 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     )?;
     let software_socket = software.prefix().join("run/politeiad.sock");
     let analytics_socket = analytics.prefix().join("run/politeiad.sock");
+    require_coordinated(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &software_socket,
+                &software_owner_request,
+            ],
+        )?,
+        "software owner-root delegation admission",
+    )?;
+    require_coordinated(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &analytics_socket,
+                &analytics_owner_request,
+            ],
+        )?,
+        "analytics owner-root delegation admission",
+    )?;
     let software_admission = require_coordinated(
         run(
             &database_url,

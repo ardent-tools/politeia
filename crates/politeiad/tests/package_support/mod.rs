@@ -280,13 +280,37 @@ impl ReferenceFixture {
         self.root.join("installation")
     }
 
-    /// Produce the temporary, read-only delegation required before source capture.
-    pub(crate) fn commissioner_delegation(&self) -> Delegation {
+    /// Produce the owner-root grant that anchors every temporary package grant.
+    pub(crate) fn owner_root_delegation(&self) -> Delegation {
+        Delegation {
+            id: self.host_trust.workspace.owner_delegation.clone(),
+            issuer: self.identities.owner.clone(),
+            subject: self.identities.owner.clone(),
+            parent: None,
+            actions: BTreeSet::from([RECONNOITRE_ACTION.to_owned()]),
+            resources: BTreeSet::from([format!("reference:{}:source", self.kind.directory())]),
+            effects: BTreeSet::from([Effect::ReadExternalSystem]),
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audience: BTreeSet::from(["commissioning".to_owned()]),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(2),
+            budget: ResourceBudget {
+                wall_ms: Some(120_000),
+                cpu_ms: Some(20_000),
+                memory_bytes: Some(128 * 1024 * 1024),
+                io_bytes: Some(2 * 1024 * 1024),
+                network_bytes: Some(2 * 1024 * 1024),
+                external_cost_microunits: Some(0),
+            },
+        }
+    }
+
+    /// Produce a temporary, attenuated read-only delegation required before source capture.
+    pub(crate) fn commissioner_delegation(&self, owner_grant: &Delegation) -> Delegation {
         Delegation {
             id: DelegationId::new(),
             issuer: self.identities.owner.clone(),
             subject: self.identities.commissioner.clone(),
-            parent: None,
+            parent: Some(owner_grant.id.clone()),
             actions: BTreeSet::from([RECONNOITRE_ACTION.to_owned()]),
             resources: BTreeSet::from([format!("reference:{}:source", self.kind.directory())]),
             effects: BTreeSet::from([Effect::ReadExternalSystem]),
