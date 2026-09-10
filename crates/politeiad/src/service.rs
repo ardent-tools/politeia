@@ -634,6 +634,15 @@ impl PoliteiadService {
         candidate: SignedAdmissionWire<CandidateClaimRequest>,
         approval: SignedAdmissionWire<FactApprovalRequest>,
     ) -> Result<OperationResult, CoordinatorError> {
+        // Do not let an untrusted candidate choose a durable-provenance lookup
+        // path. Scope/signature admission happens before its observation set is
+        // used, so a foreign candidate retains the canonical anchor refusal.
+        self.anchors
+            .admit_expected(AdmissionKind::CandidateClaim, candidate.clone())
+            .map_err(refusal)?;
+        self.anchors
+            .admit_expected(AdmissionKind::FactApproval, approval.clone())
+            .map_err(refusal)?;
         let durable = self.durable_snapshot().await?;
         let (_evidence, _captures, observations) =
             selected_candidate_provenance(&self.workspace, &self.anchors, &durable, &candidate)?;
