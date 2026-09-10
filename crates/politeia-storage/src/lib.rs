@@ -327,6 +327,10 @@ pub struct Attempt {
     pub status: AttemptStatus,
     /// Optional execution-receipt digest; absent means outcome remains unresolved.
     pub receipt_digest: Option<Digest>,
+    /// Exact receipt bytes verified against the retained digest, when available.
+    /// Legacy digest-only completions preserve their history without claiming
+    /// recoverable output bytes. Missing bytes never release replay protection.
+    pub receipt_payload: Option<Vec<u8>>,
 }
 
 /// A persisted outbox message ready for a delivery worker.
@@ -823,8 +827,8 @@ impl PostgresStorage {
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
         let claimed = transaction.execute(
-            "UPDATE operation_attempts SET status = 'claimed' WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND claims_digest = $4 AND status = 'reserved' AND expires_at > CURRENT_TIMESTAMP",
-            &[&scoped.institution, &scoped.workspace, &reservation.0, &claims.as_str()],
+            "UPDATE operation_attempts a SET status = 'claimed' FROM institution_workspaces w WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND a.claims_digest = $4 AND a.status = 'reserved' AND a.expires_at > CURRENT_TIMESTAMP AND w.institution_id = a.institution_id AND w.workspace_id = a.workspace_id AND w.trust_domain = $5",
+            &[&scoped.institution, &scoped.workspace, &reservation.0, &claims.as_str(), &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?;
         if claimed != 1 {
             return Err(StorageError::AttemptUnavailable);
@@ -833,23 +837,15 @@ impl PostgresStorage {
         Ok(())
     }
 
-    /// Persist an execution receipt only after an effect port has returned it.
+    /// Persist exact receipt bytes only after the effect port has returned them.
     pub async fn record_completion(
         &self,
         scope: &Scope,
         reservation: &BudgetReservationId,
-        receipt: &Digest,
+        receipt: &CanonicalPayload,
     ) -> Result<(), StorageError> {
-        let client = self.client().await?;
-        let scoped = scope_values(scope);
-        let completed = client.execute(
-            "UPDATE operation_attempts a SET status = 'completed', receipt_digest = $4, completed_at = CURRENT_TIMESTAMP FROM institution_workspaces w WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND a.status = 'claimed' AND w.institution_id = a.institution_id AND w.workspace_id = a.workspace_id AND w.trust_domain = $5",
-            &[&scoped.institution, &scoped.workspace, &reservation.0, &receipt.as_str(), &scoped.trust_domain],
-        ).await.map_err(StorageError::Database)?;
-        if completed != 1 {
-            return Err(StorageError::AttemptUnavailable);
-        }
-        Ok(())
+        self.record_completion_with_outbox(scope, reservation, receipt, &[])
+            .await
     }
 
     /// Read an attempt without translating an absent receipt into an outcome.
@@ -861,7 +857,7 @@ impl PostgresStorage {
         let client = self.client().await?;
         let scoped = scope_values(scope);
         let row = client.query_opt(
-            "SELECT a.status::text, a.receipt_digest FROM operation_attempts a JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND w.trust_domain = $4",
+            "SELECT a.status::text, a.receipt_digest, a.receipt_payload FROM operation_attempts a JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND w.trust_domain = $4",
             &[&scoped.institution, &scoped.workspace, &reservation.0, &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?.ok_or(StorageError::NotFound)?;
         let status = match row.get::<_, String>(0).as_str() {
@@ -874,9 +870,21 @@ impl PostgresStorage {
             .get::<_, Option<String>>(1)
             .map(|value| parse_digest(&value))
             .transpose()?;
+        let receipt_payload: Option<Vec<u8>> = row.get(2);
+        if let Some(bytes) = &receipt_payload {
+            let actual = Digest::blake3(bytes);
+            let expected = receipt.as_ref().ok_or(StorageError::AdmissionMismatch)?;
+            if &actual != expected {
+                return Err(StorageError::DigestMismatch {
+                    expected: expected.clone(),
+                    actual,
+                });
+            }
+        }
         Ok(Attempt {
             status,
             receipt_digest: receipt,
+            receipt_payload,
         })
     }
 
@@ -905,8 +913,8 @@ impl PostgresStorage {
         let client = self.client().await?;
         let scoped = scope_values(scope);
         let rows = client.query(
-            "SELECT outbox_id, topic, payload, payload_digest FROM transactional_outbox WHERE institution_id = $1 AND workspace_id = $2 AND delivered_at IS NULL AND available_at <= CURRENT_TIMESTAMP ORDER BY available_at, outbox_id LIMIT $3",
-            &[&scoped.institution, &scoped.workspace, &limit],
+            "SELECT o.outbox_id, o.topic, o.payload, o.payload_digest FROM transactional_outbox o JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE o.institution_id = $1 AND o.workspace_id = $2 AND o.delivered_at IS NULL AND o.available_at <= CURRENT_TIMESTAMP AND w.trust_domain = $4 ORDER BY o.available_at, o.outbox_id LIMIT $3",
+            &[&scoped.institution, &scoped.workspace, &limit, &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?;
         rows.into_iter()
             .map(|row| {
@@ -926,8 +934,8 @@ impl PostgresStorage {
         let client = self.client().await?;
         let scoped = scope_values(scope);
         let updated = client.execute(
-            "UPDATE transactional_outbox SET delivered_at = CURRENT_TIMESTAMP WHERE institution_id = $1 AND workspace_id = $2 AND outbox_id = $3 AND delivered_at IS NULL",
-            &[&scoped.institution, &scoped.workspace, &id],
+            "UPDATE transactional_outbox o SET delivered_at = CURRENT_TIMESTAMP FROM institution_workspaces w WHERE o.institution_id = $1 AND o.workspace_id = $2 AND o.outbox_id = $3 AND o.delivered_at IS NULL AND w.institution_id = o.institution_id AND w.workspace_id = o.workspace_id AND w.trust_domain = $4",
+            &[&scoped.institution, &scoped.workspace, &id, &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?;
         if updated != 1 {
             return Err(StorageError::NotFound);
@@ -1677,6 +1685,7 @@ mod tests {
             Attempt {
                 status: AttemptStatus::Claimed,
                 receipt_digest: None,
+                receipt_payload: None,
             }
         );
         assert!(matches!(
@@ -1693,7 +1702,10 @@ mod tests {
             .record_completion(
                 &scope,
                 &reservation.reservation_id,
-                &Digest::blake3(b"receipt"),
+                &CanonicalPayload::from_json(
+                    &serde_json::json!({"fixture": "post-effect receipt"}),
+                )
+                .expect("fixture receipt encodes"),
             )
             .await
             .expect("only a post-effect receipt completes the attempt");

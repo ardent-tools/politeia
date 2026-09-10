@@ -28,9 +28,9 @@ use politeia_runtime::{
     PolicyDecisionPoint, RuntimeError,
 };
 use politeia_storage::{
-    ActivationCommit, AttemptStatus, EvidenceAdmission, PostgresAuthorizationLedger,
-    PostgresStorage, Scope, ScopedCommit, SignedRecord, StateMutation, StorageError,
-    WorkspaceBootstrap,
+    ActivationCommit, AttemptStatus, CanonicalPayload, EvidenceAdmission,
+    PostgresAuthorizationLedger, PostgresStorage, Scope, ScopedCommit, SignedRecord, StateMutation,
+    StorageError, WorkspaceBootstrap,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -169,6 +169,109 @@ async fn delegated_commits_recheck_current_exact_authority_and_all_ancestors() -
         ),
         "durable existence cannot substitute for live authority"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn completion_and_outbox_commit_together_and_preserve_scope() -> TestResult {
+    let fixture = Fixture::new(&database_url()?, 8).await?;
+    let dispatcher = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
+    let first = dispatcher.authorize(&fixture.intent).await?;
+    let result = dispatcher.execute(&first).await?;
+    let receipt = CanonicalPayload::from_json(&serde_json::json!({
+        "result": result,
+        "reservation": first.reservation_id(),
+        "intent": fixture.intent.digest()?,
+    }))?;
+    let message = politeia_storage::OperationOutboxMessage {
+        id: uuid::Uuid::now_v7(),
+        topic: "fixture.completed".to_owned(),
+        payload: receipt.clone(),
+    };
+    let wrong_domain = Scope::new(
+        fixture.scope.institution().clone(),
+        fixture.scope.workspace().clone(),
+        "foreign.local".parse()?,
+    );
+    assert!(matches!(
+        fixture
+            .storage
+            .record_completion_with_outbox(
+                &wrong_domain,
+                first.reservation_id(),
+                &receipt,
+                std::slice::from_ref(&message),
+            )
+            .await,
+        Err(StorageError::AttemptUnavailable)
+    ));
+    fixture
+        .storage
+        .record_completion_with_outbox(
+            &fixture.scope,
+            first.reservation_id(),
+            &receipt,
+            std::slice::from_ref(&message),
+        )
+        .await?;
+    let completed = fixture
+        .storage
+        .load_attempt(&fixture.scope, first.reservation_id())
+        .await?;
+    assert_eq!(completed.status, AttemptStatus::Completed);
+    assert_eq!(completed.receipt_digest.as_ref(), Some(receipt.digest()));
+    assert_eq!(completed.receipt_payload.as_deref(), Some(receipt.bytes()));
+    assert!(
+        fixture
+            .storage
+            .take_outbox(&wrong_domain, 10)
+            .await?
+            .is_empty()
+    );
+    assert!(matches!(
+        fixture
+            .storage
+            .mark_outbox_delivered(&wrong_domain, message.id)
+            .await,
+        Err(StorageError::NotFound)
+    ));
+    assert_eq!(
+        fixture.storage.take_outbox(&fixture.scope, 10).await?.len(),
+        1
+    );
+
+    let mut next = fixture.intent.clone();
+    next.idempotency_key = Some("outbox-collision".to_owned());
+    let second = dispatcher.authorize(&next).await?;
+    dispatcher.execute(&second).await?;
+    let refusal = fixture
+        .storage
+        .record_completion_with_outbox(
+            &fixture.scope,
+            second.reservation_id(),
+            &receipt,
+            &[message],
+        )
+        .await;
+    assert!(
+        matches!(refusal, Err(StorageError::Database(ref error))
+        if error.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION)),
+        "the deliberate existing outbox identity must fail inside the completion transaction"
+    );
+    let unresolved = fixture
+        .storage
+        .load_attempt(&fixture.scope, second.reservation_id())
+        .await?;
+    assert_eq!(unresolved.status, AttemptStatus::Claimed);
+    assert!(unresolved.receipt_digest.is_none());
+    assert!(unresolved.receipt_payload.is_none());
+    assert_eq!(
+        fixture.storage.take_outbox(&fixture.scope, 10).await?.len(),
+        1
+    );
+    assert!(dispatcher.execute(&second).await.is_err());
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
@@ -566,7 +669,7 @@ async fn dispatcher_reopens_reservations_and_refuses_ambiguous_replay() -> TestR
         .record_completion(
             &fixture.scope,
             lease.reservation_id(),
-            &Digest::blake3(b"receipt"),
+            &CanonicalPayload::from_json(&serde_json::json!({"returned_policy": fixture.policy_digest, "effect_calls": fixture.calls.load(Ordering::SeqCst)}))?,
         )
         .await?;
     assert_eq!(
