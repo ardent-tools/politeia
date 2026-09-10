@@ -16,7 +16,7 @@ use politeia_core::{
     },
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     generation::RuntimeGenerationInputs,
-    trust::{AdmissionKind, Admitted, SignedAdmissionWire},
+    trust::{AdmissionKind, SignedAdmissionWire},
 };
 use politeia_evidence::{
     assurance::{
@@ -29,7 +29,7 @@ use politeia_storage::{
     ActivationCommit, EvidenceAdmission, PostgresAuthorizationLedger, RuntimeGeneration,
     SignedRecord,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
@@ -63,10 +63,39 @@ pub struct ArtifactSourcePaths {
     pub components: BTreeMap<String, PathBuf>,
 }
 
-/// Inert selection of already-admitted commissioning facts.
+/// An immutable daemon-derived receipt for one exact commissioning record.
+///
+/// Clients carry this receipt into signed generation inputs, but it is never
+/// trusted from transport alone: publication reloads the identical receipt
+/// from durable authority and rederives the canonical core record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommissioningReceipt {
+    /// Exact commissioning record allocated by the canonical core.
+    pub record: politeia_core::CommissioningRecordId,
+    /// Digest of that exact canonical record.
+    pub record_digest: Digest,
+    /// Trusted point-in-time used for the grant/evidence reconstruction.
+    pub captured_at: jiff::Timestamp,
+    /// Principal holding the selected temporary commissioning grant.
+    pub commissioner: politeia_core::PrincipalId,
+    /// Durable temporary commissioner grant used for this record.
+    pub delegation: DelegationId,
+    /// Exact canonical digest of that commissioner grant record.
+    pub commissioner_grant_digest: Digest,
+    /// Discovery observations used by the record.
+    pub observations: BTreeSet<EvidenceId>,
+    /// Owner approvals used by the record.
+    pub approvals: BTreeSet<EvidenceId>,
+    /// Explicitly owner-approved open obligations.
+    pub unresolved_obligations: BTreeSet<String>,
+}
+
+/// Inert selection submitted to ask the daemon to derive a commissioning
+/// receipt from its already-admitted evidence and grant registry.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CommissioningSelection {
+pub struct CommissioningRecordRequest {
     /// Durable temporary commissioner grant used for this record.
     pub delegation: DelegationId,
     /// Discovery observations used by the record.
@@ -75,6 +104,14 @@ pub struct CommissioningSelection {
     pub approvals: BTreeSet<EvidenceId>,
     /// Explicitly owner-approved open obligations.
     pub unresolved_obligations: BTreeSet<String>,
+}
+
+/// Inert selection of an already-issued daemon commissioning receipt.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommissioningSelection {
+    /// Daemon-issued receipt selecting every immutable provenance input.
+    pub receipt: CommissioningReceipt,
 }
 
 /// Typed assurance material required for activation and rollback.
@@ -136,6 +173,11 @@ pub enum GenerationRequest {
         /// Fresh owner-rooted delegation for the replacement maintainer.
         delegation: SignedAdmissionWire<Delegation>,
     },
+    /// Rebuild and retain one complete owner-approved commissioning record.
+    DeriveRecord {
+        /// Exact durable evidence and grant selection to validate.
+        selection: CommissioningRecordRequest,
+    },
 }
 
 impl PoliteiadService {
@@ -188,6 +230,9 @@ impl PoliteiadService {
                 .await
             }
             GenerationRequest::Recommission { delegation } => self.recommission(delegation).await,
+            GenerationRequest::DeriveRecord { selection } => {
+                self.derive_commissioning_receipt(selection).await
+            }
         }
     }
 
@@ -219,10 +264,10 @@ impl PoliteiadService {
                 self.workspace(),
                 &commissioning,
                 CommissioningProvenance {
-                    delegation: selection.delegation,
-                    observations: selection.observations,
-                    approvals: selection.approvals,
-                    unresolved_obligations: selection.unresolved_obligations,
+                    delegation: selection.receipt.delegation.clone(),
+                    observations: selection.receipt.observations.clone(),
+                    approvals: selection.receipt.approvals.clone(),
+                    unresolved_obligations: selection.receipt.unresolved_obligations.clone(),
                 },
                 &self.resolve_sources(sources)?,
             )
@@ -278,9 +323,6 @@ impl PoliteiadService {
             ));
         }
         let builder = GenerationArtifactBuilder::new(self.layout().artifact_dir.clone());
-        let provenance = builder
-            .commissioning_provenance(&generation)
-            .map_err(refusal)?;
         let durable = self.durable_snapshot().await?;
         let commissioning = self
             .commissioning_record(
@@ -289,10 +331,12 @@ impl PoliteiadService {
                 &admitted.payload().commissioning_record,
                 &admitted.payload().commissioning_record_digest,
                 &CommissioningSelection {
-                    delegation: provenance.delegation,
-                    observations: provenance.observations,
-                    approvals: provenance.approvals,
-                    unresolved_obligations: provenance.unresolved_obligations,
+                    receipt: self
+                        .load_commissioning_receipt(
+                            &durable,
+                            &admitted.payload().commissioning_record,
+                        )
+                        .await?,
                 },
                 false,
             )
@@ -434,7 +478,7 @@ impl PoliteiadService {
             .anchors()
             .admit_expected(AdmissionKind::Delegation, delegation.clone())
             .map_err(refusal)?;
-        self.validate_generation_delegation(&durable, &admitted)?;
+        self.validate_delegation_authority(&durable, &admitted)?;
         self.storage()
             .admit_delegation(self.scope(), &admitted, &delegation)
             .await
@@ -445,45 +489,31 @@ impl PoliteiadService {
         })
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "reconstruction keeps separately admitted provenance axes explicit"
-    )]
-    async fn commissioning_record(
+    /// Derive one canonical commissioning record from durable evidence and
+    /// retain the exact receipt before returning it to a public client.
+    async fn derive_commissioning_receipt(
         &self,
-        durable: &politeia_storage::WorkspaceSnapshot,
-        signer: &politeia_core::PrincipalId,
-        record_id: &politeia_core::CommissioningRecordId,
-        expected_digest: &Digest,
-        selection: &CommissioningSelection,
-        require_current: bool,
-    ) -> Result<CommissioningRecord, CoordinatorError> {
-        let persisted = durable
-            .delegations
-            .get(&selection.delegation)
-            .ok_or_else(|| {
-                CoordinatorError::Refused(
-                    "commissioner delegation is not durably admitted".to_string(),
-                )
-            })?;
-        if require_current && persisted.revoked {
+        selection: CommissioningRecordRequest,
+    ) -> Result<OperationResult, CoordinatorError> {
+        let durable = self.durable_snapshot().await?;
+        let persisted = durable.delegations.get(&selection.delegation).ok_or_else(|| {
+            CoordinatorError::Refused("commissioner delegation is not durably admitted".to_string())
+        })?;
+        if persisted.revoked {
             return Err(CoordinatorError::Refused(
-                "commissioner delegation is revoked".to_string(),
+                "commissioner delegation is revoked before receipt derivation".to_string(),
             ));
         }
         let delegation = self
             .anchors()
             .admit_expected(AdmissionKind::Delegation, persisted.wire.clone())
             .map_err(refusal)?;
-        if delegation.signer() != &delegation.payload().issuer
-            || delegation.payload().subject != *signer
-        {
+        self.validate_delegation_authority(&durable, &delegation)?;
+        let captured_at = self.observed_at().await?;
+        if delegation.payload().expires_at <= captured_at {
             return Err(CoordinatorError::Refused(
-                "generation signer does not hold the selected commissioner delegation".to_string(),
+                "commissioner delegation expired before receipt derivation".to_string(),
             ));
-        }
-        if require_current {
-            self.validate_generation_delegation(durable, &delegation)?;
         }
         let evidence_wires = selection
             .observations
@@ -502,25 +532,158 @@ impl PoliteiadService {
             .collect::<Result<Vec<_>, _>>()?;
         let evidence = TrustedEvidenceRegistry::admit_signed(self.anchors(), evidence_wires)
             .map_err(refusal)?;
-        let as_of = if require_current {
-            self.observed_at().await?
-        } else {
-            selection
+        let grant = CommissionerGrantRecord {
+            institution: self.workspace().institution.clone(),
+            workspace: self.workspace().id.clone(),
+            valid_from: persisted.admitted_at,
+            revoked_at: None,
+            delegation: delegation.into_payload(),
+        };
+        let grants = TrustedCommissionerGrantRegistry::from_trusted_bootstrap(captured_at, [grant])
+            .map_err(refusal)?;
+        let record = CommissioningRecord::new(
+            self.workspace(),
+            &grants,
+            &evidence,
+            &selection.observations,
+            &selection.approvals,
+            selection.unresolved_obligations.clone(),
+        )
+        .map_err(refusal)?;
+        let receipt = CommissioningReceipt {
+            record: record.id().clone(),
+            record_digest: record.digest().map_err(refusal)?,
+            captured_at: record.captured_at(),
+            commissioner: record.commissioner().clone(),
+            delegation: record.commissioner_delegation().clone(),
+            commissioner_grant_digest: record.commissioner_grant_digest().clone(),
+            observations: selection.observations,
+            approvals: selection.approvals,
+            unresolved_obligations: selection.unresolved_obligations,
+        };
+        let payload = politeia_core::canonical::to_canonical_bytes(&receipt).map_err(refusal)?;
+        self.storage()
+            .admit_commissioning_receipt(
+                self.scope(),
+                &politeia_storage::CommissioningReceipt {
+                    record: receipt.record.clone(),
+                    record_digest: receipt.record_digest.clone(),
+                    payload_digest: Digest::blake3(&payload),
+                    payload,
+                },
+            )
+            .await
+            .map_err(storage_refusal)?;
+        Ok(OperationResult::Coordinated {
+            result: serde_json::to_value(&receipt).map_err(refusal)?,
+            evidence_refs: receipt
                 .observations
                 .iter()
-                .chain(selection.approvals.iter())
-                .filter_map(|id| durable.evidence.get(id))
-                .map(evidence_wire)
-                .collect::<Result<Vec<_>, _>>()?
-                .iter()
-                .map(|wire| wire.payload.observed_at)
-                .max()
-                .ok_or_else(|| {
-                    CoordinatorError::Refused("commissioning needs admitted evidence".to_string())
-                })?
-        };
+                .chain(receipt.approvals.iter())
+                .map(|id| id.0.to_string())
+                .collect(),
+        })
+    }
+
+    async fn load_commissioning_receipt(
+        &self,
+        _durable: &politeia_storage::WorkspaceSnapshot,
+        record: &politeia_core::CommissioningRecordId,
+    ) -> Result<CommissioningReceipt, CoordinatorError> {
+        let stored = self
+            .storage()
+            .load_commissioning_receipt(self.scope(), record)
+            .await
+            .map_err(storage_refusal)?;
+        let receipt: CommissioningReceipt = serde_json::from_slice(&stored.payload).map_err(|error| {
+            CoordinatorError::Refused(format!("durable commissioning receipt is malformed: {error}"))
+        })?;
+        if receipt.record != stored.record || receipt.record_digest != stored.record_digest {
+            return Err(CoordinatorError::Refused(
+                "durable commissioning receipt identity differs from its storage binding".to_string(),
+            ));
+        }
+        Ok(receipt)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "reconstruction keeps separately admitted provenance axes explicit"
+    )]
+    async fn commissioning_record(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        signer: &politeia_core::PrincipalId,
+        record_id: &politeia_core::CommissioningRecordId,
+        expected_digest: &Digest,
+        selection: &CommissioningSelection,
+        require_current: bool,
+    ) -> Result<CommissioningRecord, CoordinatorError> {
+        let receipt = self
+            .load_commissioning_receipt(durable, record_id)
+            .await?;
+        if receipt != selection.receipt
+            || receipt.record != *record_id
+            || receipt.record_digest != *expected_digest
+        {
+            return Err(CoordinatorError::Refused(
+                "generation request does not carry the durable daemon commissioning receipt"
+                    .to_string(),
+            ));
+        }
+        let persisted = durable
+            .delegations
+            .get(&receipt.delegation)
+            .ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "commissioner delegation is not durably admitted".to_string(),
+                )
+            })?;
+        if require_current && persisted.revoked {
+            return Err(CoordinatorError::Refused(
+                "commissioner delegation is revoked".to_string(),
+            ));
+        }
+        let delegation = self
+            .anchors()
+            .admit_expected(AdmissionKind::Delegation, persisted.wire.clone())
+            .map_err(refusal)?;
+        if delegation.signer() != &delegation.payload().issuer
+            || delegation.payload().subject != *signer
+            || delegation.payload().subject != receipt.commissioner
+        {
+            return Err(CoordinatorError::Refused(
+                "generation signer does not hold the selected commissioner delegation".to_string(),
+            ));
+        }
+        if require_current {
+            self.validate_delegation_authority(durable, &delegation)?;
+            if delegation.payload().expires_at <= self.observed_at().await? {
+                return Err(CoordinatorError::Refused(
+                    "commissioner delegation expired before generation publication".to_string(),
+                ));
+            }
+        }
+        let evidence_wires = selection
+            .receipt
+            .observations
+            .iter()
+            .chain(receipt.approvals.iter())
+            .map(|id| {
+                durable.evidence.get(id).ok_or_else(|| {
+                    CoordinatorError::Refused(
+                        "commissioning evidence is not durably admitted".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(evidence_wire)
+            .collect::<Result<Vec<_>, _>>()?;
+        let evidence = TrustedEvidenceRegistry::admit_signed(self.anchors(), evidence_wires)
+            .map_err(refusal)?;
         let grants = TrustedCommissionerGrantRegistry::from_trusted_bootstrap(
-            as_of,
+            receipt.captured_at,
             [CommissionerGrantRecord {
                 institution: self.workspace().institution.clone(),
                 workspace: self.workspace().id.clone(),
@@ -538,13 +701,16 @@ impl PoliteiadService {
             politeia_core::commissioning::CommissioningRebuild {
                 grants: &grants,
                 evidence: &evidence,
-                observation_ids: &selection.observations,
-                approval_ids: &selection.approvals,
-                unresolved_obligations: selection.unresolved_obligations.clone(),
+                observation_ids: &receipt.observations,
+                approval_ids: &receipt.approvals,
+                unresolved_obligations: receipt.unresolved_obligations.clone(),
             },
         )
         .map_err(refusal)?;
-        if record.digest().map_err(refusal)? != *expected_digest {
+        if record.digest().map_err(refusal)? != *expected_digest
+            || record.captured_at() != receipt.captured_at
+            || record.commissioner_grant_digest() != &receipt.commissioner_grant_digest
+        {
             return Err(CoordinatorError::Refused(
                 "re-admitted commissioning provenance differs from signed generation inputs"
                     .to_string(),
@@ -604,67 +770,6 @@ impl PoliteiadService {
         Ok(())
     }
 
-    fn validate_generation_delegation(
-        &self,
-        durable: &politeia_storage::WorkspaceSnapshot,
-        admitted: &Admitted<Delegation>,
-    ) -> Result<(), CoordinatorError> {
-        let delegation = admitted.payload();
-        if admitted.signer() != &delegation.issuer
-            || durable.owner != self.workspace().owner
-            || durable.owner_delegation != self.workspace().owner_delegation
-        {
-            return Err(CoordinatorError::Refused(
-                "delegation authority does not match the installed owner chain".to_string(),
-            ));
-        }
-        let mut current = delegation.clone();
-        let mut visited = BTreeSet::new();
-        loop {
-            if !visited.insert(current.id.clone()) {
-                return Err(CoordinatorError::Refused(
-                    "delegation authority chain contains a cycle".to_string(),
-                ));
-            }
-            match current.parent.as_ref() {
-                None if current.id == self.workspace().owner_delegation
-                    && current.issuer == self.workspace().owner =>
-                {
-                    return Ok(());
-                }
-                None => {
-                    return Err(CoordinatorError::Refused(
-                        "delegation chain is not rooted in the installed owner grant".to_string(),
-                    ));
-                }
-                Some(parent_id) => {
-                    let parent = durable.delegations.get(parent_id).ok_or_else(|| {
-                        CoordinatorError::Refused(
-                            "delegation parent is not durably admitted".to_string(),
-                        )
-                    })?;
-                    if parent.revoked {
-                        return Err(CoordinatorError::Refused(
-                            "delegation parent is revoked".to_string(),
-                        ));
-                    }
-                    let parent = self
-                        .anchors()
-                        .admit_expected(AdmissionKind::Delegation, parent.wire.clone())
-                        .map_err(refusal)?;
-                    if parent.signer() != &parent.payload().issuer
-                        || current.issuer != parent.payload().subject
-                        || !current.is_attenuation_of(parent.payload())
-                    {
-                        return Err(CoordinatorError::Refused(
-                            "delegation does not attenuate a signed durable parent".to_string(),
-                        ));
-                    }
-                    current = parent.into_payload();
-                }
-            }
-        }
-    }
 }
 
 fn confined(root: &Path, path: &Path) -> Result<PathBuf, CoordinatorError> {

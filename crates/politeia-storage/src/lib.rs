@@ -20,8 +20,8 @@ use politeia_runtime::{AuthorizationLedger, ReservationRequest, RuntimeError};
 use jiff::Timestamp;
 
 use politeia_core::{
-    BudgetReservationId, Delegation, DelegationId, Digest, EvidenceId, InstitutionId,
-    InstitutionWorkspaceId, PrincipalId, ResourceBudget,
+    BudgetReservationId, CommissioningRecordId, Delegation, DelegationId, Digest, EvidenceId,
+    InstitutionId, InstitutionWorkspaceId, PrincipalId, ResourceBudget,
     canonical::to_canonical_bytes,
     institution::TrustDomainId,
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
@@ -42,6 +42,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0003_operation_completion",
         include_str!("../migrations/0003_operation_completion.sql"),
+    ),
+    (
+        "0004_commissioning_receipts",
+        include_str!("../migrations/0004_commissioning_receipts.sql"),
     ),
 ];
 const SERIALIZABLE_ATTEMPTS: usize = 3;
@@ -228,6 +232,25 @@ pub struct CommitReceipt {
     pub revision: i64,
     /// Digest of the transition appended to the journal.
     pub transition_digest: Digest,
+}
+
+/// An unsigned, daemon-derived commissioning record receipt retained by the
+/// institution-controlled durable authority.
+///
+/// The receipt does not introduce a second commissioning authority. Its bytes
+/// are a recoverable projection of already admitted owner approvals,
+/// observations, and grants, and callers must reconstruct the canonical core
+/// record before relying on it.
+#[derive(Clone, Debug)]
+pub struct CommissioningReceipt {
+    /// Exact commissioning record identity allocated by the canonical core.
+    pub record: CommissioningRecordId,
+    /// Digest of that exact canonical record.
+    pub record_digest: Digest,
+    /// Canonical receipt bytes, including the selection and trusted snapshot time.
+    pub payload: Vec<u8>,
+    /// Content digest of the retained receipt bytes.
+    pub payload_digest: Digest,
 }
 
 /// A signed immutable runtime-generation manifest and its bound artifacts.
@@ -562,6 +585,80 @@ impl PostgresStorage {
             return Err(StorageError::ImmutableConflict);
         }
         Ok(())
+    }
+
+    /// Retain a daemon-derived commissioning receipt after its semantic inputs
+    /// have been admitted and its canonical record has been rebuilt.
+    ///
+    /// This is deliberately a narrow immutable store rather than a signed
+    /// evidence journal entry: the daemon derives the receipt from already
+    /// signed facts and does not possess an institution signing key.
+    pub async fn admit_commissioning_receipt(
+        &self,
+        scope: &Scope,
+        receipt: &CommissioningReceipt,
+    ) -> Result<(), StorageError> {
+        if Digest::blake3(&receipt.payload) != receipt.payload_digest {
+            return Err(StorageError::DigestMismatch {
+                expected: receipt.payload_digest.clone(),
+                actual: Digest::blake3(&receipt.payload),
+            });
+        }
+        let client = self.client().await?;
+        let scoped = scope_values(scope);
+        let inserted = client
+            .execute(
+                "INSERT INTO commissioning_receipts (institution_id, workspace_id, record_id, record_digest, payload_digest, payload) SELECT $1, $2, $3, $4, $5, $6 WHERE EXISTS (SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $7) ON CONFLICT DO NOTHING",
+                &[
+                    &scoped.institution,
+                    &scoped.workspace,
+                    &receipt.record.0,
+                    &receipt.record_digest.as_str(),
+                    &receipt.payload_digest.as_str(),
+                    &receipt.payload,
+                    &scoped.trust_domain,
+                ],
+            )
+            .await
+            .map_err(StorageError::Database)?;
+        if inserted != 1 {
+            return Err(StorageError::ImmutableConflict);
+        }
+        Ok(())
+    }
+
+    /// Recover one inert daemon-derived receipt for semantic re-admission.
+    pub async fn load_commissioning_receipt(
+        &self,
+        scope: &Scope,
+        record: &CommissioningRecordId,
+    ) -> Result<CommissioningReceipt, StorageError> {
+        let client = self.client().await?;
+        let scoped = scope_values(scope);
+        let row = client
+            .query_opt(
+                "SELECT record_digest, payload_digest, payload FROM commissioning_receipts r JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE r.institution_id = $1 AND r.workspace_id = $2 AND r.record_id = $3 AND w.trust_domain = $4",
+                &[&scoped.institution, &scoped.workspace, &record.0, &scoped.trust_domain],
+            )
+            .await
+            .map_err(StorageError::Database)?
+            .ok_or(StorageError::NotFound)?;
+        let record_digest = parse_digest(&row.get::<_, String>(0))?;
+        let payload_digest = parse_digest(&row.get::<_, String>(1))?;
+        let payload: Vec<u8> = row.get(2);
+        let actual = Digest::blake3(&payload);
+        if actual != payload_digest {
+            return Err(StorageError::DigestMismatch {
+                expected: payload_digest,
+                actual,
+            });
+        }
+        Ok(CommissioningReceipt {
+            record: record.clone(),
+            record_digest,
+            payload,
+            payload_digest,
+        })
     }
 
     /// Recover one immutable generation envelope within the installed scope.

@@ -106,6 +106,14 @@ pub enum CommissioningRequest {
         /// Owner approval bound to that exact candidate digest.
         approval: SignedAdmissionWire<FactApprovalRequest>,
     },
+    /// Admit one institution-owner commissioning approval as durable evidence.
+    ///
+    /// Its exact typed subject is checked only when a canonical commissioning
+    /// record is derived, where the complete observation selection is known.
+    CommissioningApproval {
+        /// Owner-signed evidence for one typed commissioning subject.
+        evidence: SignedAdmissionWire<EvidenceRequest>,
+    },
 }
 
 impl PoliteiadService {
@@ -582,6 +590,67 @@ impl PoliteiadService {
         })
     }
 
+    /// Admit owner-scoped commissioning approval evidence without inventing a
+    /// separate approval protocol. The canonical commissioning record later
+    /// resolves this evidence against all four required typed subjects.
+    async fn admit_commissioning_approval(
+        &self,
+        approval: SignedAdmissionWire<EvidenceRequest>,
+    ) -> Result<OperationResult, CoordinatorError> {
+        let durable = self.durable_snapshot().await?;
+        let evidence = TrustedEvidenceRegistry::admit_signed(&self.anchors, [approval.clone()])
+            .map_err(refusal)?;
+        let admitted = evidence.resolve(&approval.payload.id).ok_or_else(|| {
+            CoordinatorError::Refused("admitted commissioning approval is unavailable".to_string())
+        })?;
+        if admitted.producer != self.workspace.owner
+            || admitted.producer_delegation != self.workspace.owner_delegation
+            || !matches!(
+                admitted.independence,
+                politeia_core::evidence::IndependenceClass::HumanAuthority
+            )
+            || admitted.method != "institution-owner commissioning approval.v1"
+        {
+            return Err(CoordinatorError::Refused(
+                "commissioning approval is not owner-scoped human authority evidence"
+                    .to_string(),
+            ));
+        }
+        if durable.evidence.contains_key(&admitted.id) {
+            return Err(CoordinatorError::Refused(
+                "commissioning approval evidence is already durably admitted".to_string(),
+            ));
+        }
+        let record = signed_wire_record(&approval)?;
+        let receipt = self
+            .storage
+            .commit(&ScopedCommit {
+                scope: self.scope.clone(),
+                expected_revision: durable.revision,
+                model: durable.model,
+                model_kind: "commissioning_approval".to_string(),
+                transition: record.clone(),
+                state: Vec::new(),
+                evidence: vec![EvidenceAdmission {
+                    id: admitted.id.clone(),
+                    record,
+                }],
+                outbox: Vec::new(),
+            })
+            .await
+            .map_err(|error| storage_refusal(&error))?;
+        Ok(OperationResult::Coordinated {
+            result: json!({
+                "evidence": admitted.id,
+                "subject": admitted.subject,
+                "revision": receipt.revision,
+                "transition": receipt.transition_digest,
+                "admitted": true,
+            }),
+            evidence_refs: vec![approval.payload.id.0.to_string()],
+        })
+    }
+
     /// Re-admit one durable, unrevoked delegation held by the exact requester.
     ///
     /// This is the sole service-side recovery path for delegation authority:
@@ -625,7 +694,7 @@ impl PoliteiadService {
     /// Installed-key admission establishes that a recognized key signed the
     /// envelope. It does not itself prove that the signer may issue this grant;
     /// that relationship is checked here before the immutable wire is stored.
-    fn validate_delegation_authority(
+    pub(crate) fn validate_delegation_authority(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
         admitted: &politeia_core::trust::Admitted<Delegation>,
@@ -704,6 +773,9 @@ impl PoliteiadService {
                 candidate,
                 approval,
             } => self.approve_candidate(*candidate, approval).await,
+            CommissioningRequest::CommissioningApproval { evidence } => {
+                self.admit_commissioning_approval(evidence).await
+            }
             CommissioningRequest::AdmitDelegation { delegation } => {
                 let admitted = self
                     .anchors
