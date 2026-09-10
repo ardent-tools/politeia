@@ -23,14 +23,26 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ed25519_dalek::SigningKey;
 use jiff::{SignedDuration, Timestamp};
-use politeia_core::institution::InstitutionBoundary;
+use politeia_core::evidence::{EvidenceRecord, TrustedEvidenceRegistry};
+use politeia_core::generation::{
+    ApprovedGenerationInputs, CommissioningCapability, ReproducibilityContract,
+};
+use politeia_core::institution::{InstitutionBoundary, InstitutionWorkspace};
 use politeia_core::journal::{TransitionEntry, TransitionJournal, verify_chain};
-use politeia_core::knowledge::{CandidateClaim, ClaimStatus, FactApproval, Observation, approve};
+use politeia_core::knowledge::{
+    CandidateClaim, ClaimStatus, FactApprovalRequest, Observation, TrustedObservationRegistry,
+    approve_claim,
+};
+use politeia_core::lifecycle::{DeploymentTopology, LifecycleProfile};
 use politeia_core::outbox::{
     BoundaryCrossing, DenialReason, OutboxDeclaration, Sink, SinkKind, adjudicate,
 };
 use politeia_core::reconnaissance::{RECONNOITRE_ACTION, ReconnaissanceScope};
+use politeia_core::trust::{
+    AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire, TrustedSigningKey,
+};
 use politeia_core::{
     AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, EvidenceId, ExecutionLocality,
     InstitutionId, InstitutionWorkspaceId, ObservationId, OperationId, PolicyBundleId, PrincipalId,
@@ -71,6 +83,7 @@ fn declaration() -> OutboxDeclaration {
 
 struct Slice {
     boundary: InstitutionBoundary<OutboxDeclaration>,
+    workspace: InstitutionWorkspace,
     commissioner: PrincipalId,
     owner: PrincipalId,
     scope: ReconnaissanceScope,
@@ -79,14 +92,48 @@ struct Slice {
 }
 
 fn slice() -> Slice {
-    let workspace = InstitutionWorkspaceId::new();
+    let workspace_id = InstitutionWorkspaceId::new();
+    let institution = InstitutionId::new();
     let commissioner = PrincipalId::new();
     let owner = PrincipalId::new();
     let adapter = AdapterId::new();
     let delegation_id = DelegationId::new();
+    let owner_delegation = DelegationId::new();
+    let policy_bundle = PolicyBundleId::new();
+    let workspace = InstitutionWorkspace {
+        id: workspace_id.clone(),
+        institution: institution.clone(),
+        trust_domain: trust_domain(),
+        owner: owner.clone(),
+        owner_delegation,
+        approved_model_digest: Digest::blake3(b"model"),
+        policy_bundle: policy_bundle.clone(),
+        policy_digest: Digest::blake3(b"policy"),
+        approved_generation: ApprovedGenerationInputs {
+            source_digest: Digest::blake3(b"source"),
+            lifecycle: LifecycleProfile::Operational,
+            topology: DeploymentTopology::ClientControlledSingleTenant,
+            schema_digests: BTreeMap::new(),
+            adapter_digests: BTreeMap::new(),
+            pack_digests: BTreeMap::new(),
+            component_digests: BTreeMap::new(),
+            excluded_commissioning_capabilities: BTreeSet::from([
+                CommissioningCapability::GenericReconnaissance,
+                CommissioningCapability::InstitutionAuthoring,
+                CommissioningCapability::AdapterDevelopment,
+                CommissioningCapability::PolicyAuthoring,
+                CommissioningCapability::GenerationDerivation,
+            ]),
+            specializer_digest: Digest::blake3(b"specializer"),
+            toolchain_digest: Digest::blake3(b"toolchain"),
+            reproducibility: ReproducibilityContract::Deterministic,
+        },
+        secret_references: BTreeSet::new(),
+    };
 
     Slice {
-        boundary: InstitutionBoundary::new(InstitutionId::new(), workspace, declaration()),
+        boundary: InstitutionBoundary::new(institution, workspace_id, declaration()),
+        workspace,
         scope: ReconnaissanceScope {
             commissioner: commissioner.clone(),
             delegation: delegation_id.clone(),
@@ -149,6 +196,7 @@ fn one_bounded_path_runs_end_to_end() {
     // 2. Interpretation produces a candidate, uncontested.
     let claim = CandidateClaim {
         id: politeia_core::ClaimId::new(),
+        workspace: s.workspace.id.clone(),
         subject: seen.subject.clone(),
         proposition: Digest::blake3(b"billing is handled by the finance team"),
         supported_by: BTreeMap::from([(SOURCE.to_string(), BTreeSet::from([seen.id.clone()]))]),
@@ -159,20 +207,54 @@ fn one_bounded_path_runs_end_to_end() {
     };
     assert_eq!(claim.status(), ClaimStatus::Candidate);
 
-    // 3. The owner approves it, acknowledging the gap it declares.
-    let fact = approve(
-        &claim,
-        &FactApproval {
+    // 3. The owner signs approval, which resolves a trusted evidence-backed observation.
+    let evidence = TrustedEvidenceRegistry::from_trusted_bootstrap([EvidenceRecord {
+        id: seen.evidence.clone(),
+        subject: seen.subject.clone(),
+        producer: s.commissioner.clone(),
+        producer_delegation: s.delegation.id.clone(),
+        method: "synthetic read-only source adapter".to_string(),
+        payload_digest: seen.statement.clone(),
+        observed_at: at(),
+        independence: IndependenceClass::SelfReported,
+    }])
+    .unwrap_or_else(|refusal| unreachable!("fixture evidence is unique: {refusal}"));
+    let observations = TrustedObservationRegistry::from_trusted_bootstrap(
+        &s.workspace.id,
+        &evidence,
+        [seen.clone()],
+    )
+    .unwrap_or_else(|refusal| unreachable!("fixture observation is evidence-bound: {refusal}"));
+    let owner_key = SigningKey::from_bytes(&[23; 32]);
+    let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
+        s.workspace.institution.clone(),
+        s.workspace.id.clone(),
+        [TrustedSigningKey::new(
+            s.owner.clone(),
+            owner_key.verifying_key().to_bytes(),
+            BTreeSet::from([AdmissionKind::FactApproval]),
+        )
+        .unwrap_or_else(|refusal| unreachable!("fixture key is valid: {refusal}"))],
+    )
+    .unwrap_or_else(|refusal| unreachable!("fixture owner anchor is unique: {refusal}"));
+    let approval = SignedAdmissionWire::sign(
+        AdmissionKind::FactApproval,
+        s.workspace.institution.clone(),
+        s.workspace.id.clone(),
+        s.owner.clone(),
+        FactApprovalRequest {
             claim: claim.id.clone(),
+            subject: claim.subject.clone(),
             proposition: claim.proposition.clone(),
             acknowledged_status: claim.status(),
-            acknowledged_missed_axes: BTreeSet::from(["subsidiaries".to_string()]),
-            owner: s.owner.clone(),
-            owner_delegation: DelegationId::new(),
+            acknowledged_missed_axes: claim.missed_axes.clone(),
             approved_at: at(),
         },
+        &owner_key,
     )
-    .unwrap_or_else(|refusal| unreachable!("the candidate is approvable: {refusal}"));
+    .unwrap_or_else(|refusal| unreachable!("fixture approval encodes: {refusal}"));
+    let fact = approve_claim(&s.workspace, &observations, &anchors, &claim, approval)
+        .unwrap_or_else(|refusal| unreachable!("the signed candidate is approvable: {refusal}"));
     assert_eq!(
         fact.accepted_gaps(),
         &BTreeSet::from(["subsidiaries".to_string()]),
