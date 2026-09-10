@@ -57,10 +57,15 @@ impl PolicyDecisionPoint for AllowAll {
         let mut decision = PolicyDecision {
             bundle: self.bundle.clone(),
             policy_digest: self.policy_digest.clone(),
-            intent_digest,
+            intent_digest: intent_digest.clone(),
+            subject: intent_digest,
+            population: Digest::blake3(b"fixture policy population"),
             principal: intent.principal.clone(),
             allowed: true,
             binding_ids: vec!["fixture.allow".to_string()],
+            control_runs: Vec::new(),
+            activation_proofs: Vec::new(),
+            waiver_ids: Vec::new(),
             reasons: vec!["synthetic fixture policy".to_string()],
         };
         match self.fault {
