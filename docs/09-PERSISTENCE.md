@@ -8,8 +8,16 @@ Use a normalized authoritative state model plus immutable journals.
 - **Transition journal:** append-only record of accepted state transitions.
 - **Evidence journal:** immutable evidence metadata and subject bindings.
 - **Outbox:** transactional publication boundary for external notifications/integrations.
+- **Operation-attempt ledger:** durable reservations, claims, canonical effect bindings, and outcome
+  receipts for protected effects.
 
 Do not require reconstruction of all operational state solely through event replay.
+
+A claimed productive attempt remains an unresolved overlap across restarts and runtime generations
+until its canonical outcome receipt commits. Reservation and claim admission serialize through the
+workspace record while comparing all claimed effect bindings in that workspace. Completion updates
+the attempt and receipt atomically; it only removes an unresolved overlap after that transaction
+commits. Historical claimed attempts without a typed binding fail closed for new productive work.
 
 Delivered, published, or attested artifact bytes are immutable by digest. A later `Correction`
 amends interpretation and a `Supersession` selects a newer subject for future use; neither rewrites

@@ -17,7 +17,7 @@ pub use read::{PersistedDelegation, StoredPayload, WorkspaceSnapshot};
 
 use std::str::FromStr;
 
-use politeia_runtime::{AuthorizationLedger, ReservationRequest, RuntimeError};
+use politeia_runtime::{AuthorizationLedger, EffectReservation, ReservationRequest, RuntimeError};
 
 use jiff::Timestamp;
 
@@ -52,6 +52,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0005_handoff_receipts",
         include_str!("../migrations/0005_handoff_receipts.sql"),
+    ),
+    (
+        "0006_effect_bindings",
+        include_str!("../migrations/0006_effect_bindings.sql"),
     ),
 ];
 
@@ -377,6 +381,8 @@ pub struct AttemptReservation {
     pub claims_digest: Digest,
     /// Whether completed replay state remains retained beyond lease expiry.
     pub retain_replay: bool,
+    /// Read-only classification or canonical productive effect subject.
+    pub effect: EffectReservation,
     /// Canonical lease/reservation payload.
     pub request_payload: Vec<u8>,
     /// RFC 3339 timestamp at which the reservation ceases to be claimable.
@@ -448,6 +454,8 @@ pub enum StorageError {
     ImmutableConflict,
     /// An operation attempt cannot perform the requested state transition.
     AttemptUnavailable,
+    /// A productive effect may overlap an unresolved claimed attempt.
+    AmbiguousEffect,
     /// PostgreSQL kept aborting serializable transactions.
     SerializationExhausted,
 }
@@ -476,6 +484,7 @@ impl std::fmt::Display for StorageError {
             Self::AttemptUnavailable => {
                 formatter.write_str("attempt is missing, expired, replayed, or not claimable")
             }
+            Self::AmbiguousEffect => formatter.write_str("unresolved overlapping effect subject"),
             Self::SerializationExhausted => {
                 formatter.write_str("serializable transaction retry budget exhausted")
             }
@@ -494,6 +503,7 @@ impl std::error::Error for StorageError {
             | Self::NotFound
             | Self::ImmutableConflict
             | Self::AttemptUnavailable
+            | Self::AmbiguousEffect
             | Self::SerializationExhausted => None,
         }
     }
@@ -863,20 +873,57 @@ impl PostgresStorage {
         &self,
         reservation: &AttemptReservation,
     ) -> Result<(), StorageError> {
-        let client = self.client().await?;
+        let effect_binding = encode_effect_binding(&reservation.effect)?;
+        transaction::retry(|| self.reserve_attempt_once(reservation, &effect_binding)).await
+    }
+
+    async fn reserve_attempt_once(
+        &self,
+        reservation: &AttemptReservation,
+        effect_binding: &[u8],
+    ) -> Result<(), StorageError> {
+        let mut client = self.client().await?;
+        let transaction = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
+            .await
+            .map_err(StorageError::Database)?;
         let scoped = scope_values(&reservation.scope);
-        let inserted = client.execute(
-            "INSERT INTO operation_attempts (institution_id, workspace_id, reservation_id, replay_domain, replay_key, claims_digest, retain_replay, request_payload, expires_at) SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9::text::timestamptz WHERE EXISTS (SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $10) ON CONFLICT DO NOTHING",
-            &[&scoped.institution, &scoped.workspace, &reservation.reservation_id.0, &reservation.replay_domain, &reservation.replay_key.as_str(), &reservation.claims_digest.as_str(), &reservation.retain_replay, &reservation.request_payload, &reservation.expires_at, &scoped.trust_domain],
+        coordinate_workspace_effect_admission(
+            &transaction,
+            &reservation.scope,
+            Some(&reservation.effect),
+        )
+        .await?;
+        ensure_no_unresolved_effect_overlap(
+            &transaction,
+            &reservation.scope,
+            Some(&reservation.effect),
+        )
+        .await?;
+        let inserted = transaction.execute(
+            "INSERT INTO operation_attempts (institution_id, workspace_id, reservation_id, replay_domain, replay_key, claims_digest, retain_replay, effect_binding, request_payload, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::timestamptz) ON CONFLICT DO NOTHING",
+            &[&scoped.institution, &scoped.workspace, &reservation.reservation_id.0, &reservation.replay_domain, &reservation.replay_key.as_str(), &reservation.claims_digest.as_str(), &reservation.retain_replay, &effect_binding, &reservation.request_payload, &reservation.expires_at],
         ).await.map_err(StorageError::Database)?;
         if inserted != 1 {
             return Err(StorageError::AttemptUnavailable);
         }
+        transaction.commit().await.map_err(StorageError::Database)?;
         Ok(())
     }
 
     /// Atomically consume a reservation immediately before an effect port runs.
     pub async fn claim_attempt(
+        &self,
+        scope: &Scope,
+        reservation: &BudgetReservationId,
+        claims: &Digest,
+    ) -> Result<(), StorageError> {
+        transaction::retry(|| self.claim_attempt_once(scope, reservation, claims)).await
+    }
+
+    async fn claim_attempt_once(
         &self,
         scope: &Scope,
         reservation: &BudgetReservationId,
@@ -890,6 +937,20 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
+        // The direct claim surface predates typed claim input. Treat its
+        // not-yet-loaded binding as productive/unknown and take the fence.
+        coordinate_workspace_effect_admission(&transaction, scope, None).await?;
+        let pending = transaction
+            .query_opt(
+                "SELECT effect_binding FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND claims_digest = $4 AND status = 'reserved' AND expires_at > CURRENT_TIMESTAMP",
+                &[&scoped.institution, &scoped.workspace, &reservation.0, &claims.as_str()],
+            )
+            .await
+            .map_err(StorageError::Database)?
+            .ok_or(StorageError::AttemptUnavailable)?;
+        let binding = pending.get::<_, Option<Vec<u8>>>(0);
+        let effect = binding.as_deref().map(decode_effect_binding).transpose()?;
+        ensure_no_unresolved_effect_overlap(&transaction, scope, effect.as_ref()).await?;
         let claimed = transaction.execute(
             "UPDATE operation_attempts a SET status = 'claimed' FROM institution_workspaces w WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND a.claims_digest = $4 AND a.status = 'reserved' AND a.expires_at > CURRENT_TIMESTAMP AND w.institution_id = a.institution_id AND w.workspace_id = a.workspace_id AND w.trust_domain = $5",
             &[&scoped.institution, &scoped.workspace, &reservation.0, &claims.as_str(), &scoped.trust_domain],
@@ -1199,18 +1260,31 @@ impl PostgresStorage {
         })?;
         let payload = politeia_core::canonical::to_canonical_bytes(&payload)
             .map_err(StorageError::Canonical)?;
+        let effect_binding = encode_effect_binding(request.effect())?;
         transaction::retry(|| {
-            self.reserve_runtime_once(scope, request, &requested, &payload, generation)
+            self.reserve_runtime_once(
+                scope,
+                request,
+                &requested,
+                &payload,
+                &effect_binding,
+                generation,
+            )
         })
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one retry attempt receives the precomputed canonical reservation bindings"
+    )]
     async fn reserve_runtime_once(
         &self,
         scope: &Scope,
         request: &ReservationRequest,
         requested: &BudgetAmounts,
         payload: &[u8],
+        effect_binding: &[u8],
         generation: &GenerationAdmission,
     ) -> Result<(), StorageError> {
         let mut client = self.client().await?;
@@ -1222,6 +1296,7 @@ impl PostgresStorage {
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
         let admission_revision = check_generation(&transaction, scope, request, generation).await?;
+        ensure_no_unresolved_effect_overlap(&transaction, scope, Some(request.effect())).await?;
         transaction
             .execute(
                 "DELETE FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND expires_at <= CURRENT_TIMESTAMP AND (status = 'reserved' OR (status = 'completed' AND retain_replay = FALSE))",
@@ -1287,8 +1362,8 @@ impl PostgresStorage {
         let requested_values = requested.as_strings();
         let inserted = transaction
             .execute(
-                "INSERT INTO operation_attempts (institution_id, workspace_id, reservation_id, replay_domain, replay_key, claims_digest, retain_replay, request_payload, expires_at, admission_revision) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text::timestamptz, $10) ON CONFLICT DO NOTHING",
-                &[&scoped.institution, &scoped.workspace, &request.reservation_id().0, &request.replay_domain(), &request.replay_key().as_str(), &request.claims_digest().as_str(), &request.retains_replay(), &payload, &expires_at, &admission_revision],
+                "INSERT INTO operation_attempts (institution_id, workspace_id, reservation_id, replay_domain, replay_key, claims_digest, retain_replay, effect_binding, request_payload, expires_at, admission_revision) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::timestamptz, $11) ON CONFLICT DO NOTHING",
+                &[&scoped.institution, &scoped.workspace, &request.reservation_id().0, &request.replay_domain(), &request.replay_key().as_str(), &request.claims_digest().as_str(), &request.retains_replay(), &effect_binding, &payload, &expires_at, &admission_revision],
             )
             .await
             .map_err(StorageError::Database)?;
@@ -1334,6 +1409,7 @@ impl PostgresStorage {
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
         let admission_revision = check_generation(&transaction, scope, request, generation).await?;
+        ensure_no_unresolved_effect_overlap(&transaction, scope, Some(request.effect())).await?;
         for budget_scope in request.budget_scopes() {
             let admitted = transaction
                 .query_opt(
@@ -1377,6 +1453,100 @@ impl PostgresStorage {
     }
 }
 
+fn encode_effect_binding(effect: &EffectReservation) -> Result<Vec<u8>, StorageError> {
+    to_canonical_bytes(effect).map_err(StorageError::Canonical)
+}
+
+fn decode_effect_binding(bytes: &[u8]) -> Result<EffectReservation, StorageError> {
+    let effect: EffectReservation =
+        serde_json::from_slice(bytes).map_err(|_| StorageError::ImmutableConflict)?;
+    if encode_effect_binding(&effect)? != bytes {
+        return Err(StorageError::ImmutableConflict);
+    }
+    Ok(effect)
+}
+
+async fn coordinate_workspace_effect_admission(
+    transaction: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    effect: Option<&EffectReservation>,
+) -> Result<(), StorageError> {
+    let scoped = scope_values(scope);
+    if matches!(effect, Some(EffectReservation::ReadOnly)) {
+        transaction
+            .query_opt(
+                "SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $3 FOR SHARE",
+                &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
+            )
+            .await
+            .map_err(StorageError::Database)?
+            .ok_or(StorageError::NotFound)?;
+        return Ok(());
+    }
+    advance_workspace_admission_epoch(transaction, scope).await
+}
+
+pub(crate) async fn advance_workspace_admission_epoch(
+    transaction: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+) -> Result<(), StorageError> {
+    let scoped = scope_values(scope);
+    let fenced = transaction
+        .query_opt(
+            "UPDATE institution_workspaces SET admission_epoch = admission_epoch + 1 WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $3 AND admission_epoch < 9223372036854775807 RETURNING admission_epoch",
+            &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
+        )
+        .await
+        .map_err(StorageError::Database)?;
+    if fenced.is_none() {
+        let exists = transaction
+            .query_opt(
+                "SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $3",
+                &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
+            )
+            .await
+            .map_err(StorageError::Database)?;
+        return Err(if exists.is_some() {
+            StorageError::AttemptUnavailable
+        } else {
+            StorageError::NotFound
+        });
+    }
+    Ok(())
+}
+
+async fn ensure_no_unresolved_effect_overlap(
+    transaction: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    incoming: Option<&EffectReservation>,
+) -> Result<(), StorageError> {
+    if matches!(incoming, Some(EffectReservation::ReadOnly)) {
+        return Ok(());
+    }
+    let scoped = scope_values(scope);
+    let rows = transaction
+        .query(
+            "SELECT effect_binding FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND status = 'claimed'",
+            &[&scoped.institution, &scoped.workspace],
+        )
+        .await
+        .map_err(StorageError::Database)?;
+    for row in rows {
+        let Some(binding) = row.get::<_, Option<Vec<u8>>>(0) else {
+            return Err(StorageError::AmbiguousEffect);
+        };
+        let claimed = decode_effect_binding(&binding)?;
+        let overlaps = match incoming {
+            Some(effect) => effect.potentially_overlaps(&claimed),
+            None => true,
+        };
+        if overlaps {
+            return Err(StorageError::AmbiguousEffect);
+        }
+    }
+    Ok(())
+}
+
 async fn check_generation(
     transaction: &tokio_postgres::Transaction<'_>,
     scope: &Scope,
@@ -1384,12 +1554,28 @@ async fn check_generation(
     generation: &GenerationAdmission,
 ) -> Result<i64, StorageError> {
     let scoped = scope_values(scope);
-    // FOR SHARE conflicts with activation's non-key UPDATE; FOR KEY SHARE
-    // would leave a window in which stale policy could claim an effect.
-    let row = transaction.query_opt(
-        "SELECT w.active_generation_digest, (SELECT r.content_digest FROM workspace_revisions r WHERE r.institution_id = w.institution_id AND r.workspace_id = w.workspace_id AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'), w.revision FROM institution_workspaces w WHERE w.institution_id = $1 AND w.workspace_id = $2 AND w.trust_domain = $3 FOR SHARE OF w",
-        &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
-    ).await.map_err(StorageError::Database)?.ok_or(StorageError::NotFound)?;
+    let productive = matches!(request.effect(), EffectReservation::Mutating(_));
+    if productive {
+        // This UPDATE is the SERIALIZABLE visibility fence as well as the
+        // workspace lock. A waiter whose snapshot predates the preceding
+        // claimant aborts and retries instead of reading a stale claimed set.
+        coordinate_workspace_effect_admission(transaction, scope, Some(request.effect())).await?;
+    }
+    // Read-only admission retains the original shared generation lock. The
+    // productive path already owns the workspace row through its fence UPDATE.
+    let query = if productive {
+        "SELECT w.active_generation_digest, (SELECT r.content_digest FROM workspace_revisions r WHERE r.institution_id = w.institution_id AND r.workspace_id = w.workspace_id AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'), w.revision FROM institution_workspaces w WHERE w.institution_id = $1 AND w.workspace_id = $2 AND w.trust_domain = $3"
+    } else {
+        "SELECT w.active_generation_digest, (SELECT r.content_digest FROM workspace_revisions r WHERE r.institution_id = w.institution_id AND r.workspace_id = w.workspace_id AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'), w.revision FROM institution_workspaces w WHERE w.institution_id = $1 AND w.workspace_id = $2 AND w.trust_domain = $3 FOR SHARE OF w"
+    };
+    let row = transaction
+        .query_opt(
+            query,
+            &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
+        )
+        .await
+        .map_err(StorageError::Database)?
+        .ok_or(StorageError::NotFound)?;
     let active: Option<String> = row.get(0);
     let revision: i64 = row.get(2);
     if generation
@@ -1605,8 +1791,11 @@ type BudgetLimitStrings = (
 );
 
 fn runtime_state_error(error: StorageError) -> RuntimeError {
-    RuntimeError::AuthorizationState {
-        source: Box::new(error),
+    match error {
+        StorageError::AmbiguousEffect => RuntimeError::AmbiguousEffect,
+        other => RuntimeError::AuthorizationState {
+            source: Box::new(other),
+        },
     }
 }
 
@@ -1756,6 +1945,7 @@ mod tests {
             replay_key: Digest::blake3(b"effect subject"),
             claims_digest: Digest::blake3(b"claims"),
             retain_replay: true,
+            effect: EffectReservation::ReadOnly,
             request_payload: b"canonical request".to_vec(),
             expires_at: "2030-01-01T00:00:00Z".to_owned(),
         };

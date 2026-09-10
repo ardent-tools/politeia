@@ -365,6 +365,196 @@ async fn port_failure_keeps_replay_and_full_budget_conservatively_spent() {
     );
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "the canonical test fixture always contains its trusted root"
+)]
+fn mutating_fixture(resources: BTreeSet<String>) -> Fixture {
+    let mut fixture = fixture();
+    fixture.intent.input_digest = Digest::blake3(b"productive fixture input");
+    fixture.intent.resources = resources.clone();
+    fixture.intent.operation.name = "create_fixture_artifact".to_string();
+    fixture.intent.operation.effects = BTreeSet::from([Effect::CreateArtifact]);
+    fixture.intent.operation.retryable = false;
+    fixture.intent.operation.requires_idempotency = false;
+    let root = fixture
+        .intent
+        .delegation_chain
+        .first_mut()
+        .expect("the fixture must contain one trusted root");
+    root.resources = resources;
+    root.effects = fixture.intent.operation.effects.clone();
+    fixture.dispatcher.config.trusted_delegations.clear();
+    fixture
+        .dispatcher
+        .config
+        .trusted_delegations
+        .insert(root.id.clone(), root.clone());
+    fixture.dispatcher.config.trusted_operations.clear();
+    fixture.dispatcher.config.trusted_operations.insert(
+        fixture.intent.operation.id.clone(),
+        fixture.intent.operation.clone(),
+    );
+    fixture
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "fresh fixture authority is cloned from its required trusted root"
+)]
+fn fresh_root_authority(fixture: &mut Fixture, intent: &mut OperationIntent) {
+    let mut root = intent
+        .delegation_chain
+        .first()
+        .expect("the fixture intent must contain one root authority")
+        .clone();
+    root.id = DelegationId::new();
+    intent.delegation_chain = vec![root.clone()];
+    fixture
+        .dispatcher
+        .config
+        .trusted_delegations
+        .insert(root.id.clone(), root);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "the overlap witness starts from exact trusted productive fixtures"
+)]
+async fn claimed_effect_overlap_ignores_fresh_local_ids_and_releases_only_on_completion() {
+    let mut fixture = mutating_fixture(BTreeSet::from([
+        "artifact:a".to_string(),
+        "artifact:b".to_string(),
+    ]));
+    fixture.intent.resources = BTreeSet::from(["artifact:a".to_string()]);
+    let first = fixture
+        .dispatcher
+        .authorize(&fixture.intent)
+        .await
+        .expect("the first productive operation must reserve");
+    assert!(first.effect_subject().is_some());
+    fixture
+        .dispatcher
+        .execute(&first)
+        .await
+        .expect("the first productive effect must become claimed");
+
+    let mut overlapping = fixture.intent.clone();
+    fresh_root_authority(&mut fixture, &mut overlapping);
+    overlapping.input_digest = Digest::blake3(b"fresh parameters cannot prove disjointness");
+    overlapping.idempotency_key = Some("fresh-caller-key".to_string());
+    overlapping.resources.insert("artifact:b".to_string());
+    overlapping.operation.id = OperationId::new();
+    overlapping.operation.name = "delete_or_replace_fixture_artifact".to_string();
+    fixture.dispatcher.config.trusted_operations.insert(
+        overlapping.operation.id.clone(),
+        overlapping.operation.clone(),
+    );
+    assert!(matches!(
+        fixture.dispatcher.authorize(&overlapping).await,
+        Err(RuntimeError::AmbiguousEffect)
+    ));
+    assert_eq!(
+        fixture.dispatcher.port.call_count(),
+        1,
+        "a fresh grant, operation ID, input, key, and superset must not reach the port"
+    );
+
+    let mut disjoint = overlapping.clone();
+    fresh_root_authority(&mut fixture, &mut disjoint);
+    disjoint.resources = BTreeSet::from(["artifact:b".to_string()]);
+    let _disjoint_lease = fixture
+        .dispatcher
+        .authorize(&disjoint)
+        .await
+        .expect("a disjoint canonical resource may reserve while the first is unresolved");
+
+    fixture
+        .dispatcher
+        .ledger
+        .record_completion(
+            first.reservation_id(),
+            Digest::blake3(b"specific fixture outcome evidence"),
+        )
+        .await
+        .expect("specific outcome evidence closes the claimed in-memory attempt");
+    let mut repeated = fixture.intent.clone();
+    fresh_root_authority(&mut fixture, &mut repeated);
+    repeated.input_digest = Digest::blake3(b"an intentional later invocation");
+    let repeated = fixture
+        .dispatcher
+        .authorize(&repeated)
+        .await
+        .expect("completion evidence must release the overlap guard");
+    fixture
+        .dispatcher
+        .execute(&repeated)
+        .await
+        .expect("the intentional post-completion repeat may reach the port");
+    assert_eq!(fixture.dispatcher.port.call_count(), 2);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "the unknown-scope witness starts from a valid productive lease"
+)]
+async fn empty_productive_resource_scope_fails_closed_as_unknown() {
+    let mut fixture = mutating_fixture(BTreeSet::from(["artifact:a".to_string()]));
+    fixture.intent.resources.clear();
+    let first = fixture
+        .dispatcher
+        .authorize(&fixture.intent)
+        .await
+        .expect("the initial unknown-scope operation may reserve");
+    fixture
+        .dispatcher
+        .execute(&first)
+        .await
+        .expect("the initial unknown-scope operation becomes claimed");
+
+    let mut named = fixture.intent.clone();
+    fresh_root_authority(&mut fixture, &mut named);
+    named.resources = BTreeSet::from(["artifact:a".to_string()]);
+    assert!(matches!(
+        fixture.dispatcher.authorize(&named).await,
+        Err(RuntimeError::AmbiguousEffect)
+    ));
+    assert_eq!(fixture.dispatcher.port.call_count(), 1);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "read-only replay behavior begins with two valid fresh leases"
+)]
+async fn read_only_operations_do_not_create_productive_ambiguity() {
+    let fixture = fixture();
+    let first = fixture
+        .dispatcher
+        .authorize(&fixture.intent)
+        .await
+        .expect("the first read must reserve");
+    assert!(first.effect_subject().is_none());
+    fixture
+        .dispatcher
+        .execute(&first)
+        .await
+        .expect("the first read must execute");
+    let second = fixture
+        .dispatcher
+        .authorize(&fixture.intent)
+        .await
+        .expect("a completed read is not a productive ambiguity");
+    fixture
+        .dispatcher
+        .execute(&second)
+        .await
+        .expect("the second read must execute independently");
+    assert_eq!(fixture.dispatcher.port.call_count(), 2);
+}
+
 #[tokio::test]
 #[expect(
     clippy::expect_used,
@@ -414,6 +604,16 @@ async fn every_bound_axis_rejects_substitution() {
     .await;
     assert_tampering_rejected(&fixture, "budget", |claims| {
         claims.budget.wall_ms = Some(2000);
+    })
+    .await;
+    assert_tampering_rejected(&fixture, "effect subject classification", |claims| {
+        claims.effect = EffectReservation::Mutating(EffectSubject::new(
+            Digest::blake3(b"subject this lease was never issued for"),
+            EffectOverlap::new(
+                EffectTarget::new(claims.adapter.clone(), "effect-port:fs".to_string()),
+                &claims.resources,
+            ),
+        ));
     })
     .await;
     assert_tampering_rejected(&fixture, "policy bundle", |claims| {

@@ -29,7 +29,8 @@ mod ledger;
 pub mod routing;
 
 pub use ledger::{
-    AuthorizationLedger, BudgetScope, InMemoryAuthorizationLedger, ReservationRequest,
+    AuthorizationLedger, BudgetScope, EffectOverlap, EffectReservation, EffectSubject,
+    EffectTarget, InMemoryAuthorizationLedger, ReservationRequest,
 };
 
 /// Failures of the dispatch boundary. All deny-shaped variants fail closed.
@@ -111,6 +112,10 @@ pub enum RuntimeError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+    /// A productive effect potentially overlaps a prior claimed attempt whose
+    /// outcome has not been resolved by evidence.
+    #[snafu(display("unresolved overlapping effect subject"))]
+    AmbiguousEffect,
     /// The immutable lease claims could not be encoded for exact binding.
     #[snafu(display("failed to encode effect lease claims"))]
     LeaseEncoding {
@@ -221,6 +226,7 @@ struct LeaseClaims {
     resources: BTreeSet<String>,
     budget: ResourceBudget,
     idempotency_key: Option<String>,
+    effect: EffectReservation,
     execution: Option<routing::ExecutionAssignment>,
     decision: PolicyDecision,
     runtime: RuntimeGenerationId,
@@ -301,6 +307,13 @@ impl EffectLease {
     /// Stable operation key bound to the lease, when idempotency is required.
     pub fn idempotency_key(&self) -> Option<&str> {
         self.claims.idempotency_key.as_deref()
+    }
+    /// Canonical productive effect subject, absent for a read-only operation.
+    pub fn effect_subject(&self) -> Option<&EffectSubject> {
+        match &self.claims.effect {
+            EffectReservation::ReadOnly => None,
+            EffectReservation::Mutating(subject) => Some(subject),
+        }
     }
     /// Exact resource selection and routing receipt bound to the lease.
     pub fn execution(&self) -> Option<&routing::ExecutionAssignment> {
@@ -388,6 +401,7 @@ impl EffectLease {
             self.claims.reservation_id.clone(),
             Digest::blake3(&replay_key),
             self.claims.operation.requires_idempotency,
+            self.claims.effect.clone(),
             self.claims.replay_domain.clone(),
             budget_scopes,
             self.claims.budget.clone(),
@@ -397,6 +411,45 @@ impl EffectLease {
             self.claims.runtime.clone(),
         ))
     }
+}
+
+#[derive(Serialize)]
+struct EffectSubjectIdentity<'a> {
+    target: &'a EffectTarget,
+    operation: &'a OperationSpec,
+    resources: &'a BTreeSet<String>,
+    input_digest: &'a Digest,
+}
+
+fn effect_reservation(
+    intent: &OperationIntent,
+    adapter: &AdapterId,
+    audience: &str,
+) -> Result<EffectReservation, RuntimeError> {
+    if !intent.operation.effects.iter().any(Effect::mutates) {
+        return Ok(EffectReservation::ReadOnly);
+    }
+    ensure!(
+        !audience.is_empty() && audience.trim() == audience,
+        InvalidConfigurationSnafu {
+            reason: "effect port audience is not a concrete canonical target"
+        }
+    );
+    let target = EffectTarget::new(adapter.clone(), audience.to_string());
+    let overlap = EffectOverlap::new(target, &intent.resources);
+    let identity = Digest::of(
+        DigestDomain::EffectSubject,
+        &EffectSubjectIdentity {
+            target: overlap.target(),
+            operation: &intent.operation,
+            resources: &intent.resources,
+            input_digest: &intent.input_digest,
+        },
+    )
+    .context(LeaseEncodingSnafu)?;
+    Ok(EffectReservation::Mutating(EffectSubject::new(
+        identity, overlap,
+    )))
 }
 
 /// A move-only invocation capability constructed only by [`Dispatcher`].

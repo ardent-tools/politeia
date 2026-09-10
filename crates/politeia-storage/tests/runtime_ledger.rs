@@ -417,6 +417,41 @@ fn budget(wall_ms: u64) -> ResourceBudget {
 
 impl Fixture {
     async fn new(database_url: &str, capacity: u64) -> TestResult<Self> {
+        Self::new_with_contract(
+            database_url,
+            capacity,
+            BTreeSet::from(["fixture:document".to_owned()]),
+            BTreeSet::from([Effect::ReadExternalSystem]),
+            true,
+            true,
+        )
+        .await
+    }
+
+    async fn new_productive(database_url: &str, capacity: u64) -> TestResult<Self> {
+        Self::new_with_contract(
+            database_url,
+            capacity,
+            BTreeSet::from([
+                "fixture:artifact:a".to_owned(),
+                "fixture:artifact:b".to_owned(),
+                "fixture:artifact:c".to_owned(),
+            ]),
+            BTreeSet::from([Effect::CreateArtifact]),
+            false,
+            false,
+        )
+        .await
+    }
+
+    async fn new_with_contract(
+        database_url: &str,
+        capacity: u64,
+        resources: BTreeSet<String>,
+        effects: BTreeSet<Effect>,
+        retryable: bool,
+        requires_idempotency: bool,
+    ) -> TestResult<Self> {
         let storage = PostgresStorage::connect(database_url).await?;
         storage.migrate().await?;
         let institution = InstitutionId::new();
@@ -448,8 +483,8 @@ impl Fixture {
             subject: owner.clone(),
             parent: None,
             actions: BTreeSet::from(["read".to_owned()]),
-            resources: BTreeSet::from(["fixture:document".to_owned()]),
-            effects: BTreeSet::from([Effect::ReadExternalSystem]),
+            resources: resources.clone(),
+            effects: effects.clone(),
             data_classes: BTreeSet::from([DataClass::Public]),
             audience: BTreeSet::from(["fixture:effect-port".to_owned()]),
             expires_at: Timestamp::now() + SignedDuration::from_hours(1),
@@ -490,14 +525,14 @@ impl Fixture {
         storage.admit_delegation(&scope, &admitted, &signed).await?;
         let operation = OperationSpec {
             id: OperationId::new(),
-            name: "durable_fixture_read".to_owned(),
+            name: "durable_fixture_operation".to_owned(),
             actions: delegation.actions.clone(),
             effects: delegation.effects.clone(),
             data_classes: delegation.data_classes.clone(),
             evidence_obligations: vec![],
             execution_requirement: None,
-            retryable: true,
-            requires_idempotency: true,
+            retryable,
+            requires_idempotency,
         };
         Ok(Self {
             anchors,
@@ -509,9 +544,9 @@ impl Fixture {
                 input_digest: Digest::blake3(b"ledger-fixture-input"),
                 delegation_chain: vec![delegation],
                 operation,
-                resources: BTreeSet::from(["fixture:document".to_owned()]),
+                resources,
                 budget: budget(1),
-                idempotency_key: Some("fixture-attempt".to_owned()),
+                idempotency_key: requires_idempotency.then(|| "fixture-attempt".to_owned()),
                 execution: None,
             },
             policy: PolicyBundleId::new(),
@@ -529,6 +564,78 @@ impl Fixture {
         ttl: SignedDuration,
     ) -> TestResult<TestDispatcher> {
         self.dispatcher_for_generation(storage, ttl, self.generation.clone(), true)
+    }
+
+    fn dispatcher_for_intent(
+        &self,
+        storage: PostgresStorage,
+        ttl: SignedDuration,
+        intent: &OperationIntent,
+    ) -> TestResult<TestDispatcher> {
+        self.dispatcher_for_intent_in_domain(
+            storage,
+            ttl,
+            intent,
+            "fixture:durable-replay".to_owned(),
+        )
+    }
+
+    fn dispatcher_for_intent_in_domain(
+        &self,
+        storage: PostgresStorage,
+        ttl: SignedDuration,
+        intent: &OperationIntent,
+        replay_domain: String,
+    ) -> TestResult<TestDispatcher> {
+        let config = DispatcherConfig::new(
+            self.policy.clone(),
+            self.policy_digest.clone(),
+            self.generation.clone(),
+            replay_domain,
+            ttl,
+            intent.delegation_chain.clone(),
+            [intent.operation.clone()],
+        )?;
+        Ok(Dispatcher::new(
+            LedgerFixturePolicy {
+                bundle: self.policy.clone(),
+                digest: self.policy_digest.clone(),
+            },
+            CountingPort {
+                adapter: self.adapter.clone(),
+                calls: self.calls.clone(),
+            },
+            PostgresAuthorizationLedger::for_bootstrap(
+                storage,
+                self.scope.clone(),
+                self.bootstrap_digest.clone(),
+            ),
+            config,
+        ))
+    }
+
+    async fn fresh_intent(
+        &self,
+        resources: BTreeSet<String>,
+        operation: OperationSpec,
+        input: &[u8],
+    ) -> TestResult<OperationIntent> {
+        let mut grant = self.authority.payload().clone();
+        grant.id = DelegationId::new();
+        let (admitted, wire) = admit_fixture_authority(self, grant)?;
+        self.storage
+            .admit_delegation(&self.scope, &admitted, &wire)
+            .await?;
+        Ok(OperationIntent {
+            principal: self.intent.principal.clone(),
+            input_digest: Digest::blake3(input),
+            delegation_chain: vec![admitted.into_payload()],
+            operation,
+            resources,
+            budget: budget(1),
+            idempotency_key: None,
+            execution: None,
+        })
     }
 
     fn dispatcher_for_generation(
@@ -939,6 +1046,215 @@ async fn dispatcher_reopens_reservations_and_refuses_ambiguous_replay() -> TestR
         restarted.authorize(&fixture.intent).await.is_err(),
         "completion does not release retained replay"
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn fresh_grants_cannot_evade_claimed_effect_overlap_and_completion_releases_it() -> TestResult
+{
+    let url = database_url()?;
+    let fixture = Fixture::new_productive(&url, 1).await?;
+    let mut first_intent = fixture.intent.clone();
+    first_intent.resources = BTreeSet::from(["fixture:artifact:a".to_owned()]);
+    let first_dispatcher = fixture.dispatcher_for_intent(
+        fixture.storage.clone(),
+        SignedDuration::from_secs(30),
+        &first_intent,
+    )?;
+    let first = first_dispatcher.authorize(&first_intent).await?;
+    first_dispatcher.execute(&first).await?;
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture
+            .storage
+            .load_attempt(&fixture.scope, first.reservation_id())
+            .await?
+            .status,
+        AttemptStatus::Claimed
+    );
+
+    let mut different_operation = first_intent.operation.clone();
+    different_operation.id = OperationId::new();
+    different_operation.name = "replace_durable_fixture_artifact".to_owned();
+    let overlapping = fixture
+        .fresh_intent(
+            BTreeSet::from([
+                "fixture:artifact:a".to_owned(),
+                "fixture:artifact:b".to_owned(),
+            ]),
+            different_operation,
+            b"fresh operation parameters",
+        )
+        .await?;
+    let overlapping_dispatcher = fixture.dispatcher_for_intent_in_domain(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+        &overlapping,
+        "fixture:fresh-runtime-domain".to_owned(),
+    )?;
+    let refusal = overlapping_dispatcher.authorize(&overlapping).await;
+    assert!(
+        matches!(refusal, Err(RuntimeError::AmbiguousEffect)),
+        "a fresh one-call grant, replay domain, operation ID, parameters, lease, and intersecting resource set must receive the semantic ambiguity refusal"
+    );
+    assert_eq!(
+        fixture.calls.load(Ordering::SeqCst),
+        1,
+        "the overlapping fresh grant must not reach the effect port"
+    );
+
+    let disjoint = fixture
+        .fresh_intent(
+            BTreeSet::from(["fixture:artifact:c".to_owned()]),
+            first_intent.operation.clone(),
+            b"disjoint operation parameters",
+        )
+        .await?;
+    let disjoint_dispatcher = fixture.dispatcher_for_intent(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+        &disjoint,
+    )?;
+    let disjoint_lease = disjoint_dispatcher.authorize(&disjoint).await?;
+    disjoint_dispatcher.execute(&disjoint_lease).await?;
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+
+    fixture
+        .storage
+        .record_completion(
+            &fixture.scope,
+            first.reservation_id(),
+            &CanonicalPayload::from_json(
+                &serde_json::json!({"outcome": "first effect completed"}),
+            )?,
+        )
+        .await?;
+    let repeated = fixture
+        .fresh_intent(
+            BTreeSet::from(["fixture:artifact:a".to_owned()]),
+            first_intent.operation,
+            b"intentional post-completion operation",
+        )
+        .await?;
+    let repeated_dispatcher = fixture.dispatcher_for_intent(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+        &repeated,
+    )?;
+    let repeated_lease = repeated_dispatcher.authorize(&repeated).await?;
+    repeated_dispatcher.execute(&repeated_lease).await?;
+    assert_eq!(
+        fixture.calls.load(Ordering::SeqCst),
+        3,
+        "canonical completion evidence releases only the resolved overlap"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn workspace_lock_serializes_competing_overlap_claims_before_either_port_runs() -> TestResult
+{
+    let url = database_url()?;
+    let fixture = Fixture::new_productive(&url, 1).await?;
+    let left_intent = fixture
+        .fresh_intent(
+            BTreeSet::from(["fixture:artifact:a".to_owned()]),
+            fixture.intent.operation.clone(),
+            b"left parameters",
+        )
+        .await?;
+    let mut right_operation = fixture.intent.operation.clone();
+    right_operation.id = OperationId::new();
+    right_operation.name = "competing_artifact_write".to_owned();
+    let right_intent = fixture
+        .fresh_intent(
+            BTreeSet::from([
+                "fixture:artifact:a".to_owned(),
+                "fixture:artifact:b".to_owned(),
+            ]),
+            right_operation,
+            b"right parameters",
+        )
+        .await?;
+    let left_dispatcher = fixture.dispatcher_for_intent(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+        &left_intent,
+    )?;
+    let right_dispatcher = fixture.dispatcher_for_intent_in_domain(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+        &right_intent,
+        "fixture:concurrent-fresh-runtime-domain".to_owned(),
+    )?;
+    let left = left_dispatcher.authorize(&left_intent).await?;
+    let right = right_dispatcher.authorize(&right_intent).await?;
+
+    let (left_result, right_result) = tokio::join!(
+        left_dispatcher.execute(&left),
+        right_dispatcher.execute(&right),
+    );
+    let successes = usize::from(left_result.is_ok()) + usize::from(right_result.is_ok());
+    let ambiguities = usize::from(matches!(left_result, Err(RuntimeError::AmbiguousEffect)))
+        + usize::from(matches!(right_result, Err(RuntimeError::AmbiguousEffect)));
+    assert_eq!(successes, 1, "one workspace-serialized claim must win");
+    assert_eq!(ambiguities, 1, "the intersecting claim must fail closed");
+    assert_eq!(
+        fixture.calls.load(Ordering::SeqCst),
+        1,
+        "the losing claim must be refused before its port"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn legacy_claimed_attempt_without_a_subject_blocks_new_mutating_work() -> TestResult {
+    let url = database_url()?;
+    let fixture = Fixture::new_productive(&url, 1).await?;
+    let mut original = fixture.intent.clone();
+    original.resources = BTreeSet::from(["fixture:artifact:a".to_owned()]);
+    let dispatcher = fixture.dispatcher_for_intent(
+        fixture.storage.clone(),
+        SignedDuration::from_secs(30),
+        &original,
+    )?;
+    let lease = dispatcher.authorize(&original).await?;
+    dispatcher.execute(&lease).await?;
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
+        .execute(
+            "UPDATE operation_attempts SET effect_binding = NULL WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND status = 'claimed'",
+            &[
+                &fixture.scope.institution().0,
+                &fixture.scope.workspace().0,
+                &lease.reservation_id().0,
+            ],
+        )
+        .await?;
+
+    let fresh = fixture
+        .fresh_intent(
+            BTreeSet::from(["fixture:artifact:c".to_owned()]),
+            fixture.intent.operation.clone(),
+            b"apparently disjoint but legacy-unknown",
+        )
+        .await?;
+    let fresh_dispatcher = fixture.dispatcher_for_intent(
+        PostgresStorage::connect(&url).await?,
+        SignedDuration::from_secs(30),
+        &fresh,
+    )?;
+    assert!(matches!(
+        fresh_dispatcher.authorize(&fresh).await,
+        Err(RuntimeError::AmbiguousEffect)
+    ));
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
