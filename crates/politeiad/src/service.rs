@@ -76,6 +76,11 @@ pub enum CommissioningRequest {
         /// Exact signed delegation wire, retained for restart re-admission.
         delegation: SignedAdmissionWire<Delegation>,
     },
+    /// Execute a typed signed generation lifecycle request.
+    Generation {
+        /// Opaque JSON decoded by the dedicated generation coordinator.
+        request: Value,
+    },
 }
 
 impl PoliteiadService {
@@ -517,6 +522,7 @@ impl PoliteiadService {
             CoordinatorError::Refused(format!("commissioning input is not typed JSON: {error}"))
         })?;
         match request {
+            CommissioningRequest::Generation { request } => self.handle_generation(request).await,
             CommissioningRequest::AdmitDelegation { delegation } => {
                 let admitted = self
                     .anchors
