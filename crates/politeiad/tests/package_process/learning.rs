@@ -34,6 +34,9 @@ pub(super) struct LearningExercise {
     pub(super) temporary_grants: Vec<Delegation>,
     pub(super) completion: serde_json::Value,
     pub(super) durable_completion: serde_json::Value,
+    pub(super) historical_context: serde_json::Value,
+    pub(super) historical_context_receipt: serde_json::Value,
+    pub(super) historical_approval: serde_json::Value,
 }
 
 /// Exercise active context, discovery, feedback, source correction, and the
@@ -450,6 +453,9 @@ pub(crate) fn exercise(
         temporary_grants: vec![capture_grant],
         completion: replacement_result["completion"].clone(),
         durable_completion,
+        historical_context: original_context,
+        historical_context_receipt: preserved_context_receipt,
+        historical_approval: preserved_approval,
     })
 }
 

@@ -657,7 +657,6 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         &software_candidate,
         &software_capture_documents,
     )?;
-    software_temporary_grants.extend(software_learned.temporary_grants);
     let mut analytics_temporary_grants = vec![analytics_delegation];
     let analytics_learned = learning::exercise(
         &database_url,
@@ -668,7 +667,6 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         &analytics_candidate,
         &analytics_capture_documents,
     )?;
-    analytics_temporary_grants.extend(analytics_learned.temporary_grants);
 
     // Kill the actual daemon processes after learning has committed. New
     // processes must recover their active generation and durable replay state.
@@ -676,18 +674,16 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     stop(analytics_daemon)?;
     let software_daemon = serve(&database_url, &software)?;
     let analytics_daemon = serve(&database_url, &analytics)?;
-    for (fixture, generation, completion, before_restart) in [
+    for (fixture, generation, learned) in [
         (
             &software,
             &software_generation.generation,
-            &software_learned.completion,
-            &software_learned.durable_completion,
+            &software_learned,
         ),
         (
             &analytics,
             &analytics_generation.generation,
-            &analytics_learned.completion,
-            &analytics_learned.durable_completion,
+            &analytics_learned,
         ),
     ] {
         assert_eq!(
@@ -707,13 +703,35 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
             "replay",
         )?;
         let after_restart =
-            continuity::observe_completed_disclosure(&database_url, fixture, completion)?;
+            continuity::observe_completed_disclosure(&database_url, fixture, &learned.completion)?;
         assert_eq!(
-            &after_restart, before_restart,
+            after_restart, learned.durable_completion,
             "completed disclosure evidence survives an actual daemon restart unchanged"
         );
         evidence::record_observation("disclosure_after_restart", &after_restart)?;
+        let historical_context = continuity::observe_completed_disclosure(
+            &database_url,
+            fixture,
+            &learned.historical_context,
+        )?;
+        assert_eq!(
+            historical_context, learned.historical_context_receipt,
+            "the original delivered context survives correction and restart unchanged"
+        );
+        evidence::record_observation("historical_context_after_restart", &historical_context)?;
+        let approval_key = learned.historical_approval["key"]
+            .as_str()
+            .ok_or("historical approval observation omitted its state key")?;
+        let historical_approval =
+            continuity::observe_signed_state(&database_url, fixture, approval_key)?;
+        assert_eq!(
+            historical_approval, learned.historical_approval,
+            "the original signed approval survives correction and restart unchanged"
+        );
+        evidence::record_observation("historical_approval_after_restart", &historical_approval)?;
     }
+    software_temporary_grants.extend(software_learned.temporary_grants);
+    analytics_temporary_grants.extend(analytics_learned.temporary_grants);
     let software_continuity = continuity::exercise(
         &database_url,
         &software,
