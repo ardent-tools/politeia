@@ -1027,9 +1027,8 @@ impl PoliteiadService {
                 &evidence.activation_authority,
                 activation.signer(),
             )?;
-            let authorization = Digest::blake3(
-                &to_canonical_bytes(run_authority.payload()).map_err(operational_refusal)?,
-            );
+            let authorization = direct_grant_authorization_digest(run_authority.payload())
+                .map_err(operational_refusal)?;
             if run.payload().authorization != authorization {
                 return Err(operational_refusal(
                     "control run authorization digest differs from its durable direct grant",
@@ -1510,6 +1509,17 @@ fn operational_refusal(reason: impl std::fmt::Display) -> CoordinatorError {
     CoordinatorError::Refused(format!("active operational registry refused: {}", reason))
 }
 
+/// Digest the exact direct-owner delegation that authorizes one control run.
+///
+/// [`AuthorizedControlRun`] proves the grant is semantically adequate, but a
+/// signed run must also bind the particular admitted grant rather than merely
+/// any grant with identical authority axes.
+pub(crate) fn direct_grant_authorization_digest(
+    grant: &Delegation,
+) -> Result<Digest, CanonicalError> {
+    to_canonical_bytes(grant).map(|bytes| Digest::blake3(&bytes))
+}
+
 /// Why exact execution-registry admission or routing failed.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -1586,5 +1596,55 @@ impl std::error::Error for OperationalRegistryRefusal {
             Self::Routing(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "the fixture must fail loudly if canonical grant binding changes"
+    )]
+
+    use std::collections::BTreeSet;
+
+    use jiff::{SignedDuration, Timestamp};
+    use politeia_core::{DataClass, DelegationId, Effect, PrincipalId, ResourceBudget};
+
+    use super::{Delegation, direct_grant_authorization_digest};
+
+    fn direct_grant() -> Delegation {
+        Delegation {
+            id: DelegationId::new(),
+            issuer: PrincipalId::new(),
+            subject: PrincipalId::new(),
+            parent: None,
+            actions: BTreeSet::from(["run-policy-control".to_owned()]),
+            resources: BTreeSet::from(["policy-control:generation:activate".to_owned()]),
+            effects: BTreeSet::<Effect>::new(),
+            data_classes: BTreeSet::<DataClass>::new(),
+            audience: BTreeSet::from(["institution:fixture".to_owned()]),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+            budget: ResourceBudget {
+                wall_ms: None,
+                cpu_ms: None,
+                memory_bytes: None,
+                io_bytes: None,
+                network_bytes: None,
+                external_cost_microunits: None,
+            },
+        }
+    }
+
+    #[test]
+    fn control_run_authorization_binds_the_exact_admitted_grant() {
+        let first = direct_grant();
+        let mut replacement = first.clone();
+        replacement.id = DelegationId::new();
+        assert_ne!(
+            direct_grant_authorization_digest(&first).expect("fixture grant encodes"),
+            direct_grant_authorization_digest(&replacement).expect("replacement grant encodes"),
+            "a run cannot be replayed under another otherwise-equivalent direct grant"
+        );
     }
 }

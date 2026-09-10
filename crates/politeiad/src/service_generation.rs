@@ -43,6 +43,7 @@ use crate::{
     },
     service::PoliteiadService,
     service_generation_validation::GenerationValidationReport,
+    service_operation::direct_grant_authorization_digest,
 };
 
 const ACTIVATE_CONTROL: &str = "generation:activate";
@@ -438,6 +439,13 @@ impl PoliteiadService {
                 "stored generation input digest differs from signed inputs".to_string(),
             ));
         }
+        // The generic byte verifier establishes immutable provenance.  The
+        // active service boundary additionally requires that the policy and
+        // execution registry bytes decode as this generation's typed runtime
+        // contracts before it reports calibration or permits activation.
+        let operational_registry = self
+            .operational_registry_for_generation(&generation)
+            .await?;
         let durable = self.durable_snapshot().await?;
         let commissioning = self
             .commissioning_record(
@@ -465,8 +473,8 @@ impl PoliteiadService {
         GenerationValidationReport::from_calibration(
             generation,
             control,
-            self.workspace().policy_bundle.clone(),
-            self.workspace().policy_digest.clone(),
+            operational_registry.policy().bundle().clone(),
+            operational_registry.policy().digest().clone(),
             calibration,
         )
         .map_err(refusal)
@@ -527,6 +535,14 @@ impl PoliteiadService {
         let artifact = stored.artifact_digest.clone();
         let run_value = authorized.run();
         let proof_value = verified.proof();
+        let run_authorization =
+            direct_grant_authorization_digest(run_authority.payload()).map_err(refusal)?;
+        if run_value.authorization != run_authorization {
+            return Err(CoordinatorError::Refused(
+                "control run authorization digest differs from its admitted direct grant"
+                    .to_string(),
+            ));
+        }
         if validation.artifact_manifest != artifact
             || run_value.control != validation.control
             || run_value.control_version != validation.control_version
