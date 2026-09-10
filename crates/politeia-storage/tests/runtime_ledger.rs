@@ -26,8 +26,8 @@ use politeia_runtime::{
     PolicyDecisionPoint, RuntimeError,
 };
 use politeia_storage::{
-    AttemptStatus, PostgresAuthorizationLedger, PostgresStorage, Scope, SignedRecord, StorageError,
-    WorkspaceBootstrap,
+    ActivationCommit, AttemptStatus, PostgresAuthorizationLedger, PostgresStorage, Scope,
+    SignedRecord, StorageError, WorkspaceBootstrap,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -46,9 +46,14 @@ impl PolicyDecisionPoint for LedgerFixturePolicy {
             bundle: self.bundle.clone(),
             policy_digest: self.digest.clone(),
             intent_digest: intent.digest()?,
+            subject: intent.digest()?,
+            population: Digest::blake3(b"ledger fixture population"),
             principal: intent.principal.clone(),
             allowed: true,
             binding_ids: vec!["ledger-fixture".to_owned()],
+            control_runs: Vec::new(),
+            activation_proofs: Vec::new(),
+            waiver_ids: Vec::new(),
             reasons: vec!["test isolates persistence from policy evaluation".to_owned()],
         })
     }
@@ -86,6 +91,7 @@ struct Fixture {
     policy: PolicyBundleId,
     policy_digest: Digest,
     generation: RuntimeGenerationId,
+    bootstrap_digest: Digest,
     adapter: AdapterId,
     calls: Arc<AtomicUsize>,
 }
@@ -150,6 +156,7 @@ impl Fixture {
             owner.clone(),
             model.signature.clone(),
         )?;
+        let bootstrap_digest = model_record.digest().clone();
         storage
             .bootstrap_workspace(&WorkspaceBootstrap {
                 scope: scope.clone(),
@@ -193,7 +200,8 @@ impl Fixture {
             },
             policy: PolicyBundleId::new(),
             policy_digest: Digest::blake3(b"ledger-fixture-policy"),
-            generation: RuntimeGenerationId::from_digest(Digest::blake3(b"ledger-fixture-runtime")),
+            generation: RuntimeGenerationId::from_digest(bootstrap_digest.clone()),
+            bootstrap_digest,
             adapter: AdapterId::new(),
             calls: Arc::new(AtomicUsize::new(0)),
         })
@@ -204,10 +212,20 @@ impl Fixture {
         storage: PostgresStorage,
         ttl: SignedDuration,
     ) -> TestResult<TestDispatcher> {
+        self.dispatcher_for_generation(storage, ttl, self.generation.clone(), true)
+    }
+
+    fn dispatcher_for_generation(
+        &self,
+        storage: PostgresStorage,
+        ttl: SignedDuration,
+        generation: RuntimeGenerationId,
+        bootstrap: bool,
+    ) -> TestResult<TestDispatcher> {
         let config = DispatcherConfig::new(
             self.policy.clone(),
             self.policy_digest.clone(),
-            self.generation.clone(),
+            generation,
             "fixture:durable-replay".to_owned(),
             ttl,
             self.intent.delegation_chain.clone(),
@@ -222,14 +240,111 @@ impl Fixture {
                 adapter: self.adapter.clone(),
                 calls: self.calls.clone(),
             },
-            PostgresAuthorizationLedger::new(storage, self.scope.clone()),
+            if bootstrap {
+                PostgresAuthorizationLedger::for_bootstrap(
+                    storage,
+                    self.scope.clone(),
+                    self.bootstrap_digest.clone(),
+                )
+            } else {
+                PostgresAuthorizationLedger::new(storage, self.scope.clone())
+            },
             config,
         ))
+    }
+
+    fn signed_fixture_record(&self, value: serde_json::Value) -> TestResult<SignedRecord> {
+        let wire = SignedAdmissionWire::sign(
+            AdmissionKind::Generation,
+            self.scope.institution().clone(),
+            self.scope.workspace().clone(),
+            self.intent.principal.clone(),
+            value,
+            &SigningKey::from_bytes(&[0x37; 32]),
+        )?;
+        Ok(SignedRecord::from_json(
+            &serde_json::to_value(&wire)?,
+            wire.signer.clone(),
+            wire.signature,
+        )?)
+    }
+
+    async fn admit_fixture_generation(&self, label: &str) -> TestResult<RuntimeGenerationId> {
+        let manifest =
+            self.signed_fixture_record(serde_json::json!({"ledger_fixture_generation": label}))?;
+        let digest = manifest.digest().clone();
+        self.storage
+            .admit_generation(&politeia_storage::RuntimeGeneration {
+                scope: self.scope.clone(),
+                generation_digest: digest.clone(),
+                input_digest: digest.clone(),
+                artifact_digest: digest.clone(),
+                manifest,
+            })
+            .await?;
+        Ok(RuntimeGenerationId::from_digest(digest))
+    }
+
+    async fn activate(&self, generation: &RuntimeGenerationId) -> TestResult {
+        let snapshot = self.storage.load_workspace(&self.scope).await?;
+        let transition = self.signed_fixture_record(serde_json::json!({
+            "ledger_fixture_activation": generation,
+            "previous": snapshot.active_generation, "revision": snapshot.revision,
+        }))?;
+        self.storage
+            .activate_generation(&ActivationCommit {
+                scope: self.scope.clone(),
+                expected_revision: snapshot.revision,
+                expected_active: snapshot.active_generation,
+                generation: generation.digest().clone(),
+                transition,
+                evidence: Vec::new(),
+                outbox: Vec::new(),
+            })
+            .await?;
+        Ok(())
     }
 }
 
 fn database_url() -> TestResult<String> {
     Ok(std::env::var("POLITEIA_STORAGE_TEST_DATABASE_URL")?)
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn activation_and_rollback_cannot_revive_reserved_authority() -> TestResult {
+    let fixture = Fixture::new(&database_url()?, 10).await?;
+    let bootstrap = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
+    let initial_lease = bootstrap.authorize(&fixture.intent).await?;
+    let first = fixture.admit_fixture_generation("first").await?;
+    fixture.activate(&first).await?;
+    assert!(bootstrap.execute(&initial_lease).await.is_err());
+    let mut intent = fixture.intent.clone();
+    intent.idempotency_key = Some("after-initial-activation".to_owned());
+    assert!(bootstrap.authorize(&intent).await.is_err());
+
+    let active = fixture.dispatcher_for_generation(
+        fixture.storage.clone(),
+        SignedDuration::from_secs(30),
+        first.clone(),
+        false,
+    )?;
+    let lease = active.authorize(&intent).await?;
+    let next = fixture.admit_fixture_generation("next").await?;
+    fixture.activate(&next).await?;
+    assert!(active.execute(&lease).await.is_err());
+    fixture.activate(&first).await?;
+    assert!(
+        active.execute(&lease).await.is_err(),
+        "rollback must not revive a lease issued at an older revision"
+    );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+
+    intent.idempotency_key = Some("fresh-authority-after-rollback".to_owned());
+    let lease = active.authorize(&intent).await?;
+    active.execute(&lease).await?;
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    Ok(())
 }
 
 #[tokio::test]

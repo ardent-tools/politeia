@@ -3,7 +3,9 @@
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use jiff::Timestamp;
-use politeia_core::{BudgetReservationId, DelegationId, Digest, ResourceBudget};
+use politeia_core::{
+    BudgetReservationId, DelegationId, Digest, ResourceBudget, RuntimeGenerationId,
+};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
@@ -68,6 +70,7 @@ pub struct ReservationRequest {
     intent_digest: Digest,
     expires_at: Timestamp,
     claims_digest: Digest,
+    runtime_generation: RuntimeGenerationId,
 }
 
 impl ReservationRequest {
@@ -85,6 +88,7 @@ impl ReservationRequest {
         intent_digest: Digest,
         expires_at: Timestamp,
         claims_digest: Digest,
+        runtime_generation: RuntimeGenerationId,
     ) -> Self {
         Self {
             reservation_id,
@@ -96,6 +100,7 @@ impl ReservationRequest {
             intent_digest,
             expires_at,
             claims_digest,
+            runtime_generation,
         }
     }
 
@@ -142,6 +147,11 @@ impl ReservationRequest {
     /// Digest of all immutable lease claims.
     pub fn claims_digest(&self) -> &Digest {
         &self.claims_digest
+    }
+
+    /// Exact runtime generation that must still govern admission at claim time.
+    pub fn runtime_generation(&self) -> &RuntimeGenerationId {
+        &self.runtime_generation
     }
 }
 

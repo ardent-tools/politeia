@@ -25,10 +25,16 @@ use serde_json::Value;
 use tokio_postgres::{Client, Config, IsolationLevel, NoTls};
 use uuid::Uuid;
 
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_commissioning",
-    include_str!("../migrations/0001_commissioning.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_commissioning",
+        include_str!("../migrations/0001_commissioning.sql"),
+    ),
+    (
+        "0002_admission_revision",
+        include_str!("../migrations/0002_admission_revision.sql"),
+    ),
+];
 const SERIALIZABLE_ATTEMPTS: usize = 3;
 
 /// The three identities that scope every durable storage operation.
@@ -443,9 +449,10 @@ impl PostgresStorage {
         &self,
         bootstrap: &WorkspaceBootstrap,
     ) -> Result<(), StorageError> {
-        let client = self.client().await?;
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(StorageError::Database)?;
         let scope = scope_values(&bootstrap.scope);
-        let inserted = client
+        let inserted = transaction
             .execute(
                 "INSERT INTO institution_workspaces (institution_id, workspace_id, trust_domain, owner_principal_id, owner_delegation_id, model_digest, model_payload, model_signature, model_signer_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING",
                 &[
@@ -465,6 +472,11 @@ impl PostgresStorage {
         if inserted == 0 {
             return Err(StorageError::ImmutableConflict);
         }
+        transaction.execute(
+            "INSERT INTO workspace_revisions (institution_id, workspace_id, revision, record_kind, content_digest, payload, signature, signer_id) VALUES ($1, $2, 0, 'workspace_bootstrap', $3, $4, $5, $6)",
+            &[&scope.institution, &scope.workspace, &bootstrap.model.digest().as_str(), &bootstrap.model.payload(), &bootstrap.model.signature(), &bootstrap.model.signer().0],
+        ).await.map_err(StorageError::Database)?;
+        transaction.commit().await.map_err(StorageError::Database)?;
         Ok(())
     }
 
@@ -850,12 +862,35 @@ impl PostgresStorage {
 pub struct PostgresAuthorizationLedger {
     storage: PostgresStorage,
     scope: Scope,
+    bootstrap: Option<Digest>,
 }
 
 impl PostgresAuthorizationLedger {
-    /// Bind the ledger to one persisted institution workspace.
+    /// Bind the ledger to the active generation of one persisted workspace.
+    ///
+    /// Reserve and claim both compare the lease generation under a shared
+    /// workspace-row lock, serializing them with generation activation.
     pub fn new(storage: PostgresStorage, scope: Scope) -> Self {
-        Self { storage, scope }
+        Self {
+            storage,
+            scope,
+            bootstrap: None,
+        }
+    }
+
+    /// Bind initial commissioning to the immutable owner-signed bootstrap.
+    ///
+    /// The trusted host supplies the canonical signed bootstrap record digest
+    /// as the dispatcher runtime identity. This mode refuses once any runtime
+    /// generation is active, and checks revision zero rather than the mutable
+    /// model. It supplies no policy permission: the dispatcher must still
+    /// authorize the exact commissioning operation and all grant axes.
+    pub fn for_bootstrap(storage: PostgresStorage, scope: Scope, bootstrap: Digest) -> Self {
+        Self {
+            storage,
+            scope,
+            bootstrap: Some(bootstrap),
+        }
     }
 
     /// Return the exact workspace authority domain this ledger serves.
@@ -880,14 +915,14 @@ impl AuthorizationLedger for PostgresAuthorizationLedger {
 
     async fn reserve(&self, request: &ReservationRequest) -> Result<(), RuntimeError> {
         self.storage
-            .reserve_runtime_request(&self.scope, request)
+            .reserve_runtime_request(&self.scope, request, self.bootstrap.as_ref())
             .await
             .map_err(runtime_state_error)
     }
 
     async fn claim(&self, request: &ReservationRequest) -> Result<(), RuntimeError> {
         self.storage
-            .claim_runtime_request(&self.scope, request)
+            .claim_runtime_request(&self.scope, request, self.bootstrap.as_ref())
             .await
             .map_err(runtime_state_error)
     }
@@ -898,6 +933,7 @@ impl PostgresStorage {
         &self,
         scope: &Scope,
         request: &ReservationRequest,
+        bootstrap: Option<&Digest>,
     ) -> Result<(), StorageError> {
         if !request.requested_budget().is_finite() || request.budget_scopes().is_empty() {
             return Err(StorageError::AttemptUnavailable);
@@ -910,7 +946,7 @@ impl PostgresStorage {
             .map_err(StorageError::Canonical)?;
         for attempt in 0..SERIALIZABLE_ATTEMPTS {
             match self
-                .reserve_runtime_once(scope, request, &requested, &payload)
+                .reserve_runtime_once(scope, request, &requested, &payload, bootstrap)
                 .await
             {
                 Err(StorageError::Database(source))
@@ -928,6 +964,7 @@ impl PostgresStorage {
         request: &ReservationRequest,
         requested: &BudgetAmounts,
         payload: &[u8],
+        bootstrap: Option<&Digest>,
     ) -> Result<(), StorageError> {
         let mut client = self.client().await?;
         let transaction = client
@@ -937,16 +974,7 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
-        let workspace = transaction
-            .query_opt(
-                "SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $3 FOR KEY SHARE",
-                &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
-            )
-            .await
-            .map_err(StorageError::Database)?;
-        if workspace.is_none() {
-            return Err(StorageError::NotFound);
-        }
+        let admission_revision = check_generation(&transaction, scope, request, bootstrap).await?;
         transaction
             .execute(
                 "DELETE FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND expires_at <= CURRENT_TIMESTAMP AND (status = 'reserved' OR (status = 'completed' AND retain_replay = FALSE))",
@@ -1012,8 +1040,8 @@ impl PostgresStorage {
         let requested_values = requested.as_strings();
         let inserted = transaction
             .execute(
-                "INSERT INTO operation_attempts (institution_id, workspace_id, reservation_id, replay_domain, replay_key, claims_digest, retain_replay, request_payload, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text::timestamptz) ON CONFLICT DO NOTHING",
-                &[&scoped.institution, &scoped.workspace, &request.reservation_id().0, &request.replay_domain(), &request.replay_key().as_str(), &request.claims_digest().as_str(), &request.retains_replay(), &payload, &expires_at],
+                "INSERT INTO operation_attempts (institution_id, workspace_id, reservation_id, replay_domain, replay_key, claims_digest, retain_replay, request_payload, expires_at, admission_revision) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text::timestamptz, $10) ON CONFLICT DO NOTHING",
+                &[&scoped.institution, &scoped.workspace, &request.reservation_id().0, &request.replay_domain(), &request.replay_key().as_str(), &request.claims_digest().as_str(), &request.retains_replay(), &payload, &expires_at, &admission_revision],
             )
             .await
             .map_err(StorageError::Database)?;
@@ -1037,6 +1065,7 @@ impl PostgresStorage {
         &self,
         scope: &Scope,
         request: &ReservationRequest,
+        bootstrap: Option<&Digest>,
     ) -> Result<(), StorageError> {
         let mut client = self.client().await?;
         let transaction = client
@@ -1046,16 +1075,7 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
-        let workspace = transaction
-            .query_opt(
-                "SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $3 FOR KEY SHARE",
-                &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
-            )
-            .await
-            .map_err(StorageError::Database)?;
-        if workspace.is_none() {
-            return Err(StorageError::NotFound);
-        }
+        let admission_revision = check_generation(&transaction, scope, request, bootstrap).await?;
         for budget_scope in request.budget_scopes() {
             let admitted = transaction
                 .query_opt(
@@ -1072,8 +1092,8 @@ impl PostgresStorage {
         }
         let claimed = transaction
             .execute(
-                "UPDATE operation_attempts SET status = 'claimed' WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND replay_domain = $4 AND replay_key = $5 AND claims_digest = $6 AND status = 'reserved' AND expires_at > CURRENT_TIMESTAMP",
-                &[&scoped.institution, &scoped.workspace, &request.reservation_id().0, &request.replay_domain(), &request.replay_key().as_str(), &request.claims_digest().as_str()],
+                "UPDATE operation_attempts SET status = 'claimed' WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND replay_domain = $4 AND replay_key = $5 AND claims_digest = $6 AND status = 'reserved' AND expires_at > CURRENT_TIMESTAMP AND admission_revision = $7",
+                &[&scoped.institution, &scoped.workspace, &request.reservation_id().0, &request.replay_domain(), &request.replay_key().as_str(), &request.claims_digest().as_str(), &admission_revision],
             )
             .await
             .map_err(StorageError::Database)?;
@@ -1097,6 +1117,36 @@ impl PostgresStorage {
         transaction.commit().await.map_err(StorageError::Database)?;
         Ok(())
     }
+}
+
+async fn check_generation(
+    transaction: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    request: &ReservationRequest,
+    bootstrap: Option<&Digest>,
+) -> Result<i64, StorageError> {
+    let scoped = scope_values(scope);
+    // FOR SHARE conflicts with activation's non-key UPDATE; FOR KEY SHARE
+    // would leave a window in which stale policy could claim an effect.
+    let row = transaction.query_opt(
+        "SELECT w.active_generation_digest, (SELECT r.content_digest FROM workspace_revisions r WHERE r.institution_id = w.institution_id AND r.workspace_id = w.workspace_id AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'), w.revision FROM institution_workspaces w WHERE w.institution_id = $1 AND w.workspace_id = $2 AND w.trust_domain = $3 FOR SHARE OF w",
+        &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
+    ).await.map_err(StorageError::Database)?.ok_or(StorageError::NotFound)?;
+    let active: Option<String> = row.get(0);
+    let expected = request.runtime_generation().digest().as_str();
+    let matches = match bootstrap {
+        None => active.as_deref() == Some(expected),
+        Some(digest) => {
+            let genesis: Option<String> = row.get(1);
+            active.is_none()
+                && genesis.as_deref() == Some(digest.as_str())
+                && expected == digest.as_str()
+        }
+    };
+    if !matches {
+        return Err(StorageError::AttemptUnavailable);
+    }
+    Ok(row.get(2))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

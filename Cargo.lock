@@ -1055,6 +1055,7 @@ dependencies = [
 name = "politeia-evidence"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "jiff",
  "politeia-core",
  "schemars",
@@ -1066,8 +1067,10 @@ dependencies = [
 name = "politeia-policy"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "jiff",
  "politeia-core",
+ "politeia-evidence",
  "schemars",
  "serde",
  "serde_json",

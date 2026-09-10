@@ -76,6 +76,20 @@ pub struct WorkspaceSnapshot {
 }
 
 impl PostgresStorage {
+    /// Return the immutable installation record independently of later models.
+    ///
+    /// A host must re-admit this signed wire against its installed anchors;
+    /// this method validates storage integrity and the complete workspace scope.
+    pub async fn load_bootstrap(&self, scope: &Scope) -> Result<SignedRecord, StorageError> {
+        let client = self.client().await?;
+        let scoped = scope_values(scope);
+        let row = client.query_opt(
+            "SELECT r.content_digest, r.payload, r.signer_id, r.signature FROM workspace_revisions r JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE r.institution_id = $1 AND r.workspace_id = $2 AND w.trust_domain = $3 AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'",
+            &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
+        ).await.map_err(StorageError::Database)?.ok_or(StorageError::NotFound)?;
+        signed_from_row(&row, 0, 1, 2, 3)
+    }
+
     /// Recover current state and immutable provenance at one consistent revision.
     ///
     /// Every query checks all three scope axes through the workspace row. Hash

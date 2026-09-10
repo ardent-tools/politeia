@@ -383,6 +383,7 @@ impl EffectLease {
             self.claims.decision.intent_digest.clone(),
             self.claims.expires_at,
             self.claims_digest.clone(),
+            self.claims.runtime.clone(),
         ))
     }
 }

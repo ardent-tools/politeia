@@ -299,6 +299,7 @@ async fn a_substituted_claims_digest_is_refused_at_the_ledger() {
         reservation.intent_digest().clone(),
         reservation.expires_at(),
         Digest::blake3(b"claims this lease was never issued for"),
+        reservation.runtime_generation().clone(),
     );
 
     assert!(
