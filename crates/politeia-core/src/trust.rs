@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -69,6 +69,9 @@ impl TrustedSigningKey {
         }
         let verifying_key =
             VerifyingKey::from_bytes(&public_key).map_err(|_| AdmissionError::MalformedKey)?;
+        if verifying_key.is_weak() {
+            return Err(AdmissionError::WeakKey);
+        }
         Ok(Self {
             principal,
             verifying_key,
@@ -167,7 +170,7 @@ impl InstitutionTrustAnchors {
             .map_err(|_| AdmissionError::MalformedSignature)?;
         installed
             .verifying_key
-            .verify(
+            .verify_strict(
                 &statement_bytes(
                     statement.kind,
                     &statement.institution,
@@ -301,6 +304,8 @@ pub enum AdmissionError {
     MalformedKey,
     /// A key authorized no statement class.
     EmptyPermissionSet,
+    /// An installed key is a known low-order Ed25519 point.
+    WeakKey,
     /// The received institution differs from the installed scope.
     ForeignInstitution,
     /// The received workspace differs from the installed scope.
@@ -337,6 +342,7 @@ impl std::fmt::Display for AdmissionError {
             Self::EmptyPermissionSet => {
                 formatter.write_str("installed signing key permits no admission class")
             }
+            Self::WeakKey => formatter.write_str("installed Ed25519 key is a weak low-order point"),
             Self::ForeignInstitution => formatter.write_str("statement names another institution"),
             Self::ForeignWorkspace => formatter.write_str("statement names another workspace"),
             Self::UnexpectedKind { expected, found } => write!(
@@ -514,6 +520,25 @@ mod tests {
         assert!(matches!(
             anchors.admit_expected(AdmissionKind::Evidence, wire),
             Err(AdmissionError::UnauthorizedKind { .. })
+        ));
+    }
+
+    #[test]
+    fn a_known_small_order_ed25519_key_is_not_an_installable_anchor() {
+        // The compressed Edwards identity is a known small-order point. It
+        // must fail at anchor installation, before an attacker can exploit a
+        // verifier that accepts non-strict signatures for it.
+        let identity = [
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
+        assert!(matches!(
+            TrustedSigningKey::new(
+                PrincipalId::new(),
+                identity,
+                BTreeSet::from([AdmissionKind::FactApproval]),
+            ),
+            Err(AdmissionError::WeakKey)
         ));
     }
 }

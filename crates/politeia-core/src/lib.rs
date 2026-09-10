@@ -657,41 +657,6 @@ impl Delegation {
     }
 }
 
-/// The epistemic state of an institutional claim. Inference never becomes
-/// approved truth silently.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[non_exhaustive]
-#[serde(rename_all = "snake_case")]
-pub enum EpistemicState {
-    /// A sourced statement about reality.
-    Observation,
-    /// An interpreted proposition with confidence and provenance.
-    Inferred,
-    /// A claim with unresolved contradiction.
-    Contested,
-    /// An institutionally accepted fact.
-    Approved,
-}
-
-/// An interpreted proposition about the institution, carrying its epistemic
-/// state, confidence, provenance, and the axes known to be missing.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Claim {
-    /// The claim's key (what fact is claimed about).
-    pub key: String,
-    /// The claimed value.
-    pub value: serde_json::Value,
-    /// Epistemic state.
-    pub state: EpistemicState,
-    /// Confidence in [0, 1].
-    pub confidence: f32,
-    /// Provenance references (where the claim was observed or inferred from).
-    pub provenance: Vec<String>,
-    /// Axes known to be missing from the claim's evidence.
-    pub missed_axes: Vec<String>,
-}
-
 /// A typed operation contract: what an operation may do, which effects and
 /// data classes it touches, and which evidence it owes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

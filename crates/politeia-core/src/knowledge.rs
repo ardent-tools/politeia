@@ -3,10 +3,10 @@
 //!
 //! `docs/03-ONTOLOGY.md` separates three things that a system without types
 //! runs together: an `Observation` is a sourced statement about reality, a
-//! `Claim` is an interpreted proposition with confidence and provenance, and an
-//! `ApprovedFact` is what the institution has accepted. The interpretation step
-//! is where a source's word becomes the institution's, and it is the step worth
-//! making visible.
+//! `CandidateClaim` is an interpreted proposition with confidence and
+//! provenance, and an `ApprovedFact` is what the institution has accepted. The
+//! interpretation step is where a source's word becomes the institution's, and
+//! it is the step worth making visible.
 //!
 //! WHY contestedness is derived rather than declared: a `contested: bool` is a
 //! field, and a field can be wrong or simply never set. Reading it off the
@@ -26,6 +26,7 @@ use jiff::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::canonical::to_canonical_bytes;
 use crate::{
     AdapterId, ClaimId, DelegationId, Digest, EvidenceId, InstitutionWorkspaceId, ObservationId,
     PrincipalId,
@@ -79,6 +80,8 @@ impl crate::institution::WorkspaceScoped for Observation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationRequest {
+    /// Stable identity retained across authenticated re-admission.
+    pub id: ObservationId,
     /// The source the statement came from, as the institution names it.
     pub source: String,
     /// The exact adapter that reached the source.
@@ -117,6 +120,11 @@ impl TrustedObservationRegistry {
         if anchors.institution() != &workspace.institution || anchors.workspace() != &workspace.id {
             return Err(ObservationAdmissionRefusal::ForeignTrustScope);
         }
+        if evidence.institution() != Some(&workspace.institution)
+            || evidence.workspace() != Some(&workspace.id)
+        {
+            return Err(ObservationAdmissionRefusal::ForeignEvidenceScope);
+        }
         let mut observations = BTreeMap::new();
         for statement in statements {
             let admitted = anchors
@@ -132,8 +140,16 @@ impl TrustedObservationRegistry {
             if record.producer != *admitted.signer() {
                 return Err(ObservationAdmissionRefusal::EvidenceProducerMismatch);
             }
+            if record.observed_at != request.observed_at {
+                return Err(ObservationAdmissionRefusal::EvidenceTimeMismatch);
+            }
+            let expected_payload = observation_evidence_payload_digest(&workspace.id, request)
+                .map_err(ObservationAdmissionRefusal::Encoding)?;
+            if record.payload_digest != expected_payload {
+                return Err(ObservationAdmissionRefusal::EvidencePayloadMismatch);
+            }
             let observation = Observation {
-                id: ObservationId::new(),
+                id: request.id.clone(),
                 workspace: workspace.id.clone(),
                 source: request.source.clone(),
                 adapter: request.adapter.clone(),
@@ -217,6 +233,14 @@ pub enum ObservationAdmissionRefusal {
     EvidenceSubjectMismatch,
     /// The admitted signer differs from the evidence producer.
     EvidenceProducerMismatch,
+    /// Evidence came from another institution or workspace admission scope.
+    ForeignEvidenceScope,
+    /// Evidence payload bytes do not bind this exact observation statement.
+    EvidencePayloadMismatch,
+    /// Evidence metadata records another observation time.
+    EvidenceTimeMismatch,
+    /// The observation/evidence binding could not be encoded canonically.
+    Encoding(crate::canonical::CanonicalError),
     /// Bootstrap supplied an observation for another workspace.
     ForeignWorkspace,
     /// One snapshot repeated an observation identity.
@@ -241,6 +265,21 @@ impl std::fmt::Display for ObservationAdmissionRefusal {
             Self::EvidenceProducerMismatch => {
                 formatter.write_str("observation signer differs from evidence producer")
             }
+            Self::ForeignEvidenceScope => {
+                formatter.write_str("observation evidence belongs to another trust scope")
+            }
+            Self::EvidencePayloadMismatch => {
+                formatter.write_str("evidence payload does not bind the exact observation")
+            }
+            Self::EvidenceTimeMismatch => {
+                formatter.write_str("evidence metadata records another observation time")
+            }
+            Self::Encoding(error) => {
+                write!(
+                    formatter,
+                    "observation evidence binding cannot encode: {error}"
+                )
+            }
             Self::ForeignWorkspace => {
                 formatter.write_str("observation belongs to another workspace")
             }
@@ -255,9 +294,37 @@ impl std::error::Error for ObservationAdmissionRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Authentication(error) => Some(error),
+            Self::Encoding(error) => Some(error),
             _ => None,
         }
     }
+}
+
+#[derive(Serialize)]
+struct ObservationEvidencePayload<'a> {
+    kind: &'static str,
+    workspace: &'a InstitutionWorkspaceId,
+    source: &'a str,
+    adapter: &'a AdapterId,
+    subject: &'a Digest,
+    statement: &'a Digest,
+    observed_at: Timestamp,
+}
+
+fn observation_evidence_payload_digest(
+    workspace: &InstitutionWorkspaceId,
+    request: &ObservationRequest,
+) -> Result<Digest, crate::canonical::CanonicalError> {
+    to_canonical_bytes(&ObservationEvidencePayload {
+        kind: "observation_evidence_payload_v1",
+        workspace,
+        source: &request.source,
+        adapter: &request.adapter,
+        subject: &request.subject,
+        statement: &request.statement,
+        observed_at: request.observed_at,
+    })
+    .map(|bytes| Digest::blake3(&bytes))
 }
 
 /// How well-supported a claim is, read off its observations.
@@ -684,7 +751,7 @@ mod tests {
 
     use ed25519_dalek::SigningKey;
 
-    use crate::evidence::{EvidenceRecord, IndependenceClass};
+    use crate::evidence::{EvidenceRecord, EvidenceRequest, IndependenceClass};
     use crate::test_support::fixture;
     use crate::trust::TrustedSigningKey;
 
@@ -984,7 +1051,7 @@ mod tests {
                 TrustedSigningKey::new(
                     fixture.owner.clone(),
                     fixture.owner_key.verifying_key().to_bytes(),
-                    BTreeSet::from([AdmissionKind::Observation]),
+                    BTreeSet::from([AdmissionKind::Evidence, AdmissionKind::Observation]),
                 )
                 .expect("fixture key is valid"),
                 TrustedSigningKey::new(
@@ -996,31 +1063,46 @@ mod tests {
             ],
         )
         .expect("fixture principals are distinct");
-        let evidence_id = EvidenceId::new();
-        let evidence = TrustedEvidenceRegistry::from_trusted_bootstrap([EvidenceRecord {
-            id: evidence_id.clone(),
+        let request = ObservationRequest {
+            id: ObservationId::new(),
+            source: "crm".to_string(),
+            adapter: AdapterId::new(),
             subject: subject(),
-            producer: fixture.owner.clone(),
-            producer_delegation: fixture.workspace.owner_delegation.clone(),
-            method: "fixture".to_string(),
-            payload_digest: Digest::blake3(b"evidence"),
+            statement: Digest::blake3(b"billing"),
             observed_at: now(),
-            independence: IndependenceClass::HumanAuthority,
-        }])
-        .expect("fixture evidence identity is unique");
+            evidence: EvidenceId::new(),
+        };
+        let evidence = TrustedEvidenceRegistry::admit_signed(
+            &anchors,
+            [SignedAdmissionWire::sign(
+                AdmissionKind::Evidence,
+                fixture.workspace.institution.clone(),
+                fixture.workspace.id.clone(),
+                fixture.owner.clone(),
+                EvidenceRequest {
+                    id: request.evidence.clone(),
+                    subject: request.subject.clone(),
+                    producer_delegation: fixture.workspace.owner_delegation.clone(),
+                    method: "fixture".to_string(),
+                    payload_digest: observation_evidence_payload_digest(
+                        &fixture.workspace.id,
+                        &request,
+                    )
+                    .expect("fixture observation binding encodes"),
+                    observed_at: request.observed_at,
+                    independence: IndependenceClass::HumanAuthority,
+                },
+                &fixture.owner_key,
+            )
+            .expect("fixture evidence encodes")],
+        )
+        .expect("fixture evidence is admitted");
         let wire = SignedAdmissionWire::sign(
             AdmissionKind::Observation,
             fixture.workspace.institution.clone(),
             fixture.workspace.id.clone(),
             second,
-            ObservationRequest {
-                source: "crm".to_string(),
-                adapter: AdapterId::new(),
-                subject: subject(),
-                statement: Digest::blake3(b"billing"),
-                observed_at: now(),
-                evidence: evidence_id,
-            },
+            request,
             &second_key,
         )
         .expect("fixture observation encodes");
@@ -1032,6 +1114,101 @@ mod tests {
                 [wire],
             ),
             Err(ObservationAdmissionRefusal::EvidenceProducerMismatch)
+        ));
+    }
+
+    #[test]
+    fn signed_observation_re_admission_preserves_its_identity_and_exact_binding() {
+        let fixture = fixture_with_observation();
+        let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            [TrustedSigningKey::new(
+                fixture.owner.clone(),
+                fixture.owner_key.verifying_key().to_bytes(),
+                BTreeSet::from([AdmissionKind::Evidence, AdmissionKind::Observation]),
+            )
+            .expect("fixture key is valid")],
+        )
+        .expect("fixture principal is unique");
+        let request = ObservationRequest {
+            id: ObservationId::new(),
+            source: "crm".to_string(),
+            adapter: AdapterId::new(),
+            subject: subject(),
+            statement: Digest::blake3(b"billing"),
+            observed_at: now(),
+            evidence: EvidenceId::new(),
+        };
+        let evidence = TrustedEvidenceRegistry::admit_signed(
+            &anchors,
+            [SignedAdmissionWire::sign(
+                AdmissionKind::Evidence,
+                fixture.workspace.institution.clone(),
+                fixture.workspace.id.clone(),
+                fixture.owner.clone(),
+                EvidenceRequest {
+                    id: request.evidence.clone(),
+                    subject: request.subject.clone(),
+                    producer_delegation: fixture.workspace.owner_delegation.clone(),
+                    method: "fixture".to_string(),
+                    payload_digest: observation_evidence_payload_digest(
+                        &fixture.workspace.id,
+                        &request,
+                    )
+                    .expect("fixture observation binding encodes"),
+                    observed_at: request.observed_at,
+                    independence: IndependenceClass::HumanAuthority,
+                },
+                &fixture.owner_key,
+            )
+            .expect("fixture evidence encodes")],
+        )
+        .expect("fixture evidence is admitted");
+        let wire = SignedAdmissionWire::sign(
+            AdmissionKind::Observation,
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            fixture.owner.clone(),
+            request.clone(),
+            &fixture.owner_key,
+        )
+        .expect("fixture observation encodes");
+        let first = TrustedObservationRegistry::admit_signed(
+            &fixture.workspace,
+            &anchors,
+            &evidence,
+            [wire.clone()],
+        )
+        .expect("exact signed observation is admitted");
+        let reloaded = TrustedObservationRegistry::admit_signed(
+            &fixture.workspace,
+            &anchors,
+            &evidence,
+            [wire],
+        )
+        .expect("same signed observation re-admits with its persisted identity");
+        assert_eq!(first.resolve(&request.id), reloaded.resolve(&request.id));
+
+        let mut mismatched = request;
+        mismatched.source = "ledger".to_string();
+        let mismatched = SignedAdmissionWire::sign(
+            AdmissionKind::Observation,
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            fixture.owner.clone(),
+            mismatched,
+            &fixture.owner_key,
+        )
+        .expect("fixture mismatched observation encodes");
+        assert!(matches!(
+            TrustedObservationRegistry::admit_signed(
+                &fixture.workspace,
+                &anchors,
+                &evidence,
+                [mismatched],
+            ),
+            Err(ObservationAdmissionRefusal::EvidencePayloadMismatch)
         ));
     }
 
