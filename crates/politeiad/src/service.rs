@@ -6,6 +6,7 @@
 use std::{collections::BTreeSet, future::Future, path::PathBuf, pin::Pin};
 
 use politeia_core::{
+    Delegation,
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     institution::{InstitutionBoundary, InstitutionWorkspace},
     knowledge::{
@@ -59,6 +60,17 @@ pub struct SourceCaptureSubmission {
     pub observation: SignedAdmissionWire<ObservationRequest>,
     /// Read-only authority required before the adapter reads.
     pub reconnaissance: ReconnaissanceScope,
+}
+
+/// One typed commissioning request accepted by the service.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommissioningRequest {
+    /// Persist a signed delegation after installed-key admission.
+    AdmitDelegation {
+        /// Exact signed delegation wire, retained for restart re-admission.
+        delegation: SignedAdmissionWire<Delegation>,
+    },
 }
 
 impl PoliteiadService {
@@ -180,10 +192,7 @@ impl PoliteiadService {
                 "initialization is a local host trust-anchor action, not a running-daemon request"
                     .to_string(),
             )),
-            SemanticOperation::Commissioning { .. } => Err(CoordinatorError::Refused(
-                "commissioning request handling is not configured for this installed service"
-                    .to_string(),
-            )),
+            SemanticOperation::Commissioning { request } => self.commission(request).await,
             SemanticOperation::Operate { .. } => Err(CoordinatorError::Refused(
                 "operational execution requires a configured dispatcher and active generation"
                     .to_string(),
@@ -360,6 +369,31 @@ impl PoliteiadService {
             }),
             evidence_refs: vec![submission.evidence.payload.id.0.to_string()],
         })
+    }
+
+    async fn commission(&self, value: Value) -> Result<OperationResult, CoordinatorError> {
+        let request: CommissioningRequest = serde_json::from_value(value).map_err(|error| {
+            CoordinatorError::Refused(format!("commissioning input is not typed JSON: {error}"))
+        })?;
+        match request {
+            CommissioningRequest::AdmitDelegation { delegation } => {
+                let admitted = self
+                    .anchors
+                    .admit_expected(AdmissionKind::Delegation, delegation.clone())
+                    .map_err(refusal)?;
+                self.storage
+                    .admit_delegation(&self.scope, &admitted, &delegation)
+                    .await
+                    .map_err(|error| storage_refusal(&error))?;
+                Ok(OperationResult::Coordinated {
+                    result: json!({
+                        "delegation": admitted.payload().id,
+                        "admitted": true,
+                    }),
+                    evidence_refs: Vec::new(),
+                })
+            }
+        }
     }
 }
 
