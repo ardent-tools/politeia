@@ -155,13 +155,13 @@ pub(crate) fn exercise(
         &discovery.document(discovery_submission),
     )?;
     assert_eq!(
-        serde_json::from_value(discovery_result["operations"].clone())?,
-        operations.operation_ids(),
+        discovery_result["operations"],
+        serde_json::to_value(operations.operation_ids())?,
         "active discovery reports only the generation registry operation identities"
     );
     assert_eq!(
-        serde_json::from_value(discovery_result["resources"].clone())?,
-        operations.resource_ids(),
+        discovery_result["resources"],
+        serde_json::to_value(operations.resource_ids())?,
         "active discovery reports only the generation registry resource identities"
     );
 

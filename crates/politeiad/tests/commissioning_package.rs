@@ -14,6 +14,10 @@
 #[path = "package_support/mod.rs"]
 mod package_support;
 
+#[path = "package_process/handoff.rs"]
+mod handoff;
+#[path = "package_process/learning.rs"]
+mod learning;
 #[path = "package_process/lifecycle.rs"]
 mod lifecycle;
 
@@ -28,9 +32,19 @@ use std::{
 
 use package_support::operational::OperationalFixture;
 use package_support::{ReferenceFixture, ReferenceInstitutionKind};
+use politeia_core::{Delegation, Digest};
+use politeiad::service_generation::CommissioningReceipt;
 use politeiad::transport::{LocalOutcome, LocalResponse};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+
+struct CommissionedGeneration {
+    generation: Digest,
+    owner_root: Delegation,
+    commissioner: Delegation,
+    receipt: CommissioningReceipt,
+    publication: serde_json::Value,
+}
 
 fn status_value(database_url: &str, fixture: &ReferenceFixture) -> TestResult<serde_json::Value> {
     let response = await_status(database_url, fixture)?;
@@ -595,7 +609,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     let analytics_generation =
         commission_generation(&database_url, &analytics, &analytics_capture_documents)?;
     assert_ne!(
-        software_generation, analytics_generation,
+        software_generation.generation, analytics_generation.generation,
         "institutional inputs derive disjoint generations"
     );
     for (fixture, operations, generation) in [
@@ -610,8 +624,78 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
                 document,
             )?;
         }
-        lifecycle::activate(&database_url, fixture, generation, "activate", true)?;
+        lifecycle::activate(
+            &database_url,
+            fixture,
+            &generation.generation,
+            "activate",
+            true,
+        )?;
     }
+
+    let mut software_temporary_grants = vec![software_delegation, software_context_delegation];
+    software_temporary_grants.extend(learning::exercise(
+        &database_url,
+        &software,
+        &software_operations,
+        &software_generation.generation,
+        &software_learning,
+        &software_candidate,
+        &software_capture_documents,
+    )?);
+    let mut analytics_temporary_grants = vec![analytics_delegation];
+    analytics_temporary_grants.extend(learning::exercise(
+        &database_url,
+        &analytics,
+        &analytics_operations,
+        &analytics_generation.generation,
+        &analytics_learning,
+        &analytics_candidate,
+        &analytics_capture_documents,
+    )?);
+
+    // Kill the actual daemon processes after learning has committed. New
+    // processes must recover their active generation and durable replay state.
+    stop(software_daemon)?;
+    stop(analytics_daemon)?;
+    let software_daemon = serve(&database_url, &software)?;
+    let analytics_daemon = serve(&database_url, &analytics)?;
+    for (fixture, generation) in [
+        (&software, &software_generation.generation),
+        (&analytics, &analytics_generation.generation),
+    ] {
+        assert_eq!(
+            status_value(&database_url, fixture)?["active_generation"],
+            serde_json::json!(generation)
+        );
+        require_refusal(
+            run(
+                &database_url,
+                &[
+                    Path::new("commissioning"),
+                    &fixture.prefix().join("run/politeiad.sock"),
+                    &fixture.root.join("corrected-active-context.json"),
+                ],
+            )?,
+            "committed active context replay after process restart",
+            "replay",
+        )?;
+    }
+    let software_replacement = handoff::exercise(
+        &database_url,
+        &software,
+        &software_operations,
+        &software_generation,
+        &software_temporary_grants,
+    )?;
+    let analytics_replacement = handoff::exercise(
+        &database_url,
+        &analytics,
+        &analytics_operations,
+        &analytics_generation,
+        &analytics_temporary_grants,
+    )?;
+    assert_ne!(software_replacement, analytics_replacement);
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;
     stop(software_daemon)?;
@@ -647,11 +731,11 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     );
     assert_eq!(
         software_result["active_generation"],
-        serde_json::json!(software_generation)
+        serde_json::json!(software_generation.generation)
     );
     assert_eq!(
         analytics_result["active_generation"],
-        serde_json::json!(analytics_generation)
+        serde_json::json!(analytics_generation.generation)
     );
     Ok(())
 }
@@ -680,9 +764,8 @@ fn commission_generation(
     database_url: &str,
     fixture: &ReferenceFixture,
     capture: &package_support::CaptureDocuments,
-) -> TestResult<politeia_core::Digest> {
-    use politeia_core::{Digest, commissioning::CommissionerGrantRecord};
-    use politeiad::service_generation::CommissioningReceipt;
+) -> TestResult<CommissionedGeneration> {
+    use politeia_core::commissioning::CommissionerGrantRecord;
 
     let root = fixture.owner_root_delegation();
     submit_commissioning(
@@ -811,5 +894,11 @@ fn commission_generation(
         reproduced["artifact_manifest"],
         published["artifact_manifest"]
     );
-    Ok(generation)
+    Ok(CommissionedGeneration {
+        generation,
+        owner_root: root,
+        commissioner,
+        receipt,
+        publication: documents.publish,
+    })
 }

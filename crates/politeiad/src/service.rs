@@ -1274,7 +1274,10 @@ pub(crate) fn signed_wire_record<T: Serialize>(
 /// Bind an active-generation operation to exactly the signed capture proof it
 /// will authorize. The operational carrier itself is deliberately excluded to
 /// avoid a self-referential signed-intent digest.
-pub(crate) fn capture_operation_input_digest(
+///
+/// # Errors
+/// Returns a refusal if the signed capture inputs cannot be canonically encoded.
+pub fn capture_operation_input_digest(
     submission: &SourceCaptureSubmission,
 ) -> Result<politeia_core::Digest, CoordinatorError> {
     politeia_core::canonical::to_canonical_bytes(&(

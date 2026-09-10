@@ -891,27 +891,6 @@ impl ReferenceFixture {
         copy_tree(&self.generation_material, &target);
     }
 
-    /// Construct a request that asks the daemon to admit a replacement grant.
-    ///
-    /// The caller must submit this only after the old grant's durable
-    /// revocation. The daemon checks the fresh owner-rooted chain itself.
-    pub(crate) fn recommission_request(&self, replacement: Delegation) -> serde_json::Value {
-        serde_json::json!({
-            "kind": "generation",
-            "request": {
-                "kind": "recommission",
-                "delegation": SignedAdmissionWire::sign(
-                    AdmissionKind::Delegation,
-                    self.host_trust.workspace.institution.clone(),
-                    self.host_trust.workspace.id.clone(),
-                    self.identities.owner.clone(),
-                    replacement,
-                    self.identities.owner_key(),
-                ).expect("owner signs replacement delegation"),
-            },
-        })
-    }
-
     /// Serialize an activation or rollback request around independently
     /// produced assurance. The daemon re-admits all four supplied wires and
     /// performs the durable compare-and-swap.
