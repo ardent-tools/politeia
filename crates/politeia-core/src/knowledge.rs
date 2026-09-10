@@ -210,7 +210,12 @@ impl TrustedObservationRegistry {
         })
     }
 
-    fn resolve(&self, id: &ObservationId) -> Option<&Observation> {
+    /// Resolve one exact signed-admitted observation by identity.
+    ///
+    /// This read-only view exposes the canonical admitted value for a later
+    /// bounded consumer such as reconnaissance. It does not admit wire input
+    /// or permit callers to replace the stored observation.
+    pub fn resolve(&self, id: &ObservationId) -> Option<&Observation> {
         self.observations.get(id)
     }
 
