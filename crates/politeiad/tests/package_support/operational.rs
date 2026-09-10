@@ -12,7 +12,7 @@ use std::{
 use ed25519_dalek::SigningKey;
 use jiff::{SignedDuration, Timestamp};
 use politeia_core::{
-    AdapterId, CapabilityProfileId, CapabilityVerificationId, DataClass, Delegation, DelegationId,
+    CapabilityProfileId, CapabilityVerificationId, DataClass, Delegation, DelegationId,
     Digest, Effect, EvidenceId, ExecutionLocality, ExecutionResourceId, OperationId, OperationSpec,
     PrincipalId, ResourceBudget, RoutingDecisionId,
     canonical::to_canonical_bytes,
