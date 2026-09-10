@@ -1,0 +1,574 @@
+//! Active institutional-learning exercise over the installed daemon socket.
+//!
+//! Every state transition below is a signed file sent to the public CLI. The
+//! process test never opens a storage handle or constructs a coordinator.
+
+use std::{collections::BTreeSet, fs, path::Path};
+
+use jiff::{SignedDuration, Timestamp};
+use politeia_core::{
+    DataClass, Delegation, DelegationId, Digest, Effect, EvidenceId, PrincipalId,
+    trust::{AdmissionKind, SignedAdmissionWire},
+};
+use politeia_evidence::assessment::{AssessmentRelation, RelationKind, SUPERSEDE_ACTION};
+use politeia_policy::bootstrap::bootstrap_capture_resources;
+use politeiad::{
+    service::{SourceCaptureSubmission, capture_operation_input_digest},
+    service_learning::LearningRequest,
+    service_operation::{
+        CAPTURE_SOURCE_OPERATION, COMPILE_CONTEXT_OPERATION, DISCOVER_CAPABILITIES_OPERATION,
+    },
+};
+
+use crate::package_support::{
+    CandidateDocuments, CaptureDocuments, LearningSourceDocuments, ReferenceFixture,
+    learning::{active_learning_budget, active_learning_effects},
+    operational::OperationalFixture,
+};
+
+use super::{
+    TestResult, require_coordinated, require_refusal, run, submit_commissioning, write_request,
+};
+
+/// Exercise active context, discovery, feedback, source correction, and the
+/// resulting current projection through the real daemon and CLI.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the process witness keeps each externally admitted provenance input explicit"
+)]
+pub(crate) fn exercise(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    operations: &OperationalFixture,
+    generation: &Digest,
+    original_source: &LearningSourceDocuments,
+    original_candidate: &CandidateDocuments,
+    original_capture: &CaptureDocuments,
+) -> TestResult<Vec<Delegation>> {
+    let runtime = politeia_core::RuntimeGenerationId::from_digest(generation.clone());
+    let now = Timestamp::now();
+
+    let context_grant = learning_grant(
+        fixture,
+        fixture.identities.worker.clone(),
+        BTreeSet::from([politeiad::learning::COMPILE_CONTEXT_ACTION.to_owned()]),
+        context_resources(fixture, &original_source.source),
+        now,
+    );
+    let discovery_grant = learning_grant(
+        fixture,
+        fixture.identities.worker.clone(),
+        BTreeSet::from([politeiad::learning::DISCOVER_CAPABILITIES_ACTION.to_owned()]),
+        workspace_resources(fixture),
+        now,
+    );
+    let feedback_grant = learning_grant(
+        fixture,
+        fixture.identities.worker.clone(),
+        BTreeSet::from([politeiad::learning::RECORD_FEEDBACK_ACTION.to_owned()]),
+        context_resources(fixture, &original_source.source),
+        now,
+    );
+    for (name, grant) in [
+        ("active-context-grant.json", &context_grant),
+        ("active-discovery-grant.json", &discovery_grant),
+        ("active-feedback-grant.json", &feedback_grant),
+    ] {
+        submit_commissioning(
+            database_url,
+            fixture,
+            name,
+            &delegation_admission(fixture, grant.clone()),
+        )?;
+    }
+
+    let context = fixture.active_context_draft(
+        fixture.identities.worker.clone(),
+        fixture.identities.worker_key(),
+        &context_grant,
+        runtime.clone(),
+        original_source,
+        original_candidate,
+    );
+    let context_submission = operations.submission(
+        fixture,
+        COMPILE_CONTEXT_OPERATION,
+        &fixture.identities.worker,
+        fixture.identities.worker_key(),
+        context.input_digest().clone(),
+        vec![context_grant.clone()],
+        context.resources().clone(),
+        context_grant.budget.clone(),
+        now,
+        Some(context.idempotency_key()),
+    );
+    let context_document = context.document(context_submission);
+    let original_context = submit_commissioning(
+        database_url,
+        fixture,
+        "active-context.json",
+        &context_document,
+    )?;
+    assert_eq!(
+        original_context["context"]["input_ids"],
+        serde_json::json!([original_source.source]),
+        "active context selects exactly the approved source"
+    );
+    let prior_bytes: Vec<u8> = serde_json::from_value(
+        original_context["content"][original_source.source.0.to_string()].clone(),
+    )?;
+    assert_eq!(prior_bytes, fs::read(&fixture.source_document)?);
+    require_refusal(
+        commissioning(
+            database_url,
+            fixture,
+            "active-context-replay.json",
+            &context_document,
+        )?,
+        "active context replay",
+        "replay",
+    )?;
+
+    let discovery = fixture.active_discovery_draft(
+        fixture.identities.worker.clone(),
+        fixture.identities.worker_key(),
+        &discovery_grant,
+        runtime.clone(),
+        operations.capability_population_digest(),
+    );
+    let discovery_submission = operations.submission(
+        fixture,
+        DISCOVER_CAPABILITIES_OPERATION,
+        &fixture.identities.worker,
+        fixture.identities.worker_key(),
+        discovery.input_digest().clone(),
+        vec![discovery_grant.clone()],
+        discovery.resources().clone(),
+        discovery_grant.budget.clone(),
+        now,
+        Some(discovery.idempotency_key()),
+    );
+    let discovery_result = submit_commissioning(
+        database_url,
+        fixture,
+        "active-discovery.json",
+        &discovery.document(discovery_submission),
+    )?;
+    assert_eq!(
+        serde_json::from_value(discovery_result["operations"].clone())?,
+        operations.operation_ids(),
+        "active discovery reports only the generation registry operation identities"
+    );
+    assert_eq!(
+        serde_json::from_value(discovery_result["resources"].clone())?,
+        operations.resource_ids(),
+        "active discovery reports only the generation registry resource identities"
+    );
+
+    // A separately signed operation with an otherwise valid route/control set
+    // must still fail before disclosure when it binds another primary input.
+    let substituted = fixture.active_context_draft(
+        fixture.identities.worker.clone(),
+        fixture.identities.worker_key(),
+        &context_grant,
+        runtime.clone(),
+        original_source,
+        original_candidate,
+    );
+    let substituted_submission = operations.submission(
+        fixture,
+        COMPILE_CONTEXT_OPERATION,
+        &fixture.identities.worker,
+        fixture.identities.worker_key(),
+        Digest::blake3(b"substituted active learning input"),
+        vec![context_grant.clone()],
+        substituted.resources().clone(),
+        context_grant.budget.clone(),
+        now,
+        Some(substituted.idempotency_key()),
+    );
+    require_refusal(
+        commissioning(
+            database_url,
+            fixture,
+            "active-context-input-substitution.json",
+            &substituted.document(substituted_submission),
+        )?,
+        "active context input substitution",
+        "input does not bind the signed request and selected population",
+    )?;
+
+    let feedback = fixture.feedback_documents(
+        fixture.identities.worker.clone(),
+        fixture.identities.worker_key(),
+        &feedback_grant,
+        runtime.clone(),
+        original_source,
+        original_capture,
+        Digest::blake3(b"package process feedback: original source needs correction"),
+    );
+    let feedback_result = submit_commissioning(
+        database_url,
+        fixture,
+        "active-feedback.json",
+        &feedback.document,
+    )?;
+    assert_eq!(
+        feedback_result["proposal"]["source"],
+        serde_json::json!(original_source.source),
+        "feedback is retained as an inert proposal over the exact original source"
+    );
+
+    let replacement_bytes = replacement_source_bytes(&prior_bytes);
+    fs::write(&fixture.source_document, &replacement_bytes)?;
+    fs::copy(
+        &fixture.source_document,
+        fixture.prefix().join("workspace/institution.md"),
+    )?;
+    let (capture_grant, capture_documents) = fixture.bootstrap_capture_documents();
+    submit_commissioning(
+        database_url,
+        fixture,
+        "corrected-source-capture-grant.json",
+        &delegation_admission(fixture, capture_grant.clone()),
+    )?;
+    let capture_documents = fixture.capture_after_admission(capture_documents);
+    let replacement_capture =
+        active_capture_document(fixture, operations, &capture_grant, capture_documents, now)?;
+    let replacement_capture_result = require_coordinated(
+        run(
+            database_url,
+            &[
+                Path::new("snapshot"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &write_request(
+                    fixture,
+                    "corrected-active-capture.json",
+                    &replacement_capture.document,
+                )?,
+            ],
+        )?,
+        "active corrected source capture",
+    )?;
+    assert!(replacement_capture_result["snapshot_manifest"].is_string());
+    let replacement_candidate = fixture.candidate_documents(&capture_grant, &replacement_capture);
+    let prior_approval_bytes = serde_json::to_vec(&original_candidate.approval)?;
+    submit_commissioning(
+        database_url,
+        fixture,
+        "corrected-source-approval.json",
+        &serde_json::json!({
+            "kind": "approve_claim",
+            "candidate": replacement_candidate.candidate.clone(),
+            "approval": replacement_candidate.approval.clone(),
+        }),
+    )?;
+    let mut replacement_source =
+        fixture.learning_source_documents(&replacement_capture, &replacement_candidate);
+    lower_source_relevance(fixture, &mut replacement_source, 1)?;
+    submit_commissioning(
+        database_url,
+        fixture,
+        "corrected-learning-source.json",
+        &replacement_source.document,
+    )?;
+
+    // Both canonical sources are still eligible here. The original deliberately
+    // outranks the successor, so this context proves that a later change cannot
+    // be attributed to grant narrowing or incidental ranking.
+    let broad_context_grant = learning_grant(
+        fixture,
+        fixture.identities.worker.clone(),
+        BTreeSet::from([politeiad::learning::COMPILE_CONTEXT_ACTION.to_owned()]),
+        BTreeSet::from([
+            politeiad::learning::context_workspace_resource(&fixture.host_trust.workspace.id),
+            politeiad::learning::context_source_resource(
+                &fixture.host_trust.workspace.id,
+                &original_source.source,
+            ),
+            politeiad::learning::context_source_resource(
+                &fixture.host_trust.workspace.id,
+                &replacement_source.source,
+            ),
+        ]),
+        Timestamp::now(),
+    );
+    submit_commissioning(
+        database_url,
+        fixture,
+        "both-sources-context-grant.json",
+        &delegation_admission(fixture, broad_context_grant.clone()),
+    )?;
+    let before_correction = fixture.active_context_draft(
+        fixture.identities.worker.clone(),
+        fixture.identities.worker_key(),
+        &broad_context_grant,
+        runtime.clone(),
+        original_source,
+        original_candidate,
+    );
+    let before_correction_submission = operations.submission(
+        fixture,
+        COMPILE_CONTEXT_OPERATION,
+        &fixture.identities.worker,
+        fixture.identities.worker_key(),
+        before_correction.input_digest().clone(),
+        vec![broad_context_grant.clone()],
+        before_correction.resources().clone(),
+        broad_context_grant.budget.clone(),
+        Timestamp::now(),
+        Some(before_correction.idempotency_key()),
+    );
+    let before_correction_result = submit_commissioning(
+        database_url,
+        fixture,
+        "both-sources-before-correction.json",
+        &before_correction.document(before_correction_submission),
+    )?;
+    assert_eq!(
+        before_correction_result["context"]["input_ids"],
+        serde_json::json!([original_source.source]),
+        "without a correction the higher-relevance original remains current"
+    );
+
+    let correction_grant = owner_correction_grant(fixture, now);
+    submit_commissioning(
+        database_url,
+        fixture,
+        "owner-correction-grant.json",
+        &delegation_admission(fixture, correction_grant.clone()),
+    )?;
+    let relation = AssessmentRelation {
+        id: EvidenceId::new(),
+        kind: RelationKind::Supersession,
+        prior: original_source.source.clone(),
+        successor: replacement_source.source.clone(),
+        authority: fixture.identities.owner.clone(),
+        authority_delegation: correction_grant.id.clone(),
+        asserted_at: Timestamp::now(),
+    };
+    let correction = fixture.approved_correction_document(
+        &correction_grant,
+        feedback.id,
+        original_candidate.candidate.payload.subject.clone(),
+        relation.clone(),
+    );
+    require_refusal(
+        commissioning(
+            database_url,
+            fixture,
+            "owner-correction-unknown-feedback.json",
+            &fixture.approved_correction_document(
+                &correction_grant,
+                politeia_core::CommissioningRecordId::new(),
+                original_candidate.candidate.payload.subject.clone(),
+                relation,
+            ),
+        )?,
+        "owner correction requires persisted feedback",
+        "correction feedback is not durably admitted",
+    )?;
+    submit_commissioning(
+        database_url,
+        fixture,
+        "owner-approved-source-correction.json",
+        &correction,
+    )?;
+
+    let replacement_context = fixture.active_context_draft(
+        fixture.identities.worker.clone(),
+        fixture.identities.worker_key(),
+        &broad_context_grant,
+        runtime,
+        &replacement_source,
+        &replacement_candidate,
+    );
+    let replacement_submission = operations.submission(
+        fixture,
+        COMPILE_CONTEXT_OPERATION,
+        &fixture.identities.worker,
+        fixture.identities.worker_key(),
+        replacement_context.input_digest().clone(),
+        vec![broad_context_grant.clone()],
+        replacement_context.resources().clone(),
+        broad_context_grant.budget.clone(),
+        Timestamp::now(),
+        Some(replacement_context.idempotency_key()),
+    );
+    let replacement_result = submit_commissioning(
+        database_url,
+        fixture,
+        "corrected-active-context.json",
+        &replacement_context.document(replacement_submission),
+    )?;
+    assert_eq!(
+        replacement_result["context"]["input_ids"],
+        serde_json::json!([replacement_source.source]),
+        "the current projection selects the owner-approved successor"
+    );
+    let disclosed_replacement: Vec<u8> = serde_json::from_value(
+        replacement_result["content"][replacement_source.source.0.to_string()].clone(),
+    )?;
+    assert_eq!(disclosed_replacement, replacement_bytes);
+    assert_eq!(
+        prior_bytes,
+        original_context_bytes(&original_context, original_source)?
+    );
+    assert_eq!(
+        prior_approval_bytes,
+        serde_json::to_vec(&original_candidate.approval)?
+    );
+    // Root revokes this temporary commissioner authority during the handoff
+    // witness. Worker, owner, producer, and verifier grants remain live so
+    // their distinct durable records can be tested separately.
+    Ok(vec![capture_grant])
+}
+
+fn commissioning(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    name: &str,
+    document: &serde_json::Value,
+) -> TestResult<std::process::Output> {
+    let path = write_request(fixture, name, document)?;
+    run(
+        database_url,
+        &[
+            Path::new("commissioning"),
+            &fixture.prefix().join("run/politeiad.sock"),
+            &path,
+        ],
+    )
+}
+
+fn learning_grant(
+    fixture: &ReferenceFixture,
+    subject: PrincipalId,
+    actions: BTreeSet<String>,
+    resources: BTreeSet<String>,
+    at: Timestamp,
+) -> Delegation {
+    Delegation {
+        id: DelegationId::new(),
+        issuer: fixture.identities.owner.clone(),
+        subject,
+        parent: None,
+        actions,
+        resources,
+        effects: active_learning_effects(),
+        data_classes: BTreeSet::from([DataClass::Internal]),
+        audience: BTreeSet::from(["commissioning".to_owned()]),
+        expires_at: at + SignedDuration::from_hours(1),
+        budget: active_learning_budget(),
+    }
+}
+
+fn owner_correction_grant(fixture: &ReferenceFixture, at: Timestamp) -> Delegation {
+    Delegation {
+        id: DelegationId::new(),
+        issuer: fixture.identities.owner.clone(),
+        subject: fixture.identities.owner.clone(),
+        parent: None,
+        actions: BTreeSet::from([SUPERSEDE_ACTION.to_owned()]),
+        resources: BTreeSet::from(["assessment:source-correction".to_owned()]),
+        effects: BTreeSet::from([Effect::ReadInstitutionalContext]),
+        data_classes: BTreeSet::from([DataClass::Internal]),
+        audience: BTreeSet::from(["commissioning".to_owned()]),
+        expires_at: at + SignedDuration::from_hours(1),
+        budget: active_learning_budget(),
+    }
+}
+
+fn context_resources(fixture: &ReferenceFixture, source: &EvidenceId) -> BTreeSet<String> {
+    BTreeSet::from([
+        politeiad::learning::context_workspace_resource(&fixture.host_trust.workspace.id),
+        politeiad::learning::context_source_resource(&fixture.host_trust.workspace.id, source),
+    ])
+}
+
+fn workspace_resources(fixture: &ReferenceFixture) -> BTreeSet<String> {
+    BTreeSet::from([politeiad::learning::context_workspace_resource(
+        &fixture.host_trust.workspace.id,
+    )])
+}
+
+fn delegation_admission(fixture: &ReferenceFixture, delegation: Delegation) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "admit_delegation",
+        "delegation": fixture.signed_commissioner_delegation(delegation),
+    })
+}
+
+fn active_capture_document(
+    fixture: &ReferenceFixture,
+    operations: &OperationalFixture,
+    capture_grant: &Delegation,
+    mut capture: CaptureDocuments,
+    at: Timestamp,
+) -> TestResult<CaptureDocuments> {
+    let submission: SourceCaptureSubmission = serde_json::from_value(capture.document.clone())?;
+    let input_digest = capture_operation_input_digest(&submission)?;
+    let resources = bootstrap_capture_resources(&submission.capture.payload);
+    let operation = operations.submission(
+        fixture,
+        CAPTURE_SOURCE_OPERATION,
+        &fixture.identities.commissioner,
+        fixture.identities.commissioner_key(),
+        input_digest,
+        vec![capture_grant.clone()],
+        resources,
+        capture_grant.budget.clone(),
+        at,
+        None,
+    );
+    let mut document = capture
+        .document
+        .as_object()
+        .cloned()
+        .ok_or("capture document is not an object")?;
+    document.insert("operation".to_owned(), serde_json::to_value(operation)?);
+    capture.document = serde_json::Value::Object(document);
+    Ok(capture)
+}
+
+fn replacement_source_bytes(prior: &[u8]) -> Vec<u8> {
+    let mut replacement = prior.to_vec();
+    replacement
+        .extend_from_slice(b"\n\nCorrected by the owner-approved active learning process.\n");
+    replacement
+}
+
+fn lower_source_relevance(
+    fixture: &ReferenceFixture,
+    source: &mut LearningSourceDocuments,
+    relevance: u32,
+) -> TestResult {
+    let request: LearningRequest = serde_json::from_value(source.document["request"].clone())?;
+    let LearningRequest::RegisterSource { source: wire } = request else {
+        return Err("replacement learning source document has the wrong request kind".into());
+    };
+    let mut payload = wire.payload;
+    payload.relevance = relevance;
+    let signed = SignedAdmissionWire::sign(
+        AdmissionKind::LearningSource,
+        fixture.host_trust.workspace.institution.clone(),
+        fixture.host_trust.workspace.id.clone(),
+        fixture.identities.owner.clone(),
+        payload,
+        fixture.identities.owner_key(),
+    )?;
+    source.document = serde_json::json!({
+        "kind": "learning",
+        "request": LearningRequest::RegisterSource { source: signed },
+    });
+    Ok(())
+}
+
+fn original_context_bytes(
+    context: &serde_json::Value,
+    source: &LearningSourceDocuments,
+) -> TestResult<Vec<u8>> {
+    Ok(serde_json::from_value(
+        context["content"][source.source.0.to_string()].clone(),
+    )?)
+}

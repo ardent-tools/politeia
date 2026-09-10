@@ -49,6 +49,11 @@ impl ActiveContextDraft {
         &self.resources
     }
 
+    /// The only replay key the separately signed operation may carry.
+    pub(crate) fn idempotency_key(&self) -> String {
+        format!("learning:{}", self.request.payload.id.0)
+    }
+
     /// Place the separately signed operational material outside the primary
     /// request wire, avoiding a recursive request digest.
     pub(crate) fn document(self, active_submission: OperationSubmission) -> serde_json::Value {
@@ -78,6 +83,11 @@ impl ActiveDiscoveryDraft {
     /// Exact workspace resource axis that the discovery operation must carry.
     pub(crate) fn resources(&self) -> &BTreeSet<String> {
         &self.resources
+    }
+
+    /// The only replay key the separately signed operation may carry.
+    pub(crate) fn idempotency_key(&self) -> String {
+        format!("learning:{}", self.request.payload.id.0)
     }
 
     /// Place the separately signed operational material outside the primary
