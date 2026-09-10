@@ -8,6 +8,11 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+politeia-core.workspace = true
+politeia-protocol.workspace = true
 
 # WHY dev-only: the binary is still a scaffold and does not run the slice. The
 # integration test does, which is the increment that can be honest today --
@@ -15,7 +20,6 @@ tokio.workspace = true
 # it does not.
 [dev-dependencies]
 jiff.workspace = true
-politeia-core.workspace = true
 politeia-evidence.workspace = true
 politeia-policy.workspace = true
 

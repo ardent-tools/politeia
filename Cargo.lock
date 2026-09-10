@@ -665,7 +665,11 @@ dependencies = [
  "politeia-core",
  "politeia-evidence",
  "politeia-policy",
+ "politeia-protocol",
+ "serde",
+ "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
