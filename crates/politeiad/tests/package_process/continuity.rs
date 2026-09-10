@@ -15,7 +15,12 @@ use std::{
 };
 
 use jiff::Timestamp;
-use politeia_core::Digest;
+use politeia_core::{
+    DelegationId, Digest,
+    canonical::to_canonical_bytes,
+    trust::{AdmissionKind, SignedAdmissionWire},
+};
+use politeiad::service_operation::{OperationSubmission, RESOURCE_MANIFEST_OPERATION};
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
@@ -28,6 +33,14 @@ const REPLAY_REFUSAL: &str = "attempt is missing, expired, replayed, or not clai
 const BARRIER_TABLE: &str = "politeia_test_completion_barriers";
 const BARRIER_TRIGGER: &str = "politeia_test_block_operation_completion";
 const BARRIER_FUNCTION: &str = "politeia_test_block_completion";
+const UNRESOLVED_OVERLAP: &str = "canonical mutating effect overlap is unresolved";
+const CRASH_RESOURCE: &str = "public:continuity-crash";
+const CONCURRENT_RESOURCE: &str = "public:continuity-concurrent";
+
+struct FreshManifest {
+    authority_admission: serde_json::Value,
+    operate: serde_json::Value,
+}
 
 /// Interrupt a real daemon after claim and prove durable replay conservatism.
 ///
@@ -39,7 +52,7 @@ pub(super) fn exercise(
     operations: &OperationalFixture,
     daemon: Daemon,
 ) -> TestResult<ContinuityExercise> {
-    let crashed = operations.positive_manifest(fixture, Timestamp::now());
+    let crashed = fresh_manifest(fixture, operations, CRASH_RESOURCE)?;
     submit_commissioning(
         database_url,
         fixture,
@@ -78,6 +91,34 @@ pub(super) fn exercise(
         REPLAY_REFUSAL,
     )?;
 
+    let fresh_overlap = fresh_manifest(fixture, operations, CRASH_RESOURCE)?;
+    submit_commissioning(
+        database_url,
+        fixture,
+        "continuity-fresh-overlap-authority.json",
+        &fresh_overlap.authority_admission,
+    )?;
+    let fresh_overlap_request = write_request(
+        fixture,
+        "continuity-fresh-overlap-operate.json",
+        &fresh_overlap.operate,
+    )?;
+    let overlap_guard = CompletionBarrier::install(database_url, fixture)?;
+    require_refusal(
+        run(
+            database_url,
+            &[
+                Path::new("operate"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &fresh_overlap_request,
+            ],
+        )?,
+        "fresh grant operation overlapping a crashed claim",
+        UNRESOLVED_OVERLAP,
+    )?;
+    overlap_guard.assert_only_new_claims(&[])?;
+    overlap_guard.cleanup()?;
+
     let overlap_observation = concurrent_one_winner(database_url, fixture, operations)?;
     Ok(ContinuityExercise {
         daemon,
@@ -102,29 +143,42 @@ fn concurrent_one_winner(
     fixture: &ReferenceFixture,
     operations: &OperationalFixture,
 ) -> TestResult<serde_json::Value> {
-    let prepared = operations.positive_manifest(fixture, Timestamp::now());
+    let winner_prepared = fresh_manifest(fixture, operations, CONCURRENT_RESOURCE)?;
+    let loser_prepared = fresh_manifest(fixture, operations, CONCURRENT_RESOURCE)?;
     submit_commissioning(
         database_url,
         fixture,
-        "continuity-overlap-authority.json",
-        &prepared.authority_admission,
+        "continuity-overlap-winner-authority.json",
+        &winner_prepared.authority_admission,
     )?;
-    let request = write_request(
+    submit_commissioning(
+        database_url,
         fixture,
-        "continuity-overlap-operate.json",
-        &prepared.operate,
+        "continuity-overlap-loser-authority.json",
+        &loser_prepared.authority_admission,
+    )?;
+    let winner_request = write_request(
+        fixture,
+        "continuity-overlap-winner-operate.json",
+        &winner_prepared.operate,
+    )?;
+    let loser_request = write_request(
+        fixture,
+        "continuity-overlap-loser-operate.json",
+        &loser_prepared.operate,
     )?;
 
     let mut barrier = CompletionBarrier::install(database_url, fixture)?;
-    let winner = spawn_operate(database_url, fixture, &request)?;
+    let winner = spawn_operate(database_url, fixture, &winner_request)?;
     let reservation = barrier.wait_for_claim_and_block()?;
     let observation = barrier.observation(&reservation)?;
-    let loser = spawn_operate(database_url, fixture, &request)?;
+    let loser = spawn_operate(database_url, fixture, &loser_request)?;
     require_refusal(
         loser.wait()?,
-        "overlapping identical operation request",
-        REPLAY_REFUSAL,
+        "fresh authority operation overlapping a claimed effect",
+        UNRESOLVED_OVERLAP,
     )?;
+    barrier.assert_only_new_claims(&[reservation])?;
 
     barrier.release()?;
     let completed = require_coordinated(
@@ -134,9 +188,34 @@ fn concurrent_one_winner(
     assert_completion_ids(&completed)?;
     let completion_observation = barrier.assert_completed(&reservation, &completed)?;
     barrier.cleanup()?;
+    let successor = fresh_manifest(fixture, operations, CONCURRENT_RESOURCE)?;
+    submit_commissioning(
+        database_url,
+        fixture,
+        "continuity-overlap-successor-authority.json",
+        &successor.authority_admission,
+    )?;
+    let successor_request = write_request(
+        fixture,
+        "continuity-overlap-successor-operate.json",
+        &successor.operate,
+    )?;
+    let successor_completion = require_coordinated(
+        run(
+            database_url,
+            &[
+                Path::new("operate"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &successor_request,
+            ],
+        )?,
+        "fresh authority operation after the overlapping effect completed",
+    )?;
+    assert_completion_ids(&successor_completion)?;
     Ok(serde_json::json!({
         "barrier": observation,
         "completion": completion_observation,
+        "successor_completion": successor_completion,
     }))
 }
 
@@ -154,6 +233,58 @@ fn spawn_operate(
         ],
     )
     .spawn()?)
+}
+
+/// Create a new owner grant and a new signed request for one semantic manifest
+/// subject. Each grant permits exactly one invocation, so a later refusal
+/// cannot be attributed to spent budget under a reused credential.
+fn fresh_manifest(
+    fixture: &ReferenceFixture,
+    operations: &OperationalFixture,
+    resource: &str,
+) -> TestResult<FreshManifest> {
+    let template = operations.positive_manifest(fixture, Timestamp::now());
+    let template: OperationSubmission = serde_json::from_value(template.operate)?;
+    let mut authority = template
+        .intent
+        .payload
+        .delegation_chain
+        .first()
+        .cloned()
+        .ok_or("reference manifest submission omitted its direct authority")?;
+    authority.id = DelegationId::new();
+    authority.resources = BTreeSet::from([resource.to_owned()]);
+    let authority_wire = SignedAdmissionWire::sign(
+        AdmissionKind::Delegation,
+        fixture.host_trust.workspace.institution.clone(),
+        fixture.host_trust.workspace.id.clone(),
+        fixture.identities.owner.clone(),
+        authority.clone(),
+        fixture.identities.owner_key(),
+    )?;
+    let resources = BTreeSet::from([resource.to_owned()]);
+    let submission = operations.submission(
+        fixture,
+        RESOURCE_MANIFEST_OPERATION,
+        &fixture.identities.worker,
+        fixture.identities.worker_key(),
+        Digest::blake3(&to_canonical_bytes(&(
+            RESOURCE_MANIFEST_OPERATION,
+            &resources,
+        ))?),
+        vec![authority],
+        resources,
+        template.intent.payload.budget,
+        Timestamp::now(),
+        None,
+    );
+    Ok(FreshManifest {
+        authority_admission: serde_json::json!({
+            "kind": "admit_delegation",
+            "delegation": authority_wire,
+        }),
+        operate: serde_json::to_value(submission)?,
+    })
 }
 
 fn assert_completion_ids(completion: &serde_json::Value) -> TestResult {
@@ -304,6 +435,22 @@ CREATE TRIGGER {BARRIER_TRIGGER}
             .into_iter()
             .map(|row| row.get(0))
             .collect())
+    }
+
+    fn assert_only_new_claims(&self, allowed: &[Uuid]) -> TestResult {
+        let allowed: BTreeSet<_> = allowed.iter().copied().collect();
+        let unexpected: Vec<_> = self
+            .claimed_without_receipt()?
+            .into_iter()
+            .filter(|reservation| {
+                !self.prior_claims.contains(reservation) && !allowed.contains(reservation)
+            })
+            .collect();
+        if unexpected.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("unexpected fresh operations reached claimed state: {unexpected:?}").into())
+        }
     }
 
     fn bind_reservation(&self, reservation: &Uuid) -> TestResult {
