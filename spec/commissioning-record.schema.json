@@ -485,6 +485,11 @@
           "type": "string"
         },
         {
+          "const": "read_institutional_context",
+          "description": "Read approved institutional context through the coordinator.",
+          "type": "string"
+        },
+        {
           "const": "write_external_system",
           "description": "Write to an external system.",
           "type": "string"
@@ -508,7 +513,6 @@
       "type": "string"
     },
     "EvidenceRecord": {
-      "additionalProperties": false,
       "description": "A provenance-bearing evidence record admitted for an exact subject.",
       "properties": {
         "id": {

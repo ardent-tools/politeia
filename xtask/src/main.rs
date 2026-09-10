@@ -631,13 +631,14 @@ const CLAIM_COVERAGE: &[ClaimCoverage] = &[
         id: "POL-H",
         mechanisms: &["politeia_policy::hardening", "politeia_policy::evaluate"],
         exercised_by: &[
-            "a_proxy_must_be_calibrated_before_it_may_block",
-            "a_self_reported_verification_cannot_be_attested",
+            "missing_or_self_attested_activation_cannot_support_blocking",
+            "stale_subject_and_calibration_population_fail_closed",
+            "verifier_cannot_attest_its_own_work",
             "self_verified_or_stale_capability_evidence_is_ineligible",
         ],
-        still_needs: "calibration performed against real adversarial fixtures rather than declared",
+        still_needs: "calibration performed against real adversarial fixtures through the installed control path",
         threat: "calibration is read as assurance, letting a heuristic acquire blocking authority",
-        residual_risk: "calibration is a declared boolean; nothing here verifies the adversarial fixtures behind it",
+        residual_risk: "signed runs and separately delegated activation bind exact subjects; these library tests do not prove a deployed detector ran",
         falsifier: "a binding blocking on an uncalibrated proxy, or a calibration widening a delegation",
     },
     ClaimCoverage {
