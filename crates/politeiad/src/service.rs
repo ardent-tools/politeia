@@ -147,9 +147,14 @@ impl PoliteiadService {
         let record = signed_wire_record(&self.bootstrap)?;
         match self.storage.load_workspace(&self.scope).await {
             Ok(existing) => {
+                let genesis = self
+                    .storage
+                    .load_bootstrap(&self.scope)
+                    .await
+                    .map_err(|error| storage_refusal(&error))?;
                 if existing.owner != self.workspace.owner
                     || existing.owner_delegation != self.workspace.owner_delegation
-                    || existing.model.digest() != record.digest()
+                    || genesis.digest() != record.digest()
                 {
                     return Err(CoordinatorError::Refused(
                         "existing durable workspace differs from installed bootstrap".to_string(),
@@ -394,6 +399,43 @@ impl PoliteiadService {
             }),
             evidence_refs: vec![submission.evidence.payload.id.0.to_string()],
         })
+    }
+
+    /// Re-admit one durable, unrevoked delegation held by the exact requester.
+    ///
+    /// This is the sole service-side recovery path for delegation authority:
+    /// it revalidates the signed envelope, durable revocation state, and
+    /// complete attenuation chain to the installed owner before exposing the
+    /// typed grant to another coordinator module.
+    #[allow(
+        dead_code,
+        reason = "the sibling learning coordinator consumes this boundary"
+    )]
+    pub(crate) async fn admit_live_delegation(
+        &self,
+        delegation_id: &politeia_core::DelegationId,
+        requester: &politeia_core::PrincipalId,
+    ) -> Result<politeia_core::trust::Admitted<Delegation>, CoordinatorError> {
+        let durable = self.durable_snapshot().await?;
+        let persisted = durable.delegations.get(delegation_id).ok_or_else(|| {
+            CoordinatorError::Refused("delegation is not durably admitted".to_string())
+        })?;
+        if persisted.revoked {
+            return Err(CoordinatorError::Refused(
+                "delegation is revoked".to_string(),
+            ));
+        }
+        let admitted = self
+            .anchors
+            .admit_expected(AdmissionKind::Delegation, persisted.wire.clone())
+            .map_err(refusal)?;
+        if admitted.payload().id != *delegation_id || admitted.payload().subject != *requester {
+            return Err(CoordinatorError::Refused(
+                "requester does not hold the requested delegation".to_string(),
+            ));
+        }
+        self.validate_delegation_authority(&durable, &admitted)?;
+        Ok(admitted)
     }
 
     /// Verify that a newly admitted delegation is signed by its semantic issuer
