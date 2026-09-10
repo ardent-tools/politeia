@@ -401,22 +401,16 @@ fn validate_approved_executable_identity(
     Ok(())
 }
 
-fn validate_builtin_executable_identity(
+fn validate_builtin_descriptor_identity(
     descriptor: &ExecutionResourceDescriptor,
     approved: &Digest,
-    running: &Digest,
 ) -> Result<(), ExecutableIdentityRefusal> {
-    validate_approved_executable_identity(approved, running)?;
     match descriptor {
         ExecutionResourceDescriptor::DeterministicTool {
             artifact_digest, ..
         } if artifact_digest == approved => Ok(()),
         _ => Err(ExecutableIdentityRefusal::DescriptorExecutableMismatch),
     }
-}
-
-fn profile_requires_builtin_handler(profile: &CapabilityProfile) -> bool {
-    !profile.task_classes.is_empty() || !profile.capabilities.is_empty()
 }
 
 impl CapabilityQualificationEvidence {
@@ -747,7 +741,6 @@ pub struct ActiveOperationalRegistry {
     generation: RuntimeGenerationId,
     policy: OperationalPolicyRegistry,
     execution: OperationalExecutionRegistry,
-    executable_digest: Digest,
 }
 
 impl ActiveOperationalRegistry {
@@ -771,11 +764,19 @@ impl ActiveOperationalRegistry {
         if operation_scopes != policy_scopes {
             return Err(OperationalRegistryRefusal::PolicyCoverageMismatch);
         }
+        for resource in &execution.document.resources {
+            if matches!(
+                resource.descriptor,
+                ExecutionResourceDescriptor::DeterministicTool { .. }
+            ) {
+                validate_builtin_descriptor_identity(&resource.descriptor, &executable_digest)
+                    .map_err(OperationalRegistryRefusal::ExecutableIdentity)?;
+            }
+        }
         Ok(Self {
             generation,
             policy,
             execution,
-            executable_digest,
         })
     }
 
@@ -792,38 +793,6 @@ impl ActiveOperationalRegistry {
     /// Execution registry decoded from this generation's freshly verified bytes.
     pub fn execution(&self) -> &OperationalExecutionRegistry {
         &self.execution
-    }
-
-    /// Exact executable component approved by this generation and matched to
-    /// the running daemon before this registry was exposed.
-    pub fn executable_digest(&self) -> &Digest {
-        &self.executable_digest
-    }
-
-    fn capability_qualification(
-        &self,
-        verification: &CapabilityVerificationRecord,
-    ) -> Result<CapabilityQualificationEvidence, CapabilityQualificationRefusal> {
-        let profile = self
-            .execution
-            .document
-            .profiles
-            .iter()
-            .find(|profile| profile.verification == verification.id)
-            .ok_or(CapabilityQualificationRefusal::ProfileAbsent)?;
-        if profile_requires_builtin_handler(profile) {
-            let resource = self
-                .execution
-                .resource(&verification.resource)
-                .ok_or(CapabilityQualificationRefusal::ResourceAbsent)?;
-            validate_builtin_executable_identity(
-                &resource.descriptor,
-                &self.executable_digest,
-                &self.executable_digest,
-            )
-            .map_err(CapabilityQualificationRefusal::ExecutableIdentity)?;
-        }
-        self.execution.capability_qualification(verification)
     }
 }
 
@@ -1060,7 +1029,9 @@ impl PoliteiadService {
         )
         .map_err(operational_refusal)?;
 
-        if profile_requires_builtin_handler(&submission.qualification.profile) {
+        if !submission.qualification.profile.task_classes.is_empty()
+            || !submission.qualification.profile.capabilities.is_empty()
+        {
             let approved_executable = self
                 .workspace()
                 .approved_generation
@@ -1069,10 +1040,14 @@ impl PoliteiadService {
                 .ok_or_else(|| {
                     operational_refusal("workspace has no approved executable component")
                 })?;
-            validate_builtin_executable_identity(
-                &submission.qualification.resource.descriptor,
+            validate_approved_executable_identity(
                 approved_executable,
                 self.running_executable_digest(),
+            )
+            .map_err(operational_refusal)?;
+            validate_builtin_descriptor_identity(
+                &submission.qualification.resource.descriptor,
+                approved_executable,
             )
             .map_err(operational_refusal)?;
         }
@@ -1315,7 +1290,7 @@ impl PoliteiadService {
         let now = ledger.observed_at().await.map_err(operational_refusal)?;
         let admitted_capabilities = self.admit_capability_verifications(
             durable,
-            &registry,
+            registry.execution(),
             &submission.capability_verifications,
             now,
         )?;
@@ -1411,13 +1386,10 @@ impl PoliteiadService {
             .execution()
             .resource(&admitted.assignment().resource)
             .ok_or_else(|| operational_refusal("selected execution resource is absent"))?;
-        validate_builtin_executable_identity(
-            &selected_resource.descriptor,
-            admitted.registry().executable_digest(),
-            admitted.registry().executable_digest(),
-        )
-        .map_err(operational_refusal)?;
-        if selected_resource.locality != ExecutionLocality::ClientLocal
+        if !matches!(
+            selected_resource.descriptor,
+            ExecutionResourceDescriptor::DeterministicTool { .. }
+        ) || selected_resource.locality != ExecutionLocality::ClientLocal
             || selected_resource.trust_domain != self.workspace().trust_domain
         {
             return Err(operational_refusal(
@@ -1734,7 +1706,7 @@ impl PoliteiadService {
     fn admit_capability_verifications(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
-        registry: &ActiveOperationalRegistry,
+        registry: &OperationalExecutionRegistry,
         submitted: &[CapabilityVerificationEvidence],
         at: Timestamp,
     ) -> Result<AdmittedCapabilityVerifications, CoordinatorError> {
@@ -2204,8 +2176,6 @@ pub enum CapabilityQualificationRefusal {
     UnexpectedManifestOperation,
     /// A declared bound is too large for the finite public planted probe.
     ProbePopulationTooLarge,
-    /// The declared deterministic tool does not bind the approved daemon image.
-    ExecutableIdentity(ExecutableIdentityRefusal),
     /// The real manifest algorithm refused an input required to be known-good.
     ManifestProbe(ResourceManifestProbeRefusal),
     /// A canonical typed payload could not be encoded.
@@ -2244,7 +2214,6 @@ impl std::fmt::Display for CapabilityQualificationRefusal {
             Self::ProbePopulationTooLarge => {
                 formatter.write_str("capability probe population is not safely bounded")
             }
-            Self::ExecutableIdentity(source) => write!(formatter, "{source}"),
             Self::ManifestProbe(source) => write!(formatter, "capability probe failed: {source}"),
             Self::Canonical(_) => {
                 formatter.write_str("capability qualification cannot be encoded canonically")
@@ -2257,7 +2226,6 @@ impl std::error::Error for CapabilityQualificationRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::ManifestProbe(source) => Some(source),
-            Self::ExecutableIdentity(source) => Some(source),
             Self::Canonical(source) => Some(source),
             _ => None,
         }
@@ -2365,15 +2333,33 @@ mod tests {
         reason = "the fixture must fail loudly if canonical grant binding changes"
     )]
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use jiff::{SignedDuration, Timestamp};
-    use politeia_core::{DataClass, DelegationId, Digest, Effect, PrincipalId, ResourceBudget};
-    use politeia_runtime::routing::ExecutionResourceDescriptor;
+    use politeia_core::{
+        AdapterId, CapabilityProfileId, CapabilityVerificationId, DataClass, DelegationId, Digest,
+        Effect, EvidenceId, ExecutionResourceId, OperationId, PolicyBundleId, PrincipalId,
+        ResourceBudget, RuntimeGenerationId, institution::TrustDomainId,
+    };
+    use politeia_policy::{
+        Consequence, DetectorSpec, EvidenceClass, PolicyBinding,
+        hardening::{BindingAuthority, HardeningLadder, HardeningState},
+        operational::{
+            OperationalDetector, OperationalPolicyRegistry, PublicDetectorRule, operation_scope,
+        },
+    };
+    use politeia_runtime::routing::{
+        CapabilityProfile, CapabilityVerificationRecord, ExecutionRequirement, ExecutionResource,
+        ExecutionResourceDescriptor, SoftPreference,
+    };
 
     use super::{
-        Delegation, ExecutableIdentityRefusal, direct_grant_authorization_digest,
-        validate_approved_executable_identity, validate_builtin_executable_identity,
+        ActiveOperationalRegistry, BOUNDED_LOCAL_OPERATION_CAPABILITY,
+        BOUNDED_LOCAL_OPERATION_TASK_CLASS, Delegation, ExecutableIdentityRefusal,
+        InstalledOperationHandler, OPERATION_RECEIPT_OBLIGATION, OperationalExecutionRegistry,
+        OperationalRegistryRefusal, RESOURCE_MANIFEST_ACTION, RESOURCE_MANIFEST_OPERATION,
+        RegisteredOperation, direct_grant_authorization_digest,
+        validate_approved_executable_identity,
     };
 
     fn direct_grant() -> Delegation {
@@ -2399,6 +2385,154 @@ mod tests {
         }
     }
 
+    fn informational_authority() -> BindingAuthority {
+        let mut ladder = HardeningLadder::new();
+        for state in [
+            HardeningState::Observed,
+            HardeningState::Proposed,
+            HardeningState::Approved,
+            HardeningState::Shadow,
+        ] {
+            ladder.advance(state).expect("fixture ladder advances");
+        }
+        BindingAuthority::new(ladder, Consequence::Informational)
+            .expect("shadowed fixture binding is informational")
+    }
+
+    fn active_registry_with_descriptor(
+        descriptor: ExecutionResourceDescriptor,
+        executable: Digest,
+    ) -> Result<ActiveOperationalRegistry, OperationalRegistryRefusal> {
+        let trust_domain = TrustDomainId::try_from("fixture.daemon".to_owned())
+            .expect("fixture trust domain is valid");
+        let resource = ExecutionResource {
+            id: ExecutionResourceId::new(),
+            descriptor,
+            adapter: AdapterId::new(),
+            trust_domain: trust_domain.clone(),
+            control_domain: trust_domain.clone(),
+            locality: politeia_core::ExecutionLocality::ClientLocal,
+            allowed_data_classes: BTreeSet::from([DataClass::Public]),
+            allowed_effects: BTreeSet::from([Effect::CreateArtifact]),
+            max_context_tokens: 1,
+            estimated_cost_microunits: 1,
+            estimated_latency_ms: 1,
+        };
+        let observed_at = Timestamp::now();
+        let verification = CapabilityVerificationRecord {
+            id: CapabilityVerificationId::new(),
+            profile: CapabilityProfileId::new(),
+            resource: resource.id.clone(),
+            resource_digest: resource.digest().expect("fixture resource digests"),
+            task_classes: BTreeSet::from([BOUNDED_LOCAL_OPERATION_TASK_CLASS.to_owned()]),
+            capabilities: BTreeSet::from([BOUNDED_LOCAL_OPERATION_CAPABILITY.to_owned()]),
+            verifier: PrincipalId::new(),
+            verifier_control_domain: trust_domain.clone(),
+            evidence: BTreeSet::from([EvidenceId::new()]),
+            observed_at,
+            expires_at: observed_at + SignedDuration::from_hours(1),
+        };
+        let profile = CapabilityProfile {
+            id: verification.profile.clone(),
+            resource: resource.id.clone(),
+            resource_digest: verification.resource_digest.clone(),
+            task_classes: verification.task_classes.clone(),
+            capabilities: verification.capabilities.clone(),
+            verification: verification.id.clone(),
+            verification_digest: verification.digest().expect("fixture verification digests"),
+        };
+        let requirement = ExecutionRequirement {
+            task_class: BOUNDED_LOCAL_OPERATION_TASK_CLASS.to_owned(),
+            required_capabilities: BTreeSet::from([BOUNDED_LOCAL_OPERATION_CAPABILITY.to_owned()]),
+            required_effects: BTreeSet::from([Effect::CreateArtifact]),
+            data_classes: BTreeSet::from([DataClass::Public]),
+            allowed_localities: BTreeSet::from([politeia_core::ExecutionLocality::ClientLocal]),
+            allowed_trust_domains: BTreeSet::from([trust_domain]),
+            minimum_context_tokens: 1,
+            maximum_cost_microunits: Some(1),
+            maximum_latency_ms: Some(1),
+            require_independent_result_verification: false,
+            deterministic_only: true,
+            preferences: vec![SoftPreference::MinimizeCost],
+        };
+        let operation = RegisteredOperation {
+            spec: politeia_core::OperationSpec {
+                id: OperationId::new(),
+                name: RESOURCE_MANIFEST_OPERATION.to_owned(),
+                actions: BTreeSet::from([RESOURCE_MANIFEST_ACTION.to_owned()]),
+                effects: BTreeSet::from([Effect::CreateArtifact]),
+                data_classes: BTreeSet::from([DataClass::Public]),
+                evidence_obligations: vec![OPERATION_RECEIPT_OBLIGATION.to_owned()],
+                execution_requirement: Some(
+                    requirement.digest().expect("fixture requirement digests"),
+                ),
+                retryable: false,
+                requires_idempotency: false,
+            },
+            requirement,
+            handler: InstalledOperationHandler::ResourceManifest {
+                maximum_resources: 1,
+                maximum_resource_bytes: 128,
+            },
+        };
+        let scope = operation_scope(&operation.spec);
+        let execution = OperationalExecutionRegistry::new(
+            vec![operation],
+            vec![resource.clone()],
+            vec![profile],
+            vec![verification],
+            BTreeSet::from([resource.id]),
+        )?;
+        let rule = PublicDetectorRule::ResourcePrefixForbidden {
+            forbidden_prefix: "forbidden:".to_owned(),
+            known_good_resources: BTreeSet::from(["public:known-good".to_owned()]),
+            planted_violation_resources: BTreeSet::from(["forbidden:planted".to_owned()]),
+        };
+        let detector_id = "fixture-detector".to_owned();
+        let policy = OperationalPolicyRegistry::new(
+            PolicyBundleId::new(),
+            vec![PolicyBinding {
+                id: "fixture-binding".to_owned(),
+                clause_id: "fixture-clause".to_owned(),
+                detector_ids: vec![detector_id.clone()],
+                scope,
+                authority: informational_authority(),
+            }],
+            BTreeMap::from([(
+                detector_id.clone(),
+                OperationalDetector {
+                    spec: DetectorSpec {
+                        id: detector_id,
+                        evidence_class: EvidenceClass::Substance,
+                        control_version: "1".to_owned(),
+                        configuration_digest: rule
+                            .configuration_digest()
+                            .expect("fixture detector digests"),
+                        mediation_path: "fixture.dispatcher".to_owned(),
+                        supported_scopes: BTreeSet::from([operation_scope(
+                            &execution
+                                .operation_named(RESOURCE_MANIFEST_OPERATION)
+                                .expect("fixture operation remains registered")
+                                .spec,
+                        )]),
+                        calibration_population: rule
+                            .calibration_population_digest()
+                            .expect("fixture calibration digests"),
+                        known_blind_spots: Vec::new(),
+                    },
+                    rule,
+                },
+            )]),
+        )
+        .expect("fixture operational policy is coherent");
+        ActiveOperationalRegistry::new(
+            RuntimeGenerationId::derive(b"fixture"),
+            policy,
+            execution,
+            executable,
+        )
+    }
+
     #[test]
     fn control_run_authorization_binds_the_exact_admitted_grant() {
         let first = direct_grant();
@@ -2412,7 +2546,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_staged_executable_that_is_not_the_running_daemon() {
+    fn distinguishes_a_staged_executable_that_is_not_the_running_daemon() {
         let refusal = validate_approved_executable_identity(
             &Digest::blake3(b"staged approved executable"),
             &Digest::blake3(b"running daemon executable"),
@@ -2425,20 +2559,35 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_builtin_descriptor_that_names_another_executable() {
+    fn active_registry_refuses_a_builtin_descriptor_for_another_executable() {
         let approved = Digest::blake3(b"running daemon executable");
-        let refusal = validate_builtin_executable_identity(
-            &ExecutionResourceDescriptor::DeterministicTool {
+        let refusal = active_registry_with_descriptor(
+            ExecutionResourceDescriptor::DeterministicTool {
                 artifact_digest: Digest::blake3(b"another deterministic tool"),
                 version: "fixture".to_owned(),
             },
-            &approved,
-            &approved,
+            approved,
         )
-        .expect_err("a builtin handler must not execute a descriptor for other bytes");
-        assert_eq!(
+        .expect_err("a target operational registry must reject a substituted builtin descriptor");
+        assert!(matches!(
             refusal,
-            ExecutableIdentityRefusal::DescriptorExecutableMismatch
-        );
+            OperationalRegistryRefusal::ExecutableIdentity(
+                ExecutableIdentityRefusal::DescriptorExecutableMismatch
+            )
+        ));
+    }
+
+    #[test]
+    fn active_registry_keeps_a_non_builtin_descriptor_unaffected() {
+        active_registry_with_descriptor(
+            ExecutionResourceDescriptor::Model {
+                provider: "fixture-provider".to_owned(),
+                model: "fixture-model".to_owned(),
+                runtime: "fixture-runtime".to_owned(),
+                harness: "fixture-harness".to_owned(),
+            },
+            Digest::blake3(b"approved daemon executable"),
+        )
+        .expect("a non-builtin resource remains outside daemon executable binding");
     }
 }
