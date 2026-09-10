@@ -33,12 +33,16 @@ fn database_url() -> TestResult<String> {
     Ok(std::env::var("POLITEIA_STORAGE_TEST_DATABASE_URL")?)
 }
 
-fn binary() -> &'static str {
+fn client_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_politeia")
+}
+
+fn daemon_binary() -> &'static str {
     env!("CARGO_BIN_EXE_politeiad")
 }
 
 fn command(database_url: &str, arguments: &[&Path]) -> Command {
-    let mut command = Command::new(binary());
+    let mut command = Command::new(client_binary());
     command.env("POLITEIA_DATABASE_URL", database_url);
     for argument in arguments {
         command.arg(argument);
@@ -104,9 +108,12 @@ fn require_source_capture(output: Output, phase: &str) -> TestResult<serde_json:
 }
 
 fn serve(database_url: &str, fixture: &ReferenceFixture) -> TestResult<Daemon> {
-    Ok(Daemon(
-        command(database_url, &[Path::new("serve"), &fixture.prefix()]).spawn()?,
-    ))
+    let mut command = Command::new(daemon_binary());
+    command
+        .env("POLITEIA_DATABASE_URL", database_url)
+        .arg("serve")
+        .arg(fixture.prefix());
+    Ok(Daemon(command.spawn()?))
 }
 
 fn await_status(database_url: &str, fixture: &ReferenceFixture) -> TestResult<LocalResponse> {
@@ -138,7 +145,7 @@ fn stop(mut daemon: Daemon) -> TestResult {
 fn staged_generation_inputs_bind_complete_public_artifacts() -> TestResult {
     let fixture = ReferenceFixture::new(
         ReferenceInstitutionKind::SoftwareDevelopment,
-        Path::new(binary()),
+        Path::new(daemon_binary()),
     );
     fs::create_dir_all(fixture.prefix().join("workspace"))?;
     let owner = fixture.owner_root_delegation();
@@ -215,7 +222,8 @@ fn staged_generation_inputs_bind_complete_public_artifacts() -> TestResult {
 #[ignore = "requires POLITEIA_STORAGE_TEST_DATABASE_URL and a disposable PostgreSQL instance"]
 fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     let database_url = database_url()?;
-    let executable = Path::new(binary());
+    assert_ne!(client_binary(), daemon_binary());
+    let executable = Path::new(daemon_binary());
     let software = ReferenceFixture::new(ReferenceInstitutionKind::SoftwareDevelopment, executable);
     let analytics = ReferenceFixture::new(ReferenceInstitutionKind::Analytics, executable);
     assert_ne!(software.kind.directory(), analytics.kind.directory());
