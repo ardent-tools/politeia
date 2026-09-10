@@ -152,7 +152,7 @@ impl Fixture {
         }
     }
 
-    fn binding(&self) -> PolicyBinding {
+    fn binding() -> PolicyBinding {
         let mut ladder = HardeningLadder::new();
         for rung in [
             HardeningState::Observed,
@@ -333,7 +333,7 @@ impl Fixture {
         let evidence = EvaluationEvidence::new(&runs, &activations, &[]);
         evaluate(
             &self.subject(),
-            &[self.binding()],
+            &[Self::binding()],
             &BTreeMap::from([(CONTROL.to_string(), self.detector())]),
             &evidence,
         )
@@ -378,7 +378,7 @@ fn absent_and_each_unresolved_result_have_distinct_refusals() {
     assert_eq!(
         evaluate(
             &fixture.subject(),
-            &[fixture.binding()],
+            &[Fixture::binding()],
             &BTreeMap::from([(CONTROL.to_string(), fixture.detector())]),
             &empty,
         ),
@@ -616,7 +616,7 @@ fn waiver_requires_exact_delegated_authority_and_then_excuses_a_violation() {
     let evidence = EvaluationEvidence::new(&runs, &activations, &waivers);
     let decision = evaluate(
         &fixture.subject(),
-        &[fixture.binding()],
+        &[Fixture::binding()],
         &BTreeMap::from([(CONTROL.to_string(), fixture.detector())]),
         &evidence,
     )

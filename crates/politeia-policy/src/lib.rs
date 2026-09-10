@@ -6,6 +6,7 @@
 
 #![deny(missing_docs)]
 
+pub mod bootstrap;
 pub mod evaluate;
 pub mod hardening;
 pub mod waiver;
