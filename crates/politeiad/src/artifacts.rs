@@ -474,6 +474,34 @@ impl VerifiedGenerationArtifact {
         &self.generation
     }
 
+    /// Reread one named artifact component and bind its bytes to this verified
+    /// generation on every access.
+    ///
+    /// Verification at bundle-open time is not sufficient: filesystem bytes
+    /// can still change afterwards. The role is resolved from the generation's
+    /// approved component map, then the digest-addressed file is rehashed.
+    pub fn component_bytes(&self, role: &str) -> Result<Vec<u8>, ArtifactError> {
+        let expected = expected_components(&self.generation)?;
+        let digest = expected
+            .get(role)
+            .ok_or_else(|| ArtifactError::MissingComponent(role.to_owned()))?;
+        let bytes = fs::read(self.directory.join("components").join(digest.as_str()))?;
+        if Digest::blake3(&bytes) != *digest {
+            return Err(ArtifactError::Substitution(role.to_owned()));
+        }
+        Ok(bytes)
+    }
+
+    /// Reread the exact policy bundle bound into this verified generation.
+    pub fn policy_bytes(&self) -> Result<Vec<u8>, ArtifactError> {
+        self.component_bytes("policy")
+    }
+
+    /// Reread the exact execution registry bound into this verified generation.
+    pub fn execution_registry_bytes(&self) -> Result<Vec<u8>, ArtifactError> {
+        self.component_bytes("component:execution_registry")
+    }
+
     /// Return the stored manifest digest.
     pub fn manifest_digest(&self) -> &Digest {
         &self.manifest_digest
@@ -1056,5 +1084,37 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "test mutates a component after the verified handle is created"
+    )]
+    fn verified_component_reads_rehash_bytes_after_initial_verification() {
+        let directory = TestDirectory::new();
+        let fixture = fixture(true);
+        let (_, _, artifact) = publish_fixture(&fixture, directory.path());
+        assert_eq!(
+            artifact.policy_bytes().expect("policy bytes reread"),
+            b"policy"
+        );
+        let policy = Digest::blake3(b"policy");
+        fs::write(
+            artifact
+                .directory()
+                .join("components")
+                .join(policy.as_str()),
+            b"changed after verification",
+        )
+        .expect("test mutates policy component");
+        assert!(matches!(
+            artifact.policy_bytes(),
+            Err(ArtifactError::Substitution(role)) if role == "policy"
+        ));
+        assert!(matches!(
+            artifact.execution_registry_bytes(),
+            Ok(bytes) if bytes == component_bytes("execution_registry")
+        ));
     }
 }

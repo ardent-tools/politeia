@@ -740,3 +740,23 @@ fn generation_input_digest(inputs: &RuntimeGenerationInputs) -> Result<Digest, C
         .map(|bytes| Digest::blake3(&bytes))
         .map_err(refusal)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::confined;
+
+    #[test]
+    fn artifact_inputs_are_relative_to_the_installed_workspace() {
+        let root = Path::new("/installed/workspace");
+        assert_eq!(
+            confined(root, Path::new("approved/policy.json"))
+                .expect("relative input is installed below the workspace"),
+            root.join("approved/policy.json")
+        );
+        assert!(confined(root, Path::new("../outside")).is_err());
+        assert!(confined(root, Path::new("/outside")).is_err());
+        assert!(confined(root, &PathBuf::from("a/../../outside")).is_err());
+    }
+}
