@@ -299,7 +299,7 @@ impl PoliteiadService {
             })?,
         );
         if bootstrap.digest() != admitted.payload().input.generation.digest() {
-            return self
+            return Box::pin(self
                 .compile_active_context(
                     &durable,
                     &wire,
@@ -313,8 +313,8 @@ impl PoliteiadService {
                                 .to_string(),
                         )
                     })?,
-                )
-                .await;
+                ))
+            .await;
         }
         if active_submission.is_some() {
             return Err(CoordinatorError::Refused(
@@ -472,7 +472,7 @@ impl PoliteiadService {
             evidence_refs: Vec::new(),
         };
         if bootstrap.digest() != admitted.payload().input.generation.digest() {
-            return self
+            return Box::pin(self
                 .discover_active_capabilities(
                     &durable,
                     &wire,
@@ -486,8 +486,8 @@ impl PoliteiadService {
                                 .to_string(),
                         )
                     })?,
-                )
-                .await;
+                ))
+            .await;
         }
         if active_submission.is_some() {
             return Err(CoordinatorError::Refused(

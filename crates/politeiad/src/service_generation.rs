@@ -793,10 +793,6 @@ impl PoliteiadService {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "reconstruction keeps separately admitted provenance axes explicit"
-    )]
     async fn commissioning_record(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,

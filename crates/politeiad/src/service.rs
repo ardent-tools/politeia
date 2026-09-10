@@ -261,7 +261,9 @@ impl PoliteiadService {
     ) -> Result<OperationResult, CoordinatorError> {
         match operation {
             SemanticOperation::Status => self.status().await,
-            SemanticOperation::SnapshotSource { request } => self.capture_source(request).await,
+            SemanticOperation::SnapshotSource { request } => {
+                Box::pin(self.capture_source(request)).await
+            }
             SemanticOperation::Initialize { .. } => Err(CoordinatorError::Refused(
                 "initialization is a local host trust-anchor action, not a running-daemon request"
                     .to_string(),
@@ -949,20 +951,19 @@ impl PoliteiadService {
                     "historical delegation envelope signer is not its semantic issuer".to_string(),
                 ));
             }
-            current = match admitted.payload().parent.clone() {
-                Some(parent) => parent,
-                None => {
-                    if admitted.payload().issuer != self.workspace.owner {
-                        return Err(CoordinatorError::Refused(
-                            "historical delegation chain is not rooted in the installed owner"
-                                .to_string(),
-                        ));
-                    }
-                    leaf_to_root.push(admitted);
-                    break;
+            if let Some(parent) = admitted.payload().parent.clone() {
+                current = parent;
+                leaf_to_root.push(admitted);
+            } else {
+                if admitted.payload().issuer != self.workspace.owner {
+                    return Err(CoordinatorError::Refused(
+                        "historical delegation chain is not rooted in the installed owner"
+                            .to_string(),
+                    ));
                 }
-            };
-            leaf_to_root.push(admitted);
+                leaf_to_root.push(admitted);
+                break;
+            }
         }
         leaf_to_root.reverse();
         if leaf_to_root
