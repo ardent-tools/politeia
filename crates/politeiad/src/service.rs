@@ -11,7 +11,7 @@ use std::{
 };
 
 use politeia_core::{
-    Delegation,
+    Delegation, Digest,
     commissioning::CommissionerGrantRecord,
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     institution::{InstitutionBoundary, InstitutionWorkspace},

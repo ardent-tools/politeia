@@ -276,6 +276,15 @@ impl PoliteiadService {
         );
         let request_digest = durable_signed_wire_digest(&wire)?;
         let population = disclosure_population(&result)?;
+        let input_digest = Digest::blake3(
+            &politeia_core::canonical::to_canonical_bytes(&(
+                request_digest.clone(),
+                population.clone(),
+            ))
+            .map_err(|error| {
+                CoordinatorError::Refused(format!("learning input cannot bind: {error}"))
+            })?,
+        );
         let data_classes = result
             .items
             .iter()
@@ -312,6 +321,7 @@ impl PoliteiadService {
             request: request_digest,
             population,
             runtime: admitted.payload().input.generation.clone(),
+            input_digest: input_digest.clone(),
         };
         let dispatcher = Dispatcher::new(
             policy,
@@ -334,10 +344,7 @@ impl PoliteiadService {
         );
         let intent = OperationIntent {
             principal: admitted.payload().requester.clone(),
-            input_digest: Digest::blake3(
-                &politeia_core::canonical::to_canonical_bytes(&(request_digest, population))
-                    .map_err(|error| CoordinatorError::Refused(format!("learning input cannot bind: {error}")))?,
-            ),
+            input_digest,
             delegation_chain: authority
                 .iter()
                 .map(|grant| grant.payload().clone())
@@ -1106,6 +1113,7 @@ struct LearningDisclosurePolicy<'policy, P> {
     resources: BTreeSet<String>,
     budget: ResourceBudget,
     idempotency_key: String,
+    input_digest: Digest,
     subject: Digest,
     population: Digest,
 }
@@ -1119,6 +1127,7 @@ impl<'policy, P> LearningDisclosurePolicy<'policy, P> {
         action: impl Into<String>,
         resources: BTreeSet<String>,
         request: &LearningDisclosureIngress<T>,
+        input_digest: Digest,
         subject: Digest,
         population: Digest,
     ) -> Self {
@@ -1131,6 +1140,7 @@ impl<'policy, P> LearningDisclosurePolicy<'policy, P> {
             resources,
             budget: request.budget.clone(),
             idempotency_key: format!("learning:{}", request.id.0),
+            input_digest,
             subject,
             population,
         }
@@ -1139,6 +1149,9 @@ impl<'policy, P> LearningDisclosurePolicy<'policy, P> {
     fn verify(&self, intent: &OperationIntent) -> Result<(), LearningDisclosureRefusal> {
         if intent.principal != self.requester {
             return Err(LearningDisclosureRefusal::RequesterMismatch);
+        }
+        if intent.input_digest != self.input_digest {
+            return Err(LearningDisclosureRefusal::InputBindingMismatch);
         }
         if intent.delegation_chain != self.authority {
             return Err(LearningDisclosureRefusal::AuthorityMismatch);
@@ -1206,6 +1219,7 @@ enum LearningDisclosureRefusal {
     ReplayKeyMismatch,
     ExecutionAssignment,
     DecisionBindingMismatch,
+    InputBindingMismatch,
 }
 
 impl fmt::Display for LearningDisclosureRefusal {
@@ -1231,6 +1245,9 @@ impl fmt::Display for LearningDisclosureRefusal {
             }
             Self::DecisionBindingMismatch => {
                 "policy decision does not bind the signed request and selected source population"
+            }
+            Self::InputBindingMismatch => {
+                "disclosure intent does not bind the signed request and selected source population"
             }
         };
         formatter.write_str(message)
@@ -1360,6 +1377,7 @@ struct ContextDisclosurePort {
     request: Digest,
     population: Digest,
     runtime: RuntimeGenerationId,
+    input_digest: Digest,
 }
 impl EffectPort for ContextDisclosurePort {
     type Output = OperationResult;
@@ -1378,6 +1396,7 @@ impl EffectPort for ContextDisclosurePort {
             || effect.lease().decision().subject != self.request
             || effect.lease().decision().population != self.population
             || effect.lease().runtime() != &self.runtime
+            || effect.lease().input_digest() != &self.input_digest
         {
             return Err(ContextPortError);
         }

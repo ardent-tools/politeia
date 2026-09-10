@@ -82,6 +82,7 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             id: EffectLeaseId::new(),
             reservation_id: BudgetReservationId::new(),
             principal: intent.principal.clone(),
+            input_digest: intent.input_digest.clone(),
             delegation_chain: intent.delegation_chain.clone(),
             operation: intent.operation.clone(),
             resources: intent.resources.clone(),

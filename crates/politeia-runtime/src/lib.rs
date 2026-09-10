@@ -215,6 +215,7 @@ struct LeaseClaims {
     id: EffectLeaseId,
     reservation_id: BudgetReservationId,
     principal: PrincipalId,
+    input_digest: Digest,
     delegation_chain: Vec<Delegation>,
     operation: OperationSpec,
     resources: BTreeSet<String>,
@@ -268,6 +269,10 @@ impl EffectLease {
     /// The principal the lease was issued to.
     pub fn principal(&self) -> &PrincipalId {
         &self.claims.principal
+    }
+    /// Digest of the exact authenticated semantic input bound into the intent.
+    pub fn input_digest(&self) -> &Digest {
+        &self.claims.input_digest
     }
     /// The exact root-to-leaf delegation identities bound to the lease.
     pub fn delegation_chain(&self) -> &[Delegation] {
