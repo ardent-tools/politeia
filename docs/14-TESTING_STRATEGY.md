@@ -29,7 +29,7 @@ Testing is organized by claim, not only by crate.
 
 ## Bounded commissioning acceptance suite
 
-The first proof must implement the `POL-A` through `POL-L` claims registered in `12-ASSURANCE_CASE.md`, using only one institution workspace, adapter, approval, generation, handoff/revocation, and a two-resource routing fixture.
+The first proof must implement the `POL-A` through `POL-L` and `POL-N` through `POL-Q` claims registered in `12-ASSURANCE_CASE.md`, using two separate synthetic reference institutions for software development and analytics. Each uses the same public-source install, local PostgreSQL, service, administrative CLI, read-only source adapter, authenticated approvals, signed generation, handoff/revocation, replacement maintainer, and deterministic-versus-ineligible-remote routing path. The model includes approved institutional knowledge before an immediate operational use; grants and projections remain bounded.
 
 - `POL-A`: commission in a clean client-controlled fixture from public source, then emit exact generation and handoff receipts.
 - `POL-B`: prove no client secret, state, log, or inference request enters a commissioner store; revoke the commissioner and run an operational canary.
@@ -46,11 +46,11 @@ The first proof must implement the `POL-A` through `POL-L` claims registered in 
 
 Each claim needs a positive case, a negative/adversarial case, and an explicit falsifier. Receipts bind the exact source, workspace, generation, policy, lifecycle, execution-resource, adapter, and harness identities. Unit tests may prove typed invariants; physical custody, network disconnection, account replacement, and clean-machine operation require deployment evidence and may not be claimed from an in-memory fixture.
 
-## Follow-on proof packages
+The executable package must exercise process and database boundaries: race two competing admissions, restart after reservation, interrupt after attempt issuance but before completion, and prove replay/budget state survives. Retry serialization conflicts only before an effect is invoked. Re-open durable records through their authenticated semantic admission path. Do not substitute caller-controlled role labels, wire evidence, or an in-memory authority mirror for installed owner trust and current durable grants/revocations. Verify a tampered signature, wrong signer, unauthorized registered signer, wrong workspace, changed observation, stale candidate, and missing evidence each refuse the intended transition.
 
-`POL-O` closes Phase 0 for the first enforced control. The phase-owned `POL-M`, `POL-N`, `POL-P`,
-and `POL-Q` claims refine later acceptance and do not expand the smaller `POL-A` through `POL-L`
-commissioning slice. Each public contract requires its proof package before implementation credit:
+## Refining proof packages
+
+`POL-O` establishes the first enforced control. `POL-N`, `POL-P`, and `POL-Q` belong to the first learning and commissioning package; broader disconnected delivery under `POL-M` follows. Each public contract requires its proof package before implementation credit:
 
 - `POL-M`: vary delivery state, execution outcome, epistemic resolution, and replay disposition
   independently. Issue an immutable envelope, withhold outcome evidence, and prove an overlapping
