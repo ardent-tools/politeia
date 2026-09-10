@@ -283,11 +283,10 @@ impl PoliteiadService {
     }
 
     async fn status(&self) -> Result<OperationResult, CoordinatorError> {
-        let active_generation = self
-            .storage
-            .load_active_generation(&self.scope)
-            .await
-            .map_err(|error| storage_refusal(&error))?
+        let durable = self.durable_snapshot().await?;
+        let active_generation = durable
+            .active_generation
+            .as_ref()
             .map(|digest| digest.as_str().to_string());
         Ok(OperationResult::Coordinated {
             result: json!({
@@ -295,6 +294,7 @@ impl PoliteiadService {
                 "workspace": self.workspace.id,
                 "trust_domain": self.workspace.trust_domain,
                 "active_generation": active_generation,
+                "revision": durable.revision,
             }),
             evidence_refs: Vec::new(),
         })
