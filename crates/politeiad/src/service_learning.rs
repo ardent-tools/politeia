@@ -52,7 +52,8 @@ pub struct LearningIngress<T> {
 ///
 /// The signed binding carries the institution-owned content bytes only so the
 /// daemon can verify `content_digest == proposition` before it creates a
-/// context reference. It never returns those bytes through this API.
+/// context reference. After delegation, audience, sink, data-class, and trust
+/// checks select it, the coordinator returns those exact approved bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningSourceRequest {
@@ -105,7 +106,7 @@ pub struct CorrectionViewRequest {
 }
 
 /// Typed, inert learning documents accepted under `commissioning.learning`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LearningRequest {
     /// Persist one owner-pinned approved content binding for later hydration.
