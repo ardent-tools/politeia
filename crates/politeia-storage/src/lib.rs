@@ -436,16 +436,28 @@ impl PostgresStorage {
     }
 
     /// Apply the versioned PostgreSQL schema migrations.
+    ///
+    /// A transaction-scoped database lock serializes first-start DDL across
+    /// independent daemon processes. It releases on error or connection loss;
+    /// a process cannot leave a half-applied version marked complete.
     pub async fn migrate(&self) -> Result<(), StorageError> {
         let mut client = self.client().await?;
-        client
+        let transaction = client.transaction().await.map_err(StorageError::Database)?;
+        transaction
+            .query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended('politeia.schema-migrations', 0))",
+                &[],
+            )
+            .await
+            .map_err(StorageError::Database)?;
+        transaction
             .batch_execute(
                 "CREATE TABLE IF NOT EXISTS politeia_schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)",
             )
             .await
             .map_err(StorageError::Database)?;
         for (name, sql) in MIGRATIONS {
-            let exists = client
+            let exists = transaction
                 .query_opt(
                     "SELECT 1 FROM politeia_schema_migrations WHERE name = $1",
                     &[name],
@@ -453,12 +465,6 @@ impl PostgresStorage {
                 .await
                 .map_err(StorageError::Database)?;
             if exists.is_none() {
-                let transaction = client
-                    .build_transaction()
-                    .isolation_level(IsolationLevel::Serializable)
-                    .start()
-                    .await
-                    .map_err(StorageError::Database)?;
                 transaction
                     .batch_execute(sql)
                     .await
@@ -470,10 +476,9 @@ impl PostgresStorage {
                     )
                     .await
                     .map_err(StorageError::Database)?;
-                transaction.commit().await.map_err(StorageError::Database)?;
             }
         }
-        Ok(())
+        transaction.commit().await.map_err(StorageError::Database)
     }
 
     /// Create a workspace once, preserving its signed initial model.
