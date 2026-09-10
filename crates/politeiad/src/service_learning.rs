@@ -66,7 +66,7 @@ pub struct LearningIngress<T> {
 /// key before its effect port may return any selected bytes or capability
 /// identities.  Keeping this distinct from [`LearningIngress`] makes a
 /// missing budget unrepresentable at the protected read boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningDisclosureIngress<T> {
     /// Stable request identity used as the durable replay key.
@@ -79,15 +79,6 @@ pub struct LearningDisclosureIngress<T> {
     pub budget: ResourceBudget,
     /// Exact inert context or discovery input.
     pub input: T,
-    /// Complete signed active-generation operation admission material.
-    ///
-    /// Bootstrap disclosures have no active generation and therefore must omit
-    /// this field. Active disclosures carry a separately principal-signed
-    /// operation intent, deterministic routing inputs, capability proofs, and
-    /// independently signed policy-control evidence. The service derives and
-    /// compares that intent before passing it to the shared admission seam.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_submission: Option<OperationSubmission>,
 }
 
 /// Owner-pinned content and eligibility metadata for one approved fact.
@@ -160,11 +151,21 @@ pub enum LearningRequest {
     CompileContext {
         /// Signed requester/delegation-bound request.
         request: SignedAdmissionWire<LearningDisclosureIngress<ContextRequest>>,
+        /// Separately signed active-generation operation, routing, capability,
+        /// and control material. It stays outside `request`, whose wire digest
+        /// is bound by the operation input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_submission: Option<OperationSubmission>,
     },
     /// Discover descriptive active-generation capabilities.
     DiscoverCapabilities {
         /// Signed requester/delegation-bound request.
         request: SignedAdmissionWire<LearningDisclosureIngress<CapabilityRequest>>,
+        /// Separately signed active-generation operation, routing, capability,
+        /// and control material. It stays outside `request`, whose wire digest
+        /// is bound by the operation input.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_submission: Option<OperationSubmission>,
     },
     /// Record feedback as an inert, append-only correction proposal.
     RecordFeedback {
@@ -201,12 +202,14 @@ impl PoliteiadService {
         })?;
         match request {
             LearningRequest::RegisterSource { source } => self.register_source(source).await,
-            LearningRequest::CompileContext { request } => {
-                Box::pin(self.compile_context(request)).await
-            }
-            LearningRequest::DiscoverCapabilities { request } => {
-                Box::pin(self.discover_capabilities(request)).await
-            }
+            LearningRequest::CompileContext {
+                request,
+                active_submission,
+            } => Box::pin(self.compile_context(request, active_submission)).await,
+            LearningRequest::DiscoverCapabilities {
+                request,
+                active_submission,
+            } => Box::pin(self.discover_capabilities(request, active_submission)).await,
             LearningRequest::RecordFeedback { request } => self.record_feedback(request).await,
             LearningRequest::CorrectionView { request } => self.correction_view(request).await,
         }
@@ -246,6 +249,7 @@ impl PoliteiadService {
     async fn compile_context(
         &self,
         wire: SignedAdmissionWire<LearningDisclosureIngress<ContextRequest>>,
+        active_submission: Option<OperationSubmission>,
     ) -> Result<OperationResult, CoordinatorError> {
         let admitted = self
             .anchors()
@@ -303,10 +307,16 @@ impl PoliteiadService {
                     &resources,
                     &output,
                     input_digest,
+                    active_submission.ok_or_else(|| {
+                        CoordinatorError::Refused(
+                            "active disclosure requires signed operation, routing, capability, and control evidence"
+                                .to_string(),
+                        )
+                    })?,
                 )
                 .await;
         }
-        if admitted.payload().active_submission.is_some() {
+        if active_submission.is_some() {
             return Err(CoordinatorError::Refused(
                 "bootstrap disclosure must not carry active operational admission material"
                     .to_string(),
@@ -390,6 +400,7 @@ impl PoliteiadService {
     async fn discover_capabilities(
         &self,
         wire: SignedAdmissionWire<LearningDisclosureIngress<CapabilityRequest>>,
+        active_submission: Option<OperationSubmission>,
     ) -> Result<OperationResult, CoordinatorError> {
         let admitted = self
             .anchors()
@@ -469,10 +480,16 @@ impl PoliteiadService {
                     &resources,
                     &output,
                     input_digest,
+                    active_submission.ok_or_else(|| {
+                        CoordinatorError::Refused(
+                            "active disclosure requires signed operation, routing, capability, and control evidence"
+                                .to_string(),
+                        )
+                    })?,
                 )
                 .await;
         }
-        if admitted.payload().active_submission.is_some() {
+        if active_submission.is_some() {
             return Err(CoordinatorError::Refused(
                 "bootstrap discovery must not carry active operational admission material"
                     .to_string(),
@@ -507,6 +524,7 @@ impl PoliteiadService {
         resources: &BTreeSet<String>,
         output: &OperationResult,
         input_digest: Digest,
+        submission: OperationSubmission,
     ) -> Result<OperationResult, CoordinatorError> {
         self.active_disclosure(
             durable,
@@ -515,6 +533,7 @@ impl PoliteiadService {
             resources,
             output,
             input_digest,
+            submission,
             &wire.payload.input.generation,
             &wire.payload.input.audience,
             COMPILE_CONTEXT_OPERATION,
@@ -535,6 +554,7 @@ impl PoliteiadService {
         resources: &BTreeSet<String>,
         output: &OperationResult,
         input_digest: Digest,
+        submission: OperationSubmission,
     ) -> Result<OperationResult, CoordinatorError> {
         self.active_disclosure(
             durable,
@@ -543,6 +563,7 @@ impl PoliteiadService {
             resources,
             output,
             input_digest,
+            submission,
             &wire.payload.input.generation,
             &disclosure_audience(delegation_leaf(authority)?.payload())?,
             DISCOVER_CAPABILITIES_OPERATION,
@@ -563,17 +584,12 @@ impl PoliteiadService {
         resources: &BTreeSet<String>,
         output: &OperationResult,
         input_digest: Digest,
+        submission: OperationSubmission,
         generation: &RuntimeGenerationId,
         audience: &str,
         operation_name: &str,
         action: &str,
     ) -> Result<OperationResult, CoordinatorError> {
-        let submission = wire.payload.active_submission.clone().ok_or_else(|| {
-            CoordinatorError::Refused(
-                "active disclosure requires signed operation, routing, capability, and control evidence"
-                    .to_string(),
-            )
-        })?;
         let signed_intent = self
             .anchors()
             .admit_expected(AdmissionKind::OperationIntent, submission.intent.clone())
