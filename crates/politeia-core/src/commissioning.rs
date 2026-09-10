@@ -17,6 +17,8 @@ mod subjects;
 #[cfg(test)]
 mod tests;
 
+pub use record::CommissioningRebuild;
+
 pub use subjects::{
     commissioning_approval_subject_digest, commissioning_observation_set_digest,
     commissioning_observation_subject_digest, unresolved_obligations_digest,

@@ -531,11 +531,13 @@ impl PoliteiadService {
         let record = CommissioningRecord::rebuild(
             record_id.clone(),
             self.workspace(),
-            &grants,
-            &evidence,
-            &selection.observations,
-            &selection.approvals,
-            selection.unresolved_obligations.clone(),
+            politeia_core::commissioning::CommissioningRebuild {
+                grants: &grants,
+                evidence: &evidence,
+                observation_ids: &selection.observations,
+                approval_ids: &selection.approvals,
+                unresolved_obligations: selection.unresolved_obligations.clone(),
+            },
         )
         .map_err(refusal)?;
         if record.digest().map_err(refusal)? != *expected_digest {

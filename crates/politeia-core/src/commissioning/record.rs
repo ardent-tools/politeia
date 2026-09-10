@@ -22,6 +22,23 @@ use super::{
     unresolved_obligations_digest,
 };
 
+/// Re-admitted durable facts used to reconstruct commissioning provenance.
+///
+/// This groups the independent authority and evidence axes so reconstruction
+/// cannot grow an unreviewable positional argument list.
+pub struct CommissioningRebuild<'a> {
+    /// Trusted commissioner grants at the reconstruction instant.
+    pub grants: &'a TrustedCommissionerGrantRegistry,
+    /// Re-admitted evidence records.
+    pub evidence: &'a TrustedEvidenceRegistry,
+    /// Evidence identities selected as commissioning observations.
+    pub observation_ids: &'a BTreeSet<EvidenceId>,
+    /// Evidence identities selected as owner approvals.
+    pub approval_ids: &'a BTreeSet<EvidenceId>,
+    /// Explicit unresolved obligations carried by the rebuilt record.
+    pub unresolved_obligations: BTreeSet<String>,
+}
+
 impl CommissioningApproval {
     /// Exact typed subject approved by the institution owner.
     pub fn approved(&self) -> &ApprovedCommissioningSubject {
@@ -267,19 +284,15 @@ impl CommissioningRecord {
     pub fn rebuild(
         id: CommissioningRecordId,
         workspace: &InstitutionWorkspace,
-        grants: &TrustedCommissionerGrantRegistry,
-        evidence: &TrustedEvidenceRegistry,
-        observation_ids: &BTreeSet<EvidenceId>,
-        approval_ids: &BTreeSet<EvidenceId>,
-        unresolved_obligations: BTreeSet<String>,
+        inputs: CommissioningRebuild<'_>,
     ) -> Result<Self, CommissioningError> {
         let mut record = Self::new(
             workspace,
-            grants,
-            evidence,
-            observation_ids,
-            approval_ids,
-            unresolved_obligations,
+            inputs.grants,
+            inputs.evidence,
+            inputs.observation_ids,
+            inputs.approval_ids,
+            inputs.unresolved_obligations,
         )?;
         record.id = id;
         Ok(record)
