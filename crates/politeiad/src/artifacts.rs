@@ -66,6 +66,25 @@ pub struct VerifiedGenerationArtifact {
     manifest_digest: Digest,
 }
 
+/// Result of exercising the immutable-bundle verifier against a real bundle
+/// and one exact, isolated component substitution.
+///
+/// This is deliberately unsigned.  It is input to independently signed
+/// lifecycle assurance, never evidence authority by itself.
+#[derive(Clone, Debug)]
+pub(crate) struct ArtifactCalibration {
+    /// Bundle accepted by the installed verifier before calibration.
+    pub artifact: VerifiedGenerationArtifact,
+    /// Exact approved role whose copied bytes were substituted.
+    pub planted_component: String,
+    /// Approved digest naming the copied component file.
+    pub planted_component_digest: Digest,
+    /// Digest of the exact replacement bytes written into the copied bundle.
+    pub mutation_digest: Digest,
+    /// Number of immutable bundle components exercised by the verifier.
+    pub coverage: u64,
+}
+
 /// Artifact materialization or verification failure.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -108,6 +127,30 @@ impl std::error::Error for ArtifactError {}
 impl From<io::Error> for ArtifactError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+/// A private temporary parent for one adversarial verifier copy.
+struct CalibrationDirectory(PathBuf);
+
+impl CalibrationDirectory {
+    fn new() -> Result<Self, ArtifactError> {
+        let path = std::env::temp_dir().join(format!(
+            "politeiad-generation-calibration-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for CalibrationDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -447,6 +490,83 @@ impl GenerationArtifactBuilder {
         })
     }
 
+    /// Run the installed verifier over the published bundle, then over a
+    /// freshly copied bundle with one declared executable component replaced.
+    ///
+    /// A calibration is useful only when the exact same verifier accepts the
+    /// known-good bundle and returns its specific substitution refusal for the
+    /// planted copy.  The source bundle is never modified.
+    pub(crate) fn calibrate(
+        &self,
+        anchors: &InstitutionTrustAnchors,
+        workspace: &InstitutionWorkspace,
+        commissioning: &CommissioningRecord,
+        generation_digest: &Digest,
+    ) -> Result<ArtifactCalibration, ArtifactError> {
+        let artifact = self.verify(anchors, workspace, commissioning, generation_digest)?;
+        let components = artifact.component_digests()?;
+        let planted_component = "component:executable".to_owned();
+        let planted_component_digest = components
+            .get(&planted_component)
+            .ok_or_else(|| ArtifactError::MissingComponent(planted_component.clone()))?
+            .clone();
+        let calibration = CalibrationDirectory::new()?;
+        let copied_bundle = calibration.path().join(generation_digest.as_str());
+        fs::create_dir(&copied_bundle)?;
+        fs::copy(
+            artifact.directory().join("manifest.json"),
+            copied_bundle.join("manifest.json"),
+        )?;
+        let copied_components = copied_bundle.join("components");
+        fs::create_dir(&copied_components)?;
+        for digest in components.values() {
+            let destination = copied_components.join(digest.as_str());
+            if !destination.exists() {
+                fs::copy(
+                    artifact
+                        .directory()
+                        .join("components")
+                        .join(digest.as_str()),
+                    &destination,
+                )?;
+            }
+        }
+        let mutation = format!(
+            "politeia-generation-calibration-substitution-v1:{}",
+            planted_component_digest.as_str()
+        )
+        .into_bytes();
+        let mutation_digest = Digest::blake3(&mutation);
+        fs::write(
+            copied_components.join(planted_component_digest.as_str()),
+            mutation,
+        )?;
+        let copied = Self::new(calibration.path().to_owned());
+        match copied.verify(anchors, workspace, commissioning, generation_digest) {
+            Err(ArtifactError::Substitution(found))
+                if found == planted_component_digest.as_str() => {}
+            Err(error) => {
+                return Err(ArtifactError::Encoding(format!(
+                    "calibration expected substitution of {planted_component}, verifier returned: {error}"
+                )));
+            }
+            Ok(_) => {
+                return Err(ArtifactError::Encoding(format!(
+                    "calibration verifier accepted planted substitution of {planted_component}"
+                )));
+            }
+        }
+        Ok(ArtifactCalibration {
+            artifact,
+            planted_component,
+            planted_component_digest,
+            mutation_digest,
+            coverage: u64::try_from(components.len()).map_err(|_| {
+                ArtifactError::Encoding("component count cannot fit lifecycle coverage".to_owned())
+            })?,
+        })
+    }
+
     /// Recover inert provenance selection material from an immutable bundle.
     ///
     /// Callers must re-admit the durable signed inputs and rebuild the
@@ -480,6 +600,11 @@ impl VerifiedGenerationArtifact {
     /// Return the rederived generation.
     pub fn generation(&self) -> &RuntimeGeneration {
         &self.generation
+    }
+
+    /// Return every declared immutable role and its approved byte digest.
+    pub(crate) fn component_digests(&self) -> Result<BTreeMap<String, Digest>, ArtifactError> {
+        expected_components(&self.generation)
     }
 
     /// Reread one named artifact component and bind its bytes to this verified
@@ -1049,6 +1174,50 @@ mod tests {
             ),
             Err(ArtifactError::Substitution(_))
         ));
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "test proves the lifecycle calibrator reaches the installed verifier"
+    )]
+    fn calibration_accepts_the_real_bundle_and_refuses_its_planted_substitution() {
+        let directory = TestDirectory::new();
+        let fixture = fixture(true);
+        let (builder, _, artifact) = publish_fixture(&fixture, directory.path());
+        let calibration = builder
+            .calibrate(
+                &anchors(&fixture),
+                &fixture.workspace,
+                &fixture.commissioning,
+                artifact.generation().id().digest(),
+            )
+            .expect("same verifier accepts known-good bytes and rejects the copied mutation");
+        assert_eq!(calibration.planted_component, "component:executable");
+        assert_eq!(
+            calibration.coverage,
+            u64::try_from(
+                4 + fixture.inputs.approved.schema_digests.len()
+                    + fixture.inputs.approved.adapter_digests.len()
+                    + fixture.inputs.approved.pack_digests.len()
+                    + fixture.inputs.approved.component_digests.len()
+            )
+            .expect("fixture component count fits coverage")
+        );
+        assert_ne!(
+            calibration.planted_component_digest, calibration.mutation_digest,
+            "the copied artifact contains a real replacement, not the approved bytes"
+        );
+        assert!(
+            builder
+                .verify(
+                    &anchors(&fixture),
+                    &fixture.workspace,
+                    &fixture.commissioning,
+                    artifact.generation().id().digest(),
+                )
+                .is_ok()
+        );
     }
 
     #[test]

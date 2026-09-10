@@ -42,6 +42,7 @@ use crate::{
         VerifiedGenerationArtifact,
     },
     service::PoliteiadService,
+    service_generation_validation::GenerationValidationReport,
 };
 
 const ACTIVATE_CONTROL: &str = "generation:activate";
@@ -165,6 +166,14 @@ pub enum GenerationRequest {
         /// Generation digest returned by publish.
         generation: Digest,
     },
+    /// Exercise the installed artifact verifier on an exact known-good bundle
+    /// and a private copied bundle with one planted substitution.
+    Validate {
+        /// Generation digest returned by publish.
+        generation: Digest,
+        /// Exact lifecycle control that will bind the unsigned report.
+        control: String,
+    },
     /// Compare-and-swap an admitted generation into the active slot.
     Activate {
         /// Target generation digest.
@@ -220,6 +229,18 @@ impl PoliteiadService {
             GenerationRequest::Verify { generation } => self.verify_generation(generation).await,
             GenerationRequest::Reproduce { generation } => {
                 self.reproduce_generation(generation).await
+            }
+            GenerationRequest::Validate {
+                generation,
+                control,
+            } => {
+                let report = self
+                    .generation_validation_report(generation, &control)
+                    .await?;
+                Ok(OperationResult::Coordinated {
+                    result: json!({ "validation": report }),
+                    evidence_refs: Vec::new(),
+                })
             }
             GenerationRequest::Activate {
                 generation,
@@ -388,6 +409,69 @@ impl PoliteiadService {
         Ok(artifact)
     }
 
+    /// Recompute one unsigned lifecycle-calibration report from the installed
+    /// artifact verifier.  This is intentionally separate from signed
+    /// assurance: the service can report what it observed but cannot mint the
+    /// producer or verifier evidence activation requires.
+    async fn generation_validation_report(
+        &self,
+        generation: Digest,
+        control: &str,
+    ) -> Result<GenerationValidationReport, CoordinatorError> {
+        if control != ACTIVATE_CONTROL && control != ROLLBACK_CONTROL {
+            return Err(CoordinatorError::Refused(
+                "generation validation control is not an installed lifecycle control".to_string(),
+            ));
+        }
+        let stored = self
+            .storage()
+            .load_generation(self.scope(), &generation)
+            .await
+            .map_err(storage_refusal)?;
+        let inputs = stored_inputs(&stored)?;
+        let admitted = self
+            .anchors()
+            .admit_expected(AdmissionKind::Generation, inputs)
+            .map_err(refusal)?;
+        if generation_input_digest(admitted.payload())? != stored.input_digest {
+            return Err(CoordinatorError::Refused(
+                "stored generation input digest differs from signed inputs".to_string(),
+            ));
+        }
+        let durable = self.durable_snapshot().await?;
+        let commissioning = self
+            .commissioning_record(
+                &durable,
+                &admitted.payload().commissioning_record,
+                &admitted.payload().commissioning_record_digest,
+                &self
+                    .load_commissioning_receipt(&durable, &admitted.payload().commissioning_record)
+                    .await?,
+            )
+            .await?;
+        let calibration = GenerationArtifactBuilder::new(self.layout().artifact_dir.clone())
+            .calibrate(
+                self.anchors(),
+                self.workspace(),
+                &commissioning,
+                &generation,
+            )
+            .map_err(refusal)?;
+        if calibration.artifact.manifest_digest() != &stored.artifact_digest {
+            return Err(CoordinatorError::Refused(
+                "stored artifact manifest differs from immutable artifact bytes".to_string(),
+            ));
+        }
+        GenerationValidationReport::from_calibration(
+            generation,
+            control,
+            self.workspace().policy_bundle.clone(),
+            self.workspace().policy_digest.clone(),
+            calibration,
+        )
+        .map_err(refusal)
+    }
+
     async fn activate_generation(
         &self,
         generation: Digest,
@@ -407,7 +491,9 @@ impl PoliteiadService {
             .load_generation(self.scope(), &generation)
             .await
             .map_err(storage_refusal)?;
-        self.verify_generation(generation.clone()).await?;
+        let validation = self
+            .generation_validation_report(generation.clone(), control)
+            .await?;
 
         let now = self.observed_at().await?;
         let context = AuthorityContext::new(
@@ -440,16 +526,34 @@ impl PoliteiadService {
             VerifiedActivation::admit(&proof, &proof_authority, &context).map_err(refusal)?;
         let artifact = stored.artifact_digest.clone();
         let run_value = authorized.run();
-        if run_value.control != control
-            || run_value.input_digest != generation
-            || run_value.subject != generation
-            || run_value.population != generation
-            || run_value.configuration_digest != artifact
-            || run_value.policy != self.workspace().policy_bundle
-            || run_value.policy_digest != self.workspace().policy_digest
+        let proof_value = verified.proof();
+        if validation.artifact_manifest != artifact
+            || run_value.control != validation.control
+            || run_value.control_version != validation.control_version
+            || run_value.input_digest != validation.generation
+            || run_value.subject != validation.generation
+            || run_value.population != validation.population
+            || run_value.configuration_digest != validation.artifact_manifest
+            || run_value.policy != validation.policy
+            || run_value.policy_digest != validation.policy_digest
+            || run_value.mediation_path != validation.mediation_path
+            || run_value.result != validation.known_good_result
+            || run_value.coverage != validation.coverage
+            || proof_value.control != validation.control
+            || proof_value.control_version != validation.control_version
+            || proof_value.configuration_digest != validation.artifact_manifest
+            || proof_value.policy != validation.policy
+            || proof_value.policy_digest != validation.policy_digest
+            || proof_value.population != validation.population
+            || proof_value.mediation_path != validation.mediation_path
+            || proof_value.known_good != validation.known_good
+            || proof_value.known_good_result != validation.known_good_result
+            || proof_value.planted_violation != validation.planted_violation
+            || proof_value.planted_violation_result != validation.planted_violation_result
         {
             return Err(CoordinatorError::Refused(
-                "control run does not bind the exact generation and installed policy".to_string(),
+                "signed lifecycle assurance differs from freshly calibrated artifact validation"
+                    .to_string(),
             ));
         }
         clean_claim(&[authorized], control, &generation, &verified).map_err(refusal)?;
