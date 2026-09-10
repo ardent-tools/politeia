@@ -264,6 +264,26 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         software_admission["delegation"],
         analytics_admission["delegation"]
     );
+    fs::copy(
+        &software.source_document,
+        software.prefix().join("workspace/institution.md"),
+    )?;
+    fs::copy(
+        &analytics.source_document,
+        analytics.prefix().join("workspace/institution.md"),
+    )?;
+    let software_capture = write_request(
+        &software,
+        "software-capture.json",
+        &software.source_capture_submission(&software_delegation),
+    )?;
+    let analytics_capture = write_request(
+        &analytics,
+        "analytics-capture.json",
+        &analytics.source_capture_submission(&analytics_delegation),
+    )?;
+    assert!(software_capture.is_file());
+    assert!(analytics_capture.is_file());
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;
     stop(software_daemon)?;

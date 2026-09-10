@@ -14,12 +14,15 @@ use std::{
 use ed25519_dalek::SigningKey;
 use jiff::{SignedDuration, Timestamp};
 use politeia_core::{
-    AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, InstitutionId,
-    InstitutionWorkspaceId, PolicyBundleId, PrincipalId, ResourceBudget,
+    AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, EvidenceId, InstitutionId,
+    InstitutionWorkspaceId, ObservationId, PolicyBundleId, PrincipalId, ResourceBudget,
+    SourceCaptureId,
+    evidence::{EvidenceRequest, IndependenceClass},
     generation::{ApprovedGenerationInputs, ReproducibilityContract},
     institution::{InstitutionWorkspace, TrustDomainId},
+    knowledge::{ObservationRequest, SourceCaptureRequest, observation_evidence_payload_digest},
     lifecycle::{DeploymentTopology, LifecycleProfile},
-    reconnaissance::RECONNOITRE_ACTION,
+    reconnaissance::{RECONNOITRE_ACTION, ReconnaissanceScope},
     trust::{AdmissionKind, SignedAdmissionWire, WorkspaceBootstrapRequest},
 };
 use politeiad::config::{HostTrustConfiguration, InstalledTrustAnchor};
@@ -113,6 +116,8 @@ pub(crate) struct ReferenceFixture {
     pub(crate) root: PathBuf,
     /// Actual checked-in synthetic source document copied into the source root.
     pub(crate) source_document: PathBuf,
+    /// Installed read-only adapter identity used by capture documents.
+    adapter: AdapterId,
     /// Inert host configuration passed to `politeiad initialize`.
     pub(crate) host_trust: HostTrustConfiguration,
     /// Separate signing material retained by the test process, never written to the host config.
@@ -162,6 +167,7 @@ impl ReferenceFixture {
         };
         let institution = InstitutionId::new();
         let workspace_id = InstitutionWorkspaceId::new();
+        let adapter = AdapterId::new();
         let approved_generation = ApprovedGenerationInputs {
             source_digest: Digest::blake3(
                 &fs::read(&source_document).expect("copied source is readable"),
@@ -176,7 +182,7 @@ impl ReferenceFixture {
                 ),
             )]),
             adapter_digests: BTreeMap::from([(
-                AdapterId::new(),
+                adapter.clone(),
                 Digest::blake3(
                     &fs::read(repository_root().join("crates/politeiad/src/source.rs"))
                         .expect("public source adapter is readable"),
@@ -266,6 +272,7 @@ impl ReferenceFixture {
             kind,
             root,
             source_document,
+            adapter,
             host_trust: HostTrustConfiguration {
                 workspace,
                 anchors,
@@ -342,6 +349,105 @@ impl ReferenceFixture {
             self.identities.owner_key(),
         )
         .expect("owner signs temporary commissioner delegation")
+    }
+
+    /// Produce one complete, raw signed source-capture submission.
+    ///
+    /// The caller copies `source_document` into the installed workspace before
+    /// it sends this document. The daemon independently reads that installed
+    /// file through its descriptor-bound adapter and compares this manifest.
+    pub(crate) fn source_capture_submission(&self, delegation: &Delegation) -> serde_json::Value {
+        let member = "institution.md".to_owned();
+        let bytes =
+            fs::read(&self.source_document).expect("public source document remains readable");
+        let members = vec![politeiad::source::SourceMember {
+            path: member.clone(),
+            content_digest: Digest::blake3(&bytes),
+            byte_len: u64::try_from(bytes.len()).expect("fixture source length fits in u64"),
+        }];
+        let content_manifest_digest = Digest::blake3(
+            &serde_json::to_vec(&members).expect("source member manifest serializes"),
+        );
+        let observed_at = Timestamp::now();
+        let scope = ReconnaissanceScope {
+            commissioner: self.identities.commissioner.clone(),
+            delegation: delegation.id.clone(),
+            sources: BTreeSet::from([format!("reference:{}:source", self.kind.directory())]),
+            adapters: BTreeSet::from([self.adapter.clone()]),
+            expires_at: delegation.expires_at,
+        };
+        let capture_request = SourceCaptureRequest {
+            id: SourceCaptureId::new(),
+            source: format!("reference:{}:source", self.kind.directory()),
+            adapter: self.adapter.clone(),
+            subject: Digest::blake3(self.kind.directory().as_bytes()),
+            statement: Digest::blake3(&bytes),
+            observed_at,
+            reconnaissance_delegation: delegation.id.clone(),
+            manifest: BTreeSet::from([member]),
+            descriptor_digest: Digest::blake3(
+                &serde_json::to_vec(&scope).expect("reconnaissance descriptor serializes"),
+            ),
+            content_manifest_digest,
+        };
+        let evidence_id = EvidenceId::new();
+        let observation_request = ObservationRequest {
+            id: ObservationId::new(),
+            capture: capture_request.id.clone(),
+            capture_manifest_digest: capture_request.content_manifest_digest.clone(),
+            source: capture_request.source.clone(),
+            adapter: capture_request.adapter.clone(),
+            subject: capture_request.subject.clone(),
+            statement: capture_request.statement.clone(),
+            observed_at,
+            evidence: evidence_id.clone(),
+        };
+        let evidence_request = EvidenceRequest {
+            id: evidence_id,
+            subject: observation_request.subject.clone(),
+            producer_delegation: delegation.id.clone(),
+            method: "synthetic descriptor-bound public source capture".to_owned(),
+            payload_digest: observation_evidence_payload_digest(
+                &self.host_trust.workspace.id,
+                &observation_request,
+            )
+            .expect("observation evidence payload binds canonically"),
+            observed_at,
+            independence: IndependenceClass::SelfReported,
+        };
+        let capture = SignedAdmissionWire::sign(
+            AdmissionKind::SourceCapture,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.commissioner.clone(),
+            capture_request,
+            self.identities.commissioner_key(),
+        )
+        .expect("commissioner signs source capture");
+        let evidence = SignedAdmissionWire::sign(
+            AdmissionKind::Evidence,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.commissioner.clone(),
+            evidence_request,
+            self.identities.commissioner_key(),
+        )
+        .expect("commissioner signs capture evidence");
+        let observation = SignedAdmissionWire::sign(
+            AdmissionKind::Observation,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.commissioner.clone(),
+            observation_request,
+            self.identities.commissioner_key(),
+        )
+        .expect("commissioner signs source observation");
+        serde_json::json!({
+            "capture": capture,
+            "evidence": evidence,
+            "observation": observation,
+            "reconnaissance": scope,
+        })
     }
 
     /// Write inert installed public-key configuration for the administrative CLI.
