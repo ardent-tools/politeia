@@ -296,6 +296,7 @@ struct OperationalExecutionDocument {
 #[derive(Clone, Debug)]
 pub struct AdmittedCapabilityVerifications {
     records: Vec<CapabilityVerificationRecord>,
+    authority_expires_at: Timestamp,
 }
 
 /// Immutable typed execution registry decoded from one verified generation.
@@ -530,6 +531,8 @@ pub(crate) struct AdmittedOperationalSubmission {
     capability_verifications: Vec<CapabilityVerificationEvidence>,
     assurance: Vec<OperationalControlEvidence>,
     admission_revision: i64,
+    admitted_at: Timestamp,
+    authorization_expires_at: Timestamp,
 }
 
 impl AdmittedOperationalSubmission {
@@ -592,6 +595,10 @@ impl AdmittedOperationalSubmission {
         Dispatcher<AdmittedOperationalDecision, P, PostgresAuthorizationLedger>,
         CoordinatorError,
     > {
+        let maximum_ttl = jiff::SignedDuration::from_mins(5).min(
+            self.authorization_expires_at
+                .duration_since(self.admitted_at),
+        );
         let config = DispatcherConfig::new(
             self.registry.policy().bundle().clone(),
             self.registry.policy().digest().clone(),
@@ -600,7 +607,7 @@ impl AdmittedOperationalSubmission {
                 "operational:{}",
                 self.registry.generation().digest().as_str()
             ),
-            jiff::SignedDuration::from_mins(5),
+            maximum_ttl,
             self.operation_chain.clone(),
             [self.registered.spec.clone()],
         )
@@ -758,6 +765,9 @@ impl PoliteiadService {
             &submission.assurance,
             now,
         )?;
+        let authorization_expires_at = policy
+            .expires_at
+            .min(admitted_capabilities.authority_expires_at);
         Ok(AdmittedOperationalSubmission {
             registry,
             registered,
@@ -771,6 +781,8 @@ impl PoliteiadService {
             capability_verifications: submission.capability_verifications,
             assurance: submission.assurance,
             admission_revision: durable.revision,
+            admitted_at: now,
+            authorization_expires_at,
         })
     }
 
@@ -976,6 +988,7 @@ impl PoliteiadService {
         let mut supplied_controls = BTreeSet::new();
         let mut run_producers = BTreeSet::new();
         let mut activation_verifiers = BTreeSet::new();
+        let mut authority_expires_at: Option<Timestamp> = None;
         for evidence in assurance {
             let run = self
                 .anchors()
@@ -1016,6 +1029,14 @@ impl PoliteiadService {
                 return Err(operational_refusal(
                     "control run authorization digest differs from its durable direct grant",
                 ));
+            }
+            for expires_at in [
+                run_authority.payload().expires_at,
+                activation_authority.payload().expires_at,
+            ] {
+                authority_expires_at = Some(
+                    authority_expires_at.map_or(expires_at, |current| current.min(expires_at)),
+                );
             }
             run_admissions.push(run);
             run_authorities.push(run_authority);
@@ -1082,6 +1103,9 @@ impl PoliteiadService {
         Ok(AdmittedOperationalDecision {
             intent: intent_digest,
             decision,
+            expires_at: authority_expires_at.ok_or_else(|| {
+                operational_refusal("operation assurance authority expiry is absent")
+            })?,
         })
     }
 
@@ -1099,6 +1123,7 @@ impl PoliteiadService {
         );
         let mut identities = BTreeSet::new();
         let mut records = Vec::with_capacity(submitted.len());
+        let mut authority_expires_at: Option<Timestamp> = None;
         for evidence in submitted {
             let verification = self
                 .anchors()
@@ -1126,6 +1151,11 @@ impl PoliteiadService {
                 &authority_resource,
             )
             .map_err(operational_refusal)?;
+            authority_expires_at = Some(
+                authority_expires_at.map_or(authority.payload().expires_at, |current| {
+                    current.min(authority.payload().expires_at)
+                }),
+            );
 
             let verification_digest = verification
                 .payload()
@@ -1157,7 +1187,12 @@ impl PoliteiadService {
             records.push(verification.into_payload());
         }
         records.sort_by(|left, right| left.id.cmp(&right.id));
-        Ok(AdmittedCapabilityVerifications { records })
+        Ok(AdmittedCapabilityVerifications {
+            records,
+            authority_expires_at: authority_expires_at.ok_or_else(|| {
+                operational_refusal("capability verification authority expiry is absent")
+            })?,
+        })
     }
 
     fn durable_evidence_wire(
@@ -1193,6 +1228,7 @@ impl PoliteiadService {
 pub(crate) struct AdmittedOperationalDecision {
     intent: Digest,
     decision: PolicyDecision,
+    expires_at: Timestamp,
 }
 
 impl AdmittedOperationalDecision {
