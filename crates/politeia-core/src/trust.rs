@@ -59,6 +59,8 @@ pub enum AdmissionKind {
     LearningFeedback,
     /// A requester-bound, evidence-resolved correction or supersession relation.
     LearningCorrection,
+    /// An exact runtime operation intent submitted by its requesting principal.
+    OperationIntent,
 }
 
 /// One public key installed by the institution, together with its narrow use.

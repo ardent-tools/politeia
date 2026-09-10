@@ -1,30 +1,192 @@
 //! Generation-bound operational policy, routing, and deterministic execution.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::{Future, ready},
+};
 
 use jiff::Timestamp;
 use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::{
-    Digest, ExecutionResourceId, OperationId, OperationSpec, RoutingDecisionId, RuntimeGenerationId,
+    AdapterId, BudgetReservationId, DataClass, Delegation, Digest, Effect, EffectLeaseId,
+    EvidenceId, ExecutionLocality, ExecutionResourceId, InstitutionId, InstitutionWorkspaceId,
+    OperationId, OperationSpec, PrincipalId, RoutingDecisionId, RuntimeGenerationId,
+    evidence::{EvidenceRequest, TrustedEvidenceRegistry},
+    trust::{AdmissionKind, Admitted, SignedAdmissionWire},
+};
+use politeia_evidence::{
+    assurance::{ActivationProof, AuthorizedControlRun, ControlRun, VerifiedActivation},
+    authority::{AuthorityContext, DirectGrant, institution_audience},
 };
 use politeia_policy::operational::{OperationalPolicyRegistry, operation_scope};
-use politeia_runtime::routing::{
-    AvailabilitySnapshot, CapabilityProfile, CapabilityVerificationRecord, ExecutionRequirement,
-    ExecutionResource, Router, RoutingDecision, RoutingError,
+use politeia_policy::{PolicyDecision, evaluate::EvaluationEvidence};
+use politeia_runtime::{
+    AuthorizationLedger, AuthorizedEffect, Dispatcher, DispatcherConfig, EffectPort,
+    OperationIntent, PolicyDecisionPoint,
+    routing::{
+        AvailabilitySnapshot, CapabilityProfile, CapabilityVerificationRecord, ExecutionAssignment,
+        ExecutionRequirement, ExecutionResource, ExecutionResourceDescriptor, Router,
+        RoutingDecision, RoutingError,
+    },
 };
+use politeia_storage::{CanonicalPayload, OperationOutboxMessage, PostgresAuthorizationLedger};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
 
 use crate::{CoordinatorError, service::PoliteiadService};
 
 /// Stable semantic name of the public deterministic operation in the first slice.
 pub const RESOURCE_MANIFEST_OPERATION: &str = "derive_resource_manifest";
+/// Exact semantic action implemented by the bounded manifest handler.
+pub const RESOURCE_MANIFEST_ACTION: &str = "derive-resource-manifest";
+/// Exact completion evidence obligation discharged by the retained receipt.
+pub const OPERATION_RECEIPT_OBLIGATION: &str = "operation-receipt";
 /// Stable semantic name of approved institutional-context compilation.
 pub const COMPILE_CONTEXT_OPERATION: &str = "compile_institutional_context";
 /// Stable semantic name of active-generation capability discovery.
 pub const DISCOVER_CAPABILITIES_OPERATION: &str = "discover_institutional_capabilities";
 /// Stable semantic name of descriptor-bounded source capture under an active generation.
 pub const CAPTURE_SOURCE_OPERATION: &str = "capture_authorized_source";
+/// Exact direct-owner action that authorizes one capability verification.
+pub const VERIFY_EXECUTION_CAPABILITY_ACTION: &str = "verify-execution-capability";
+
+/// Derive the singleton delegation resource for an exact capability verification.
+///
+/// # Errors
+///
+/// Returns a canonical error when the verification record cannot be digested.
+pub fn capability_verification_resource(
+    verification: &CapabilityVerificationRecord,
+) -> Result<String, CanonicalError> {
+    verification
+        .digest()
+        .map(|digest| format!("capability-verification:{}", digest.as_str()))
+}
+
+/// Signed, currently delegated proof behind one declared capability verification.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityVerificationEvidence {
+    /// Exact verifier-signed record declared by the execution registry.
+    pub verification: SignedAdmissionWire<CapabilityVerificationRecord>,
+    /// Current direct owner grant for this exact verification digest.
+    pub authority: SignedAdmissionWire<Delegation>,
+}
+
+/// Signed assurance material accompanying one principal-authenticated operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationalControlEvidence {
+    /// Public detector output signed by its independently delegated producer.
+    pub run: SignedAdmissionWire<ControlRun>,
+    /// Exact durable direct grant under which the producer ran the detector.
+    pub run_authority: SignedAdmissionWire<Delegation>,
+    /// Known-good and planted-violation exercise signed by another verifier.
+    pub activation: SignedAdmissionWire<ActivationProof>,
+    /// Exact durable direct grant under which that verifier attested activation.
+    pub activation_authority: SignedAdmissionWire<Delegation>,
+}
+
+/// Complete untrusted ingress document for one active-generation operation.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OperationSubmission {
+    /// Exact operation intent signed by the requesting principal.
+    pub intent: SignedAdmissionWire<OperationIntent>,
+    /// Time-bounded availability observation used by requirement-first routing.
+    pub availability: AvailabilitySnapshot,
+    /// Claimed routing receipt; every field except its inert ID is recomputed.
+    pub routing: RoutingDecision,
+    /// Signed and currently delegated evidence for every capability claim used by routing.
+    pub capability_verifications: Vec<CapabilityVerificationEvidence>,
+    /// Complete independently authorized control evidence required by policy.
+    pub assurance: Vec<OperationalControlEvidence>,
+}
+
+/// Deterministic output of the installed bounded manifest operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceManifest {
+    /// Exact operation contract whose local handler produced this artifact.
+    pub operation: OperationId,
+    /// Canonically ordered resource identities covered by the artifact.
+    pub resources: Vec<String>,
+    /// Number of exact resource identities covered.
+    pub resource_count: u32,
+    /// Digest of the canonical manifest subject.
+    pub manifest_digest: Digest,
+}
+
+/// Honest terminal state retained in a daemon-derived unsigned receipt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OperationCompletionOutcome {
+    /// The protected local port returned a concrete manifest.
+    Succeeded {
+        /// Exact deterministic port result.
+        manifest: ResourceManifest,
+    },
+}
+
+/// Canonical, unsigned receipt derived from signed inputs and a consumed lease.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationReceipt {
+    /// Receipt schema identity.
+    pub schema: String,
+    /// Unique identity of this immutable completion record.
+    pub id: Uuid,
+    /// Institution under which the operation ran.
+    pub institution: InstitutionId,
+    /// Workspace under which the operation ran.
+    pub workspace: InstitutionWorkspaceId,
+    /// Exact active generation checked again at reservation and claim.
+    pub generation: RuntimeGenerationId,
+    /// Unique dispatcher lease consumed immediately before the effect.
+    pub lease: EffectLeaseId,
+    /// Durable budget reservation completed by this receipt.
+    pub reservation: BudgetReservationId,
+    /// Original principal-signed intent wire.
+    pub intent: SignedAdmissionWire<OperationIntent>,
+    /// Normalized decision returned by the active generation's policy.
+    pub decision: PolicyDecision,
+    /// Recomputed requirement-first routing receipt.
+    pub routing: RoutingDecision,
+    /// Exact availability input bound into routing.
+    pub availability: AvailabilitySnapshot,
+    /// Signed detector and activation evidence consumed by policy.
+    pub assurance: Vec<OperationalControlEvidence>,
+    /// Selected resource assignment bound into the signed intent and lease.
+    pub execution: ExecutionAssignment,
+    /// Installed adapter reached only through the dispatcher.
+    pub adapter: AdapterId,
+    /// Trusted database instant observed after the protected port returned.
+    pub completed_at: Timestamp,
+    /// Concrete terminal result; missing effect completion remains no receipt.
+    pub outcome: OperationCompletionOutcome,
+}
+
+/// Typed response projection for a durably completed operation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationCompletion {
+    /// Immutable receipt identity.
+    pub receipt: Uuid,
+    /// Digest of the exact canonical receipt bytes retained in PostgreSQL.
+    pub receipt_digest: Digest,
+    /// Durable reservation transitioned from claimed to completed.
+    pub reservation: BudgetReservationId,
+    /// Exact active generation under which the operation was admitted.
+    pub generation: RuntimeGenerationId,
+    /// Full recomputed routing receipt, including hard rejections.
+    pub routing: RoutingDecision,
+    /// Deterministic bounded operation result.
+    pub manifest: ResourceManifest,
+    /// Transactional outbox identity committed with the receipt.
+    pub outbox: Uuid,
+}
 
 /// The installed public service handler bound to one exact operation contract.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -109,7 +271,8 @@ pub struct ExecutionCapabilityInventory {
     pub resources: Vec<ExecutionResource>,
     /// Evidence-backed profiles for those resources.
     pub profiles: Vec<CapabilityProfile>,
-    /// Independently admitted verification records used by routing.
+    /// Exact verification claims declared by the generation. Active routing
+    /// separately requires their signed admission, live authority, and retained evidence.
     pub verifications: Vec<CapabilityVerificationRecord>,
 }
 
@@ -121,6 +284,16 @@ struct OperationalExecutionDocument {
     profiles: Vec<CapabilityProfile>,
     verifications: Vec<CapabilityVerificationRecord>,
     available_resources: BTreeSet<ExecutionResourceId>,
+}
+
+/// Capability records admitted from installed signatures, current authority,
+/// and durable evidence for one trusted routing decision.
+///
+/// This type has no public constructor or deserializer. Receiving the same
+/// record metadata as the generation declares cannot construct routing trust.
+#[derive(Clone, Debug)]
+pub struct AdmittedCapabilityVerifications {
+    records: Vec<CapabilityVerificationRecord>,
 }
 
 /// Immutable typed execution registry decoded from one verified generation.
@@ -236,6 +409,15 @@ impl OperationalExecutionRegistry {
         &self.document.available_resources
     }
 
+    /// Resolve one exact execution resource from this generation.
+    pub fn resource(&self, id: &ExecutionResourceId) -> Option<&ExecutionResource> {
+        self.document
+            .resources
+            .binary_search_by(|resource| resource.id.cmp(id))
+            .ok()
+            .map(|index| &self.document.resources[index])
+    }
+
     /// Reproduce a routing decision with a caller-selected inert identity.
     ///
     /// The caller selects only the receipt identity so it can sign the resulting
@@ -251,6 +433,7 @@ impl OperationalExecutionRegistry {
         operation: &OperationSpec,
         decision_id: RoutingDecisionId,
         snapshot: &AvailabilitySnapshot,
+        admitted_verifications: &AdmittedCapabilityVerifications,
         now: Timestamp,
     ) -> Result<RoutingDecision, OperationalRegistryRefusal> {
         let registered = self
@@ -259,11 +442,14 @@ impl OperationalExecutionRegistry {
         if snapshot.available_resources != self.document.available_resources {
             return Err(OperationalRegistryRefusal::AvailabilityMismatch);
         }
+        if admitted_verifications.records != self.document.verifications {
+            return Err(OperationalRegistryRefusal::CapabilityBindingMismatch);
+        }
         let mut decision = Router::route(
             &registered.requirement,
             self.document.resources.clone(),
             self.document.profiles.clone(),
-            self.document.verifications.clone(),
+            admitted_verifications.records.clone(),
             snapshot,
             now,
         )
@@ -336,9 +522,17 @@ impl PoliteiadService {
             .await
             .map_err(|error| operational_refusal(error.to_string()))?
             .ok_or_else(|| operational_refusal("no runtime generation is active"))?;
-        let artifact = self.verified_generation(&active).await?;
+        self.operational_registry_for_generation(&active).await
+    }
+
+    /// Reverify and decode one exact generation selected by a coherent durable snapshot.
+    pub(crate) async fn operational_registry_for_generation(
+        &self,
+        active: &Digest,
+    ) -> Result<ActiveOperationalRegistry, CoordinatorError> {
+        let artifact = self.verified_generation(active).await?;
         let generation = artifact.generation();
-        if generation.id().digest() != &active {
+        if generation.id().digest() != active {
             return Err(operational_refusal(
                 "active generation identity differs from its verified artifact",
             ));
@@ -367,7 +561,652 @@ impl PoliteiadService {
         ActiveOperationalRegistry::new(generation.id().clone(), policy, execution)
             .map_err(|error| operational_refusal(error.to_string()))
     }
+
+    /// Authenticate, authorize, route, execute, and durably complete one
+    /// principal-signed operation under the exact active generation.
+    pub(crate) async fn handle_operation(
+        &self,
+        request: Value,
+    ) -> Result<crate::OperationResult, CoordinatorError> {
+        let mut submission: OperationSubmission =
+            serde_json::from_value(request).map_err(|error| {
+                operational_refusal(format!("operation submission is malformed: {error}"))
+            })?;
+        submission
+            .assurance
+            .sort_by(|left, right| left.run.payload.control.cmp(&right.run.payload.control));
+        submission.capability_verifications.sort_by(|left, right| {
+            left.verification
+                .payload
+                .id
+                .cmp(&right.verification.payload.id)
+        });
+
+        let signed_intent = submission.intent.clone();
+        let admitted_intent = self
+            .anchors()
+            .admit_expected(AdmissionKind::OperationIntent, submission.intent.clone())
+            .map_err(operational_refusal)?;
+        if admitted_intent.signer() != &admitted_intent.payload().principal {
+            return Err(operational_refusal(
+                "operation intent signer is not its requesting principal",
+            ));
+        }
+
+        let durable = self.durable_snapshot().await?;
+        let active = durable
+            .active_generation
+            .as_ref()
+            .ok_or_else(|| operational_refusal("no runtime generation is active"))?;
+        let registry = self.operational_registry_for_generation(active).await?;
+        let registered = registry
+            .execution()
+            .exact_operation(&admitted_intent.payload().operation)
+            .ok_or_else(|| {
+                operational_refusal("signed intent operation differs from the active registry")
+            })?
+            .clone();
+        let (maximum_resources, maximum_resource_bytes) = match registered.handler {
+            InstalledOperationHandler::ResourceManifest {
+                maximum_resources,
+                maximum_resource_bytes,
+            } => (maximum_resources, maximum_resource_bytes),
+            _ => {
+                return Err(operational_refusal(
+                    "operation is installed behind another typed service boundary",
+                ));
+            }
+        };
+
+        let ledger = PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone());
+        let now = ledger
+            .observed_at()
+            .await
+            .map_err(|error| operational_refusal(error.to_string()))?;
+        let capability_verifications = self.admit_capability_verifications(
+            &durable,
+            &submission.capability_verifications,
+            now,
+        )?;
+        let routing = registry
+            .execution()
+            .route_with_id(
+                &registered.spec,
+                submission.routing.id.clone(),
+                &submission.availability,
+                &capability_verifications,
+                now,
+            )
+            .map_err(|error| operational_refusal(error.to_string()))?;
+        if routing != submission.routing {
+            return Err(operational_refusal(
+                "submitted routing receipt differs from deterministic active routing",
+            ));
+        }
+        let assignment = routing
+            .assignment()
+            .map_err(operational_refusal)?
+            .ok_or_else(|| {
+                operational_refusal("routing selected no eligible execution resource")
+            })?;
+        if admitted_intent.payload().execution.as_ref() != Some(&assignment) {
+            return Err(operational_refusal(
+                "signed intent does not bind the exact selected routing assignment",
+            ));
+        }
+        let selected_resource = registry
+            .execution()
+            .resource(&assignment.resource)
+            .ok_or_else(|| operational_refusal("selected execution resource is absent"))?;
+        if !matches!(
+            &selected_resource.descriptor,
+            ExecutionResourceDescriptor::DeterministicTool { .. }
+        ) || selected_resource.locality != ExecutionLocality::ClientLocal
+            || selected_resource.trust_domain != self.workspace().trust_domain
+        {
+            return Err(operational_refusal(
+                "installed manifest handler requires a deterministic client-local resource in the workspace trust domain",
+            ));
+        }
+
+        let admitted_operation_chain = self.admit_durable_delegation_chain(
+            &durable,
+            &admitted_intent.payload().delegation_chain,
+            admitted_intent.signer(),
+        )?;
+        let policy = self.admit_operational_decision(
+            &durable,
+            &registry,
+            admitted_intent.payload(),
+            &submission.assurance,
+            now,
+        )?;
+        let port = ResourceManifestPort {
+            operation: registered.spec.clone(),
+            resources: admitted_intent.payload().resources.clone(),
+            assignment: assignment.clone(),
+            adapter: selected_resource.adapter.clone(),
+            audience: institution_audience(&self.workspace().institution),
+            maximum_resources,
+            maximum_resource_bytes,
+        };
+        let config = DispatcherConfig::new(
+            registry.policy().bundle().clone(),
+            registry.policy().digest().clone(),
+            registry.generation().clone(),
+            format!("operational:{}", registry.generation().digest().as_str()),
+            jiff::SignedDuration::from_mins(5),
+            admitted_operation_chain
+                .iter()
+                .map(|delegation| delegation.payload().clone()),
+            [registered.spec.clone()],
+        )
+        .and_then(|config| config.with_trusted_routing_decisions([routing.clone()]))
+        .map_err(|error| operational_refusal(error.to_string()))?;
+        let dispatcher = Dispatcher::new(policy, port, ledger, config);
+        let lease = dispatcher
+            .authorize(admitted_intent.payload())
+            .await
+            .map_err(|error| operational_refusal(error.to_string()))?;
+        let manifest = dispatcher
+            .execute(&lease)
+            .await
+            .map_err(|error| operational_refusal(error.to_string()))?;
+
+        let completed_at =
+            PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone())
+                .observed_at()
+                .await
+                .map_err(|error| operational_refusal(error.to_string()))?;
+        let receipt_id = Uuid::now_v7();
+        let receipt = OperationReceipt {
+            schema: "politeia.operation-receipt.v1".to_string(),
+            id: receipt_id,
+            institution: self.workspace().institution.clone(),
+            workspace: self.workspace().id.clone(),
+            generation: registry.generation().clone(),
+            lease: lease.id().clone(),
+            reservation: lease.reservation_id().clone(),
+            intent: signed_intent,
+            decision: lease.decision().clone(),
+            routing: routing.clone(),
+            availability: submission.availability,
+            assurance: submission.assurance,
+            execution: assignment,
+            adapter: selected_resource.adapter.clone(),
+            completed_at,
+            outcome: OperationCompletionOutcome::Succeeded {
+                manifest: manifest.clone(),
+            },
+        };
+        let canonical_receipt = CanonicalPayload::from_serializable(&receipt)
+            .map_err(|error| operational_refusal(error.to_string()))?;
+        let outbox_id = Uuid::now_v7();
+        self.storage()
+            .record_completion_with_outbox(
+                self.scope(),
+                lease.reservation_id(),
+                &canonical_receipt,
+                &[OperationOutboxMessage {
+                    id: outbox_id,
+                    topic: "politeia.operation.completed.v1".to_string(),
+                    payload: canonical_receipt.clone(),
+                }],
+            )
+            .await
+            .map_err(|error| operational_refusal(error.to_string()))?;
+        let completion = OperationCompletion {
+            receipt: receipt_id,
+            receipt_digest: canonical_receipt.digest().clone(),
+            reservation: lease.reservation_id().clone(),
+            generation: registry.generation().clone(),
+            routing,
+            manifest,
+            outbox: outbox_id,
+        };
+        let evidence_refs = receipt
+            .assurance
+            .iter()
+            .flat_map(|evidence| {
+                [
+                    evidence.run.payload.id.0.to_string(),
+                    evidence.activation.payload.id.0.to_string(),
+                ]
+            })
+            .collect();
+        Ok(crate::OperationResult::Coordinated {
+            result: serde_json::to_value(completion).map_err(operational_refusal)?,
+            evidence_refs,
+        })
+    }
+
+    fn admit_exact_direct_authority(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        wire: &SignedAdmissionWire<Delegation>,
+        subject: &PrincipalId,
+    ) -> Result<Admitted<Delegation>, CoordinatorError> {
+        let persisted = durable
+            .delegations
+            .get(&wire.payload.id)
+            .ok_or_else(|| operational_refusal("assurance authority is not durably admitted"))?;
+        if &persisted.wire != wire {
+            return Err(operational_refusal(
+                "assurance authority differs from its durable signed wire",
+            ));
+        }
+        let mut chain = self.admit_durable_delegation_chain(
+            durable,
+            std::slice::from_ref(&wire.payload),
+            subject,
+        )?;
+        if chain.len() != 1 {
+            return Err(operational_refusal(
+                "assurance authority is not a direct owner grant",
+            ));
+        }
+        chain
+            .pop()
+            .ok_or_else(|| operational_refusal("assurance authority is absent"))
+    }
+
+    /// Re-admit signed public-control evidence and evaluate one exact intent
+    /// into an opaque decision point suitable for the shared dispatcher.
+    ///
+    /// The adjacent service boundary must first derive `intent` from its own
+    /// authenticated request. Every control and verifier grant is resolved
+    /// against the supplied coherent durable snapshot at `at`.
+    pub(crate) fn admit_operational_decision(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        registry: &ActiveOperationalRegistry,
+        intent: &OperationIntent,
+        assurance: &[OperationalControlEvidence],
+        at: Timestamp,
+    ) -> Result<AdmittedOperationalDecision, CoordinatorError> {
+        if registry
+            .execution()
+            .exact_operation(&intent.operation)
+            .is_none()
+        {
+            return Err(operational_refusal(
+                "policy request operation differs from the active registry",
+            ));
+        }
+        let required_controls: BTreeSet<_> = registry
+            .policy()
+            .bindings()
+            .iter()
+            .filter(|binding| binding.scope == operation_scope(&intent.operation))
+            .flat_map(|binding| binding.detector_ids.iter().cloned())
+            .collect();
+        if required_controls.is_empty() || assurance.len() != required_controls.len() {
+            return Err(operational_refusal(
+                "operation assurance does not exactly cover active policy controls",
+            ));
+        }
+
+        let mut run_admissions = Vec::with_capacity(assurance.len());
+        let mut run_authorities = Vec::with_capacity(assurance.len());
+        let mut activation_admissions = Vec::with_capacity(assurance.len());
+        let mut activation_authorities = Vec::with_capacity(assurance.len());
+        let mut supplied_controls = BTreeSet::new();
+        let mut run_producers = BTreeSet::new();
+        let mut activation_verifiers = BTreeSet::new();
+        for evidence in assurance {
+            let run = self
+                .anchors()
+                .admit_expected(AdmissionKind::ControlRun, evidence.run.clone())
+                .map_err(operational_refusal)?;
+            let activation = self
+                .anchors()
+                .admit_expected(AdmissionKind::ActivationProof, evidence.activation.clone())
+                .map_err(operational_refusal)?;
+            if run.payload().control != activation.payload().control
+                || !supplied_controls.insert(run.payload().control.clone())
+            {
+                return Err(operational_refusal(
+                    "operation assurance has an ambiguous control pairing",
+                ));
+            }
+            if run.signer() == &intent.principal
+                || activation.signer() == &intent.principal
+                || run.signer() == activation.signer()
+            {
+                return Err(operational_refusal(
+                    "requester, control producer, and activation verifier must be distinct",
+                ));
+            }
+            run_producers.insert(run.signer().clone());
+            activation_verifiers.insert(activation.signer().clone());
+            let run_authority =
+                self.admit_exact_direct_authority(durable, &evidence.run_authority, run.signer())?;
+            let activation_authority = self.admit_exact_direct_authority(
+                durable,
+                &evidence.activation_authority,
+                activation.signer(),
+            )?;
+            let authorization = Digest::blake3(
+                &to_canonical_bytes(run_authority.payload()).map_err(operational_refusal)?,
+            );
+            if run.payload().authorization != authorization {
+                return Err(operational_refusal(
+                    "control run authorization digest differs from its durable direct grant",
+                ));
+            }
+            run_admissions.push(run);
+            run_authorities.push(run_authority);
+            activation_admissions.push(activation);
+            activation_authorities.push(activation_authority);
+        }
+        if supplied_controls != required_controls
+            || !run_producers.is_disjoint(&activation_verifiers)
+        {
+            return Err(operational_refusal(
+                "operation assurance is incomplete or lacks independent activation",
+            ));
+        }
+
+        let context = AuthorityContext::new(
+            self.workspace().institution.clone(),
+            self.workspace().id.clone(),
+            durable.owner.clone(),
+            at,
+        );
+        let authorized_runs = run_admissions
+            .iter()
+            .zip(&run_authorities)
+            .map(|(run, authority)| {
+                AuthorizedControlRun::admit(run, authority, &context).map_err(operational_refusal)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let verified_activations = activation_admissions
+            .iter()
+            .zip(&activation_authorities)
+            .map(|(proof, authority)| {
+                VerifiedActivation::admit(proof, authority, &context).map_err(operational_refusal)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let intent_digest = intent.digest().map_err(operational_refusal)?;
+        let request = politeia_policy::operational::OperationalEvaluationRequest {
+            institution: self.workspace().institution.clone(),
+            workspace: self.workspace().id.clone(),
+            intent_digest: intent_digest.clone(),
+            principal: intent.principal.clone(),
+            operation: intent.operation.clone(),
+            resources: intent.resources.clone(),
+            at,
+        };
+        for run in &authorized_runs {
+            registry
+                .policy()
+                .validate_control_run(&request, run.run())
+                .map_err(operational_refusal)?;
+        }
+        for activation in &verified_activations {
+            registry
+                .policy()
+                .validate_activation_proof(activation.proof())
+                .map_err(operational_refusal)?;
+        }
+        let decision = registry
+            .policy()
+            .evaluate(
+                &request,
+                &EvaluationEvidence::new(&authorized_runs, &verified_activations, &[]),
+            )
+            .map_err(operational_refusal)?;
+        Ok(AdmittedOperationalDecision {
+            intent: intent_digest,
+            decision,
+        })
+    }
+
+    fn admit_capability_verifications(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        submitted: &[CapabilityVerificationEvidence],
+        at: Timestamp,
+    ) -> Result<AdmittedCapabilityVerifications, CoordinatorError> {
+        let context = AuthorityContext::new(
+            self.workspace().institution.clone(),
+            self.workspace().id.clone(),
+            durable.owner.clone(),
+            at,
+        );
+        let mut identities = BTreeSet::new();
+        let mut records = Vec::with_capacity(submitted.len());
+        for evidence in submitted {
+            let verification = self
+                .anchors()
+                .admit_expected(AdmissionKind::Verification, evidence.verification.clone())
+                .map_err(operational_refusal)?;
+            if verification.signer() != &verification.payload().verifier
+                || !identities.insert(verification.payload().id.clone())
+            {
+                return Err(operational_refusal(
+                    "capability verification signer or identity is ambiguous",
+                ));
+            }
+            let authority = self.admit_exact_direct_authority(
+                durable,
+                &evidence.authority,
+                verification.signer(),
+            )?;
+            let authority_resource = capability_verification_resource(verification.payload())
+                .map_err(operational_refusal)?;
+            DirectGrant::admit(
+                &authority,
+                &context,
+                verification.signer(),
+                VERIFY_EXECUTION_CAPABILITY_ACTION,
+                &authority_resource,
+            )
+            .map_err(operational_refusal)?;
+
+            let verification_digest = verification
+                .payload()
+                .digest()
+                .map_err(operational_refusal)?;
+            let evidence_wires = verification
+                .payload()
+                .evidence
+                .iter()
+                .map(|id| self.durable_evidence_wire(durable, id))
+                .collect::<Result<Vec<_>, _>>()?;
+            let admitted_evidence =
+                TrustedEvidenceRegistry::admit_signed(self.anchors(), evidence_wires)
+                    .map_err(operational_refusal)?;
+            for id in &verification.payload().evidence {
+                let record = admitted_evidence.resolve(id).ok_or_else(|| {
+                    operational_refusal("capability verification evidence is absent")
+                })?;
+                if record.subject != verification_digest
+                    || record.producer != *verification.signer()
+                    || record.producer_delegation != authority.payload().id
+                    || record.observed_at > verification.payload().observed_at
+                {
+                    return Err(operational_refusal(
+                        "capability verification evidence does not bind its signed verifier and current authority",
+                    ));
+                }
+            }
+            records.push(verification.into_payload());
+        }
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(AdmittedCapabilityVerifications { records })
+    }
+
+    fn durable_evidence_wire(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        id: &EvidenceId,
+    ) -> Result<SignedAdmissionWire<EvidenceRequest>, CoordinatorError> {
+        let stored = durable
+            .evidence
+            .get(id)
+            .ok_or_else(|| operational_refusal("capability evidence is not durably retained"))?;
+        let wire: SignedAdmissionWire<EvidenceRequest> = serde_json::from_slice(stored.payload())
+            .map_err(|error| {
+            operational_refusal(format!("durable capability evidence is malformed: {error}"))
+        })?;
+        if wire.payload.id != *id
+            || wire.signer != *stored.signer()
+            || wire.signature != stored.signature()
+        {
+            return Err(operational_refusal(
+                "capability evidence differs from its durable signed record",
+            ));
+        }
+        Ok(wire)
+    }
 }
+
+/// Opaque result of installed-anchor admission and complete active-policy evaluation.
+///
+/// It implements the shared dispatcher policy point while refusing any intent
+/// other than the exact one whose signed assurance was evaluated.
+#[derive(Clone, Debug)]
+pub(crate) struct AdmittedOperationalDecision {
+    intent: Digest,
+    decision: PolicyDecision,
+}
+
+impl AdmittedOperationalDecision {
+    /// Inspect the normalized decision without weakening its dispatcher binding.
+    pub(crate) fn decision(&self) -> &PolicyDecision {
+        &self.decision
+    }
+}
+
+impl PolicyDecisionPoint for AdmittedOperationalDecision {
+    type Error = OperationalDecisionError;
+
+    fn decide(
+        &self,
+        intent: &OperationIntent,
+    ) -> impl Future<Output = Result<PolicyDecision, Self::Error>> + Send {
+        ready((|| {
+            let actual = intent
+                .digest()
+                .map_err(|error| OperationalDecisionError(error.to_string()))?;
+            if actual != self.intent {
+                return Err(OperationalDecisionError(
+                    "dispatcher intent differs from the admitted policy decision".to_string(),
+                ));
+            }
+            Ok(self.decision.clone())
+        })())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct OperationalDecisionError(String);
+
+impl std::fmt::Display for OperationalDecisionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OperationalDecisionError {}
+
+struct ResourceManifestPort {
+    operation: OperationSpec,
+    resources: BTreeSet<String>,
+    assignment: ExecutionAssignment,
+    adapter: AdapterId,
+    audience: String,
+    maximum_resources: u32,
+    maximum_resource_bytes: u64,
+}
+
+impl EffectPort for ResourceManifestPort {
+    type Output = ResourceManifest;
+    type Error = ResourceManifestError;
+
+    fn adapter(&self) -> &AdapterId {
+        &self.adapter
+    }
+
+    fn audience(&self) -> &str {
+        &self.audience
+    }
+
+    fn execute<'lease>(
+        &'lease self,
+        invocation: AuthorizedEffect<'lease>,
+    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'lease {
+        ready((|| {
+            let lease = invocation.lease();
+            if lease.operation() != &self.operation
+                || lease.resources() != &self.resources
+                || lease.execution() != Some(&self.assignment)
+                || lease.effects() != &BTreeSet::from([Effect::CreateArtifact])
+            {
+                return Err(ResourceManifestError(
+                    "manifest lease differs from the installed bounded handler".to_string(),
+                ));
+            }
+            let resource_count = u32::try_from(self.resources.len()).map_err(|_| {
+                ResourceManifestError("manifest resource count cannot be represented".to_string())
+            })?;
+            if resource_count > self.maximum_resources {
+                return Err(ResourceManifestError(
+                    "manifest resource count exceeds the installed bound".to_string(),
+                ));
+            }
+            let resource_bytes = self.resources.iter().try_fold(0_u64, |total, resource| {
+                let length = u64::try_from(resource.len()).map_err(|_| {
+                    ResourceManifestError(
+                        "manifest resource length cannot be represented".to_string(),
+                    )
+                })?;
+                total.checked_add(length).ok_or_else(|| {
+                    ResourceManifestError("manifest resource length overflowed".to_string())
+                })
+            })?;
+            if resource_bytes > self.maximum_resource_bytes {
+                return Err(ResourceManifestError(
+                    "manifest resource bytes exceed the installed bound".to_string(),
+                ));
+            }
+            let resources: Vec<_> = self.resources.iter().cloned().collect();
+            let manifest_digest = Digest::blake3(
+                &to_canonical_bytes(&ResourceManifestSubject {
+                    schema: "politeia.resource-manifest.v1",
+                    operation: &self.operation.id,
+                    resources: &resources,
+                })
+                .map_err(|error| ResourceManifestError(error.to_string()))?,
+            );
+            Ok(ResourceManifest {
+                operation: self.operation.id.clone(),
+                resources,
+                resource_count,
+                manifest_digest,
+            })
+        })())
+    }
+}
+
+#[derive(Serialize)]
+struct ResourceManifestSubject<'a> {
+    schema: &'static str,
+    operation: &'a OperationId,
+    resources: &'a [String],
+}
+
+#[derive(Debug)]
+struct ResourceManifestError(String);
+
+impl std::fmt::Display for ResourceManifestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ResourceManifestError {}
 
 fn validate_execution_document(
     document: &OperationalExecutionDocument,
@@ -408,12 +1247,19 @@ fn validate_execution_document(
         if let InstalledOperationHandler::ResourceManifest {
             maximum_resources,
             maximum_resource_bytes,
-        } = operation.handler
-            && (maximum_resources == 0
-                || maximum_resource_bytes == 0
-                || !operation.requirement.deterministic_only)
+        } = &operation.handler
         {
-            return Err(OperationalRegistryRefusal::OperationContractMismatch);
+            if *maximum_resources == 0
+                || *maximum_resource_bytes == 0
+                || !operation.requirement.deterministic_only
+                || operation.spec.actions != BTreeSet::from([RESOURCE_MANIFEST_ACTION.to_string()])
+                || operation.spec.effects != BTreeSet::from([Effect::CreateArtifact])
+                || operation.spec.data_classes != BTreeSet::from([DataClass::Public])
+                || operation.spec.evidence_obligations
+                    != vec![OPERATION_RECEIPT_OBLIGATION.to_string()]
+            {
+                return Err(OperationalRegistryRefusal::OperationContractMismatch);
+            }
         }
     }
 
@@ -496,11 +1342,8 @@ fn validate_execution_document(
     Ok(())
 }
 
-fn operational_refusal(reason: impl Into<String>) -> CoordinatorError {
-    CoordinatorError::Refused(format!(
-        "active operational registry refused: {}",
-        reason.into()
-    ))
+fn operational_refusal(reason: impl std::fmt::Display) -> CoordinatorError {
+    CoordinatorError::Refused(format!("active operational registry refused: {}", reason))
 }
 
 /// Why exact execution-registry admission or routing failed.

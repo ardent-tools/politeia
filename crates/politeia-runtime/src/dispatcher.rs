@@ -67,7 +67,12 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
                 field: "operation intent digest"
             }
         );
-        ensure!(decision.allowed, DeniedSnafu);
+        ensure!(
+            decision.allowed,
+            DeniedSnafu {
+                reasons: decision.reasons.clone()
+            }
+        );
         let max_expiry = now + self.config.max_lease_ttl;
         let assignment_expiry = intent
             .execution

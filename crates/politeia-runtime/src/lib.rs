@@ -37,8 +37,10 @@ pub use ledger::{
 #[non_exhaustive]
 pub enum RuntimeError {
     /// The policy decision denied the operation.
-    #[snafu(display("operation denied"))]
+    #[snafu(display("operation denied: {}", reasons.join("; ")))]
     Denied {
+        /// Exact normalized policy reasons that produced the denial.
+        reasons: Vec<String>,
         /// Source location where the denial surfaced.
         #[snafu(implicit)]
         location: snafu::Location,

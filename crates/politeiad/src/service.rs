@@ -262,10 +262,7 @@ impl PoliteiadService {
                     .to_string(),
             )),
             SemanticOperation::Commissioning { request } => self.commission(request).await,
-            SemanticOperation::Operate { .. } => Err(CoordinatorError::Refused(
-                "operational execution requires a configured dispatcher and active generation"
-                    .to_string(),
-            )),
+            SemanticOperation::Operate { request } => self.handle_operation(request).await,
         }
     }
 
