@@ -15,8 +15,9 @@ use politeia_core::{
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     institution::{InstitutionBoundary, InstitutionWorkspace},
     knowledge::{
-        ObservationRequest, SourceCaptureRequest, TrustedObservationRegistry,
-        TrustedSourceCaptureRegistry,
+        CandidateClaimRequest, FactApprovalRequest, ObservationRequest, SourceCaptureRequest,
+        TrustedCandidateClaimRegistry, TrustedObservationRegistry, TrustedSourceCaptureRegistry,
+        approve_claim,
     },
     reconnaissance::ReconnaissanceScope,
     trust::{
@@ -97,6 +98,13 @@ pub enum CommissioningRequest {
     Generation {
         /// Opaque JSON decoded by the dedicated generation coordinator.
         request: Value,
+    },
+    /// Persist an interpreter-signed candidate and owner-approved fact.
+    ApproveClaim {
+        /// Complete candidate claim, signed by its interpreter.
+        candidate: SignedAdmissionWire<CandidateClaimRequest>,
+        /// Owner approval bound to that exact candidate digest.
+        approval: SignedAdmissionWire<FactApprovalRequest>,
     },
 }
 
@@ -475,6 +483,105 @@ impl PoliteiadService {
         })
     }
 
+    /// Rebuild signed provenance and accept one candidate only through an owner approval.
+    async fn approve_candidate(
+        &self,
+        candidate: SignedAdmissionWire<CandidateClaimRequest>,
+        approval: SignedAdmissionWire<FactApprovalRequest>,
+    ) -> Result<OperationResult, CoordinatorError> {
+        let durable = self.durable_snapshot().await?;
+        let evidence = TrustedEvidenceRegistry::admit_signed(
+            &self.anchors,
+            durable
+                .evidence
+                .values()
+                .map(evidence_wire)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(refusal)?;
+        let captures = TrustedSourceCaptureRegistry::admit_signed(
+            &self.anchors,
+            durable
+                .state
+                .iter()
+                .filter(|(key, _)| key.starts_with("source_capture:"))
+                .map(|(_, value)| state_wire(value))
+                .collect::<Result<Vec<SignedAdmissionWire<SourceCaptureRequest>>, _>>()?,
+        )
+        .map_err(refusal)?;
+        let observations = TrustedObservationRegistry::admit_signed(
+            &self.workspace,
+            &self.anchors,
+            &evidence,
+            &captures,
+            durable
+                .state
+                .iter()
+                .filter(|(key, _)| key.starts_with("observation:"))
+                .map(|(_, value)| state_wire(value))
+                .collect::<Result<Vec<SignedAdmissionWire<ObservationRequest>>, _>>()?,
+        )
+        .map_err(refusal)?;
+        let candidates = TrustedCandidateClaimRegistry::admit_signed(
+            &self.workspace,
+            &self.anchors,
+            &observations,
+            [candidate.clone()],
+        )
+        .map_err(refusal)?;
+        let fact = approve_claim(
+            &self.workspace,
+            &observations,
+            &self.anchors,
+            &candidates,
+            approval.clone(),
+        )
+        .map_err(refusal)?;
+        let candidate_key = format!("candidate_claim:{}", fact.claim().0);
+        let approval_key = format!("fact_approval:{}", fact.claim().0);
+        if durable.state.contains_key(&candidate_key) || durable.state.contains_key(&approval_key) {
+            return Err(CoordinatorError::Refused(
+                "candidate or fact approval already has a durable projection".to_string(),
+            ));
+        }
+        let candidate_record = signed_wire_record(&candidate)?;
+        let approval_record = signed_wire_record(&approval)?;
+        let receipt = self
+            .storage
+            .commit(&ScopedCommit {
+                scope: self.scope.clone(),
+                expected_revision: durable.revision,
+                model: durable.model,
+                model_kind: "fact_approval".to_string(),
+                transition: approval_record.clone(),
+                state: vec![
+                    StateMutation {
+                        key: candidate_key,
+                        value: candidate_record,
+                    },
+                    StateMutation {
+                        key: approval_key,
+                        value: approval_record,
+                    },
+                ],
+                evidence: Vec::new(),
+                outbox: Vec::new(),
+            })
+            .await
+            .map_err(|error| storage_refusal(&error))?;
+        Ok(OperationResult::Coordinated {
+            result: json!({
+                "claim": fact.claim(),
+                "subject": fact.subject(),
+                "proposition": fact.proposition(),
+                "revision": receipt.revision,
+                "transition": receipt.transition_digest,
+                "approved": true,
+            }),
+            evidence_refs: Vec::new(),
+        })
+    }
+
     /// Re-admit one durable, unrevoked delegation held by the exact requester.
     ///
     /// This is the sole service-side recovery path for delegation authority:
@@ -596,6 +703,10 @@ impl PoliteiadService {
             }
             CommissioningRequest::Generation { request } => self.handle_generation(request).await,
             CommissioningRequest::Learning { request } => self.handle_learning(request).await,
+            CommissioningRequest::ApproveClaim {
+                candidate,
+                approval,
+            } => self.approve_candidate(candidate, approval).await,
             CommissioningRequest::AdmitDelegation { delegation } => {
                 let admitted = self
                     .anchors
@@ -717,6 +828,29 @@ fn runtime_refusal(error: &RuntimeError) -> CoordinatorError {
 
 pub(crate) fn refusal(error: impl std::fmt::Display) -> CoordinatorError {
     CoordinatorError::Refused(error.to_string())
+}
+
+fn evidence_wire(
+    record: &SignedRecord,
+) -> Result<SignedAdmissionWire<EvidenceRequest>, CoordinatorError> {
+    let wire: SignedAdmissionWire<EvidenceRequest> = serde_json::from_slice(record.payload())
+        .map_err(|error| {
+            CoordinatorError::Refused(format!("durable evidence wire is malformed: {error}"))
+        })?;
+    if wire.signer != *record.signer() || wire.signature != record.signature() {
+        return Err(CoordinatorError::Refused(
+            "durable evidence wire differs from its stored signature".to_string(),
+        ));
+    }
+    Ok(wire)
+}
+
+fn state_wire<T: serde::de::DeserializeOwned>(
+    value: &politeia_storage::StoredPayload,
+) -> Result<SignedAdmissionWire<T>, CoordinatorError> {
+    serde_json::from_slice(&value.bytes).map_err(|error| {
+        CoordinatorError::Refused(format!("durable signed state wire is malformed: {error}"))
+    })
 }
 
 pub(crate) fn signed_wire_record<T: Serialize>(
