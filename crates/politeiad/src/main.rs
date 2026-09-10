@@ -8,30 +8,31 @@ use politeiad::{
     transport::{bind, current_request, request, serve_once},
 };
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let arguments: Vec<String> = env::args().collect();
     match arguments.get(1).map(String::as_str) {
-        Some("serve") => serve(&arguments),
-        Some("snapshot") => send_request_document(&arguments, "snapshot"),
-        Some("status") => send(&arguments, SemanticOperation::Status),
-        Some("initialize") => send_request_document(&arguments, "initialize"),
-        Some("commissioning") => send_request_document(&arguments, "commissioning"),
-        Some("operate") => send_request_document(&arguments, "operate"),
+        Some("serve") => serve(&arguments).await,
+        Some("snapshot") => send_request_document(&arguments, "snapshot").await,
+        Some("status") => send(&arguments, SemanticOperation::Status).await,
+        Some("initialize") => send_request_document(&arguments, "initialize").await,
+        Some("commissioning") => send_request_document(&arguments, "commissioning").await,
+        Some("operate") => send_request_document(&arguments, "operate").await,
         _ => Err(anyhow::anyhow!(usage())),
     }
 }
 
-fn serve(arguments: &[String]) -> anyhow::Result<()> {
+async fn serve(arguments: &[String]) -> anyhow::Result<()> {
     let prefix = required_path(arguments, 2, "serve requires an installation prefix")?;
     let layout = InstallationLayout::load(&prefix)?;
-    let listener = bind(&layout.socket)?;
+    let listener = bind(&layout.socket).await?;
     let coordinator = UnavailableCoordinator;
     loop {
-        serve_once(&listener, &coordinator)?;
+        serve_once(&listener, &coordinator).await?;
     }
 }
 
-fn send_request_document(arguments: &[String], command: &str) -> anyhow::Result<()> {
+async fn send_request_document(arguments: &[String], command: &str) -> anyhow::Result<()> {
     let socket = required_path(arguments, 2, &format!("{command} requires a socket path"))?;
     let document_path = required_path(
         arguments,
@@ -48,19 +49,20 @@ fn send_request_document(arguments: &[String], command: &str) -> anyhow::Result<
         "operate" => SemanticOperation::Operate { request },
         _ => return Err(anyhow::anyhow!("unsupported command")),
     };
-    send_to_socket(socket, operation)
+    send_to_socket(socket, operation).await
 }
 
-fn send(arguments: &[String], operation: SemanticOperation) -> anyhow::Result<()> {
+async fn send(arguments: &[String], operation: SemanticOperation) -> anyhow::Result<()> {
     let socket = required_path(arguments, 2, "status requires a socket path")?;
-    send_to_socket(socket, operation)
+    send_to_socket(socket, operation).await
 }
 
-fn send_to_socket(socket: PathBuf, operation: SemanticOperation) -> anyhow::Result<()> {
+async fn send_to_socket(socket: PathBuf, operation: SemanticOperation) -> anyhow::Result<()> {
     let response = request(
         &socket,
         &current_request(uuid::Uuid::now_v7().to_string(), operation),
-    )?;
+    )
+    .await?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }

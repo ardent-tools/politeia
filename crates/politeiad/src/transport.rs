@@ -1,16 +1,17 @@
 //! Local authenticated Unix-socket transport for semantic operations.
 
 use std::{
-    io::{self, BufRead, BufReader, Write},
-    os::unix::{
-        fs::{MetadataExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
-    },
+    io,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::Path,
 };
 
 use politeia_protocol::{CURRENT_PROTOCOL_VERSION, ProtocolVersion, negotiate};
 use serde::{Deserialize, Serialize};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream},
+};
 
 use crate::{CommissioningCoordinator, OperationResult, SemanticOperation, execute};
 
@@ -106,7 +107,7 @@ impl From<io::Error> for TransportError {
 }
 
 /// Bind a new private local socket without unlinking a prior endpoint.
-pub fn bind(socket: &Path) -> Result<UnixListener, TransportError> {
+pub async fn bind(socket: &Path) -> Result<UnixListener, TransportError> {
     let parent = socket.parent().ok_or_else(|| {
         TransportError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -122,49 +123,54 @@ pub fn bind(socket: &Path) -> Result<UnixListener, TransportError> {
 }
 
 /// Serve one connection through the shared semantic executor.
-pub fn serve_once(
+pub async fn serve_once(
     listener: &UnixListener,
     coordinator: &dyn CommissioningCoordinator,
 ) -> Result<(), TransportError> {
-    let (stream, _) = listener.accept()?;
-    let response = read_request(&stream).and_then(|request| handle(coordinator, request));
-    let mut writer = stream;
+    let (mut stream, _) = listener.accept().await?;
+    let response = match read_request(&mut stream).await {
+        Ok(request) => handle(coordinator, request).await,
+        Err(error) => Err(error),
+    };
     let bytes = serde_json::to_vec(&response?)
         .map_err(|error| TransportError::Encoding(error.to_string()))?;
-    writer.write_all(&bytes)?;
-    writer.write_all(b"\n")?;
-    writer.flush()?;
+    stream.write_all(&bytes).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
     Ok(())
 }
 
 /// Send one local semantic request and read its single response.
-pub fn request(socket: &Path, request: &LocalRequest) -> Result<LocalResponse, TransportError> {
-    let mut stream = UnixStream::connect(socket)?;
+pub async fn request(
+    socket: &Path,
+    request: &LocalRequest,
+) -> Result<LocalResponse, TransportError> {
+    let mut stream = UnixStream::connect(socket).await?;
     let bytes =
         serde_json::to_vec(request).map_err(|error| TransportError::Encoding(error.to_string()))?;
-    stream.write_all(&bytes)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    stream.write_all(&bytes).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
+    BufReader::new(stream).read_line(&mut line).await?;
     serde_json::from_str(&line).map_err(|error| TransportError::InvalidRequest(error.to_string()))
 }
 
-fn read_request(stream: &UnixStream) -> Result<LocalRequest, TransportError> {
+async fn read_request(stream: &mut UnixStream) -> Result<LocalRequest, TransportError> {
     let mut line = String::new();
-    let bytes = BufReader::new(stream).read_line(&mut line)?;
+    let bytes = BufReader::new(stream).read_line(&mut line).await?;
     if bytes > MAX_REQUEST_BYTES {
         return Err(TransportError::RequestTooLarge);
     }
     serde_json::from_str(&line).map_err(|error| TransportError::InvalidRequest(error.to_string()))
 }
 
-fn handle(
+async fn handle(
     coordinator: &dyn CommissioningCoordinator,
     request: LocalRequest,
 ) -> Result<LocalResponse, TransportError> {
     let version = negotiate(&request.version).ok_or(TransportError::IncompatibleProtocol)?;
-    let outcome = match execute(coordinator, request.operation) {
+    let outcome = match execute(coordinator, request.operation).await {
         Ok(result) => LocalOutcome::Ok { result },
         Err(error) => LocalOutcome::Error {
             code: match error {
@@ -192,7 +198,7 @@ pub fn current_request(request_id: String, operation: SemanticOperation) -> Loca
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, fs, thread};
+    use std::{collections::BTreeSet, fs, future::Future, pin::Pin};
 
     use super::*;
     use crate::{
@@ -208,26 +214,29 @@ mod tests {
         fn execute(
             &self,
             operation: SemanticOperation,
-        ) -> Result<OperationResult, CoordinatorError> {
-            match operation {
-                SemanticOperation::SnapshotSource { request }
-                    if request == serde_json::json!({"signed": "capture-request"}) =>
-                {
-                    snapshot(self.capture.clone())
-                        .map(|snapshot: SourceSnapshot| OperationResult::SourceSnapshot {
-                            snapshot,
-                        })
-                        .map_err(|error| CoordinatorError::Refused(error.to_string()))
+        ) -> Pin<Box<dyn Future<Output = Result<OperationResult, CoordinatorError>> + Send + '_>>
+        {
+            Box::pin(async move {
+                match operation {
+                    SemanticOperation::SnapshotSource { request }
+                        if request == serde_json::json!({"signed": "capture-request"}) =>
+                    {
+                        snapshot(self.capture.clone())
+                            .map(|snapshot: SourceSnapshot| OperationResult::SourceSnapshot {
+                                snapshot,
+                            })
+                            .map_err(|error| CoordinatorError::Refused(error.to_string()))
+                    }
+                    _ => Err(CoordinatorError::Refused(
+                        "test coordinator rejected unsigned capture request".to_string(),
+                    )),
                 }
-                _ => Err(CoordinatorError::Refused(
-                    "test coordinator rejected unsigned capture request".to_string(),
-                )),
-            }
+            })
         }
     }
 
-    #[test]
-    fn local_socket_routes_source_capture_through_the_coordinator() {
+    #[tokio::test]
+    async fn local_socket_routes_source_capture_through_the_coordinator() {
         let root = std::env::temp_dir().join(format!("politeiad-transport-{}", std::process::id()));
         fs::create_dir_all(&root).expect("fixture directory is creatable");
         fs::write(root.join("source.txt"), b"source").expect("fixture source is writable");
@@ -236,15 +245,17 @@ mod tests {
         fs::set_permissions(&run, fs::Permissions::from_mode(0o700))
             .expect("fixture run directory becomes private");
         let socket = run.join("politeiad.sock");
-        let listener = bind(&socket).expect("fixture socket binds");
+        let listener = bind(&socket).await.expect("fixture socket binds");
         let coordinator = SourceCoordinator {
             capture: SourceSnapshotRequest {
                 root: root.clone(),
                 members: BTreeSet::from(["source.txt".into()]),
             },
         };
-        let server = thread::spawn(move || {
-            serve_once(&listener, &coordinator).expect("one valid request is served");
+        let server = tokio::spawn(async move {
+            serve_once(&listener, &coordinator)
+                .await
+                .expect("one valid request is served");
         });
         let response = request(
             &socket,
@@ -255,8 +266,9 @@ mod tests {
                 },
             ),
         )
+        .await
         .expect("local semantic request succeeds");
-        server.join().expect("server thread finishes");
+        server.await.expect("server task finishes");
         assert!(matches!(response.outcome, LocalOutcome::Ok { .. }));
         fs::remove_dir_all(root).expect("fixture is removable");
     }

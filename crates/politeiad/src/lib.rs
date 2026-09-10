@@ -12,6 +12,7 @@ pub mod source;
 pub mod transport;
 
 use serde::{Deserialize, Serialize};
+use std::{future::Future, pin::Pin};
 
 use crate::source::SourceSnapshot;
 
@@ -73,7 +74,10 @@ pub enum OperationResult {
 /// an alternate lifecycle implementation.
 pub trait CommissioningCoordinator: Send + Sync {
     /// Execute one semantic operation.
-    fn execute(&self, operation: SemanticOperation) -> Result<OperationResult, CoordinatorError>;
+    fn execute(
+        &self,
+        operation: SemanticOperation,
+    ) -> Pin<Box<dyn Future<Output = Result<OperationResult, CoordinatorError>> + Send + '_>>;
 }
 
 /// A coordinator refusal.
@@ -104,11 +108,11 @@ impl std::error::Error for CoordinatorError {}
 /// Transport input does not receive a local exception. The coordinator admits
 /// every request, checks its bounded grant, and invokes adapters only after
 /// those checks succeed.
-pub fn execute(
+pub async fn execute(
     coordinator: &dyn CommissioningCoordinator,
     operation: SemanticOperation,
 ) -> Result<OperationResult, CoordinatorError> {
-    coordinator.execute(operation)
+    coordinator.execute(operation).await
 }
 
 /// A deliberate fail-closed coordinator for hosts not yet fully configured.
@@ -116,7 +120,10 @@ pub fn execute(
 pub struct UnavailableCoordinator;
 
 impl CommissioningCoordinator for UnavailableCoordinator {
-    fn execute(&self, _operation: SemanticOperation) -> Result<OperationResult, CoordinatorError> {
-        Err(CoordinatorError::Unavailable)
+    fn execute(
+        &self,
+        _operation: SemanticOperation,
+    ) -> Pin<Box<dyn Future<Output = Result<OperationResult, CoordinatorError>> + Send + '_>> {
+        Box::pin(async { Err(CoordinatorError::Unavailable) })
     }
 }
