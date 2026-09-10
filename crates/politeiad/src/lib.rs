@@ -8,6 +8,7 @@
 #![deny(missing_docs)]
 
 pub mod artifacts;
+pub mod cli;
 pub mod config;
 pub mod learning;
 pub mod service;

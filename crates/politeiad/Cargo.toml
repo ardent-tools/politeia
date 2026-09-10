@@ -9,6 +9,10 @@ rust-version.workspace = true
 name = "politeia"
 path = "src/main.rs"
 
+[[bin]]
+name = "politeiad"
+path = "src/bin/politeiad.rs"
+
 [dependencies]
 anyhow.workspace = true
 tokio = { workspace = true, features = ["io-util", "net"] }

@@ -73,10 +73,10 @@ impl Drop for Daemon {
 fn write_request(
     fixture: &ReferenceFixture,
     name: &str,
-    value: serde_json::Value,
+    value: &serde_json::Value,
 ) -> TestResult<std::path::PathBuf> {
     let path = fixture.root.join(name);
-    fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
+    fs::write(&path, serde_json::to_vec_pretty(value)?)?;
     Ok(path)
 }
 
