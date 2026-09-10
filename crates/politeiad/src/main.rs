@@ -1,11 +1,10 @@
 //! The local Politeia daemon and CLI.
 
-use std::{env, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 use politeiad::{
     SemanticOperation, UnavailableCoordinator,
     config::InstallationLayout,
-    source::SourceSnapshotRequest,
     transport::{bind, current_request, request, serve_once},
 };
 
@@ -13,11 +12,11 @@ fn main() -> anyhow::Result<()> {
     let arguments: Vec<String> = env::args().collect();
     match arguments.get(1).map(String::as_str) {
         Some("serve") => serve(&arguments),
-        Some("snapshot") => send_snapshot(&arguments),
+        Some("snapshot") => send_request_document(&arguments, "snapshot"),
         Some("status") => send(&arguments, SemanticOperation::Status),
-        Some("initialize") => send_request_path(&arguments, "initialize"),
-        Some("commissioning") => send_request_path(&arguments, "commissioning"),
-        Some("operate") => send_request_path(&arguments, "operate"),
+        Some("initialize") => send_request_document(&arguments, "initialize"),
+        Some("commissioning") => send_request_document(&arguments, "commissioning"),
+        Some("operate") => send_request_document(&arguments, "operate"),
         _ => Err(anyhow::anyhow!(usage())),
     }
 }
@@ -32,32 +31,21 @@ fn serve(arguments: &[String]) -> anyhow::Result<()> {
     }
 }
 
-fn send_snapshot(arguments: &[String]) -> anyhow::Result<()> {
-    let socket = required_path(arguments, 2, "snapshot requires a socket path")?;
-    let root = required_path(arguments, 3, "snapshot requires a source root")?;
-    let members = arguments
-        .get(4..)
-        .ok_or_else(|| anyhow::anyhow!("snapshot requires at least one explicit member"))?
-        .iter()
-        .map(PathBuf::from)
-        .collect();
-    send_to_socket(
-        socket,
-        SemanticOperation::SnapshotSource {
-            request: SourceSnapshotRequest { root, members },
-        },
-    )
-}
-
-fn send_request_path(arguments: &[String], command: &str) -> anyhow::Result<()> {
+fn send_request_document(arguments: &[String], command: &str) -> anyhow::Result<()> {
     let socket = required_path(arguments, 2, &format!("{command} requires a socket path"))?;
-    let request_path = required_path(arguments, 3, &format!("{command} requires a request path"))?
-        .display()
-        .to_string();
+    let document_path = required_path(
+        arguments,
+        3,
+        &format!("{command} requires a signed JSON document path"),
+    )?;
+    // This is a CLI-local read. The socket protocol contains the document
+    // bytes, so the daemon never opens a client-selected filesystem path.
+    let request = serde_json::from_slice(&fs::read(document_path)?)?;
     let operation = match command {
-        "initialize" => SemanticOperation::Initialize { request_path },
-        "commissioning" => SemanticOperation::Commissioning { request_path },
-        "operate" => SemanticOperation::Operate { request_path },
+        "snapshot" => SemanticOperation::SnapshotSource { request },
+        "initialize" => SemanticOperation::Initialize { request },
+        "commissioning" => SemanticOperation::Commissioning { request },
+        "operate" => SemanticOperation::Operate { request },
         _ => return Err(anyhow::anyhow!("unsupported command")),
     };
     send_to_socket(socket, operation)
@@ -85,5 +73,5 @@ fn required_path(arguments: &[String], index: usize, message: &str) -> anyhow::R
 }
 
 fn usage() -> &'static str {
-    "usage: politeiad serve <prefix> | snapshot <socket> <root> <member>... | status <socket> | initialize <socket> <signed-request> | commissioning <socket> <signed-request> | operate <socket> <operation-request>"
+    "usage: politeiad serve <prefix> | status <socket> | snapshot <socket> <signed-request.json> | initialize <socket> <signed-request.json> | commissioning <socket> <signed-request.json> | operate <socket> <signed-request.json>"
 }

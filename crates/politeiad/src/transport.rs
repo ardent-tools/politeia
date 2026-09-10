@@ -195,10 +195,39 @@ mod tests {
     use std::{collections::BTreeSet, fs, thread};
 
     use super::*;
-    use crate::{UnavailableCoordinator, source::SourceSnapshotRequest};
+    use crate::{
+        CoordinatorError, SourceSnapshot,
+        source::{SourceSnapshotRequest, snapshot},
+    };
+
+    struct SourceCoordinator {
+        capture: SourceSnapshotRequest,
+    }
+
+    impl CommissioningCoordinator for SourceCoordinator {
+        fn execute(
+            &self,
+            operation: SemanticOperation,
+        ) -> Result<OperationResult, CoordinatorError> {
+            match operation {
+                SemanticOperation::SnapshotSource { request }
+                    if request == serde_json::json!({"signed": "capture-request"}) =>
+                {
+                    snapshot(self.capture.clone())
+                        .map(|snapshot: SourceSnapshot| OperationResult::SourceSnapshot {
+                            snapshot,
+                        })
+                        .map_err(|error| CoordinatorError::Refused(error.to_string()))
+                }
+                _ => Err(CoordinatorError::Refused(
+                    "test coordinator rejected unsigned capture request".to_string(),
+                )),
+            }
+        }
+    }
 
     #[test]
-    fn local_socket_runs_the_same_source_operation_as_the_application() {
+    fn local_socket_routes_source_capture_through_the_coordinator() {
         let root = std::env::temp_dir().join(format!("politeiad-transport-{}", std::process::id()));
         fs::create_dir_all(&root).expect("fixture directory is creatable");
         fs::write(root.join("source.txt"), b"source").expect("fixture source is writable");
@@ -208,18 +237,21 @@ mod tests {
             .expect("fixture run directory becomes private");
         let socket = run.join("politeiad.sock");
         let listener = bind(&socket).expect("fixture socket binds");
+        let coordinator = SourceCoordinator {
+            capture: SourceSnapshotRequest {
+                root: root.clone(),
+                members: BTreeSet::from(["source.txt".into()]),
+            },
+        };
         let server = thread::spawn(move || {
-            serve_once(&listener, &UnavailableCoordinator).expect("one valid request is served");
+            serve_once(&listener, &coordinator).expect("one valid request is served");
         });
         let response = request(
             &socket,
             &current_request(
                 "request-1".to_string(),
                 SemanticOperation::SnapshotSource {
-                    request: SourceSnapshotRequest {
-                        root: root.clone(),
-                        members: BTreeSet::from(["source.txt".into()]),
-                    },
+                    request: serde_json::json!({"signed": "capture-request"}),
                 },
             ),
         )

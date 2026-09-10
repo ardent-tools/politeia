@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 cap-std = "3"
+cap-fs-ext = "3"
 politeia-core.workspace = true
 politeia-protocol.workspace = true
 

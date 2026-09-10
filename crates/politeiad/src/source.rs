@@ -2,20 +2,32 @@
 
 use std::{
     collections::BTreeSet,
-    fs, io,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
 };
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
 use politeia_core::Digest;
 use serde::{Deserialize, Serialize};
 
 /// An explicit source membership selection. Directories are never swept.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceSnapshotRequest {
+#[allow(
+    dead_code,
+    reason = "the production coordinator is the sole caller; unit tests exercise the adapter directly"
+)]
+pub(crate) struct SourceSnapshotRequest {
     /// Root that contains every selected source member.
     pub root: PathBuf,
-    /// Repository-relative paths selected by the authoritative manifest.
+    /// Exactly the paths selected by the authoritative manifest.
+    ///
+    /// Selection is affirmative: a caller cannot infer a population decision
+    /// for a path which does not appear here.
     pub members: BTreeSet<PathBuf>,
 }
 
@@ -35,9 +47,9 @@ pub struct SourceMember {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSnapshot {
-    /// Canonical root path at capture time.
+    /// Configured root path at capture time.
     pub root: PathBuf,
-    /// Complete selected membership, including every exclusion by omission.
+    /// Exact selected membership.
     pub members: Vec<SourceMember>,
     /// Digest of the ordered source member records.
     pub manifest_digest: Digest,
@@ -91,12 +103,23 @@ impl From<io::Error> for SourceSnapshotError {
     }
 }
 
-/// Capture exactly the selected, regular files without following an implicit tree.
-pub fn snapshot(request: SourceSnapshotRequest) -> Result<SourceSnapshot, SourceSnapshotError> {
+/// Capture exactly the selected regular files beneath one capability-anchored root.
+///
+/// This adapter is internal. The coordinator may invoke it only after it has
+/// admitted the signed request and verified its reconnaissance grant and
+/// descriptor scope.
+#[allow(
+    dead_code,
+    reason = "the production coordinator is the sole caller; unit tests exercise the adapter directly"
+)]
+pub(crate) fn snapshot(
+    request: SourceSnapshotRequest,
+) -> Result<SourceSnapshot, SourceSnapshotError> {
     if request.members.is_empty() {
         return Err(SourceSnapshotError::EmptyMembership);
     }
-    let root = fs::canonicalize(request.root)?;
+    let root_path = request.root;
+    let root = Dir::open_ambient_dir(&root_path, ambient_authority())?;
     let mut members = Vec::with_capacity(request.members.len());
     for relative in request.members {
         if relative.is_absolute()
@@ -109,16 +132,18 @@ pub fn snapshot(request: SourceSnapshotRequest) -> Result<SourceSnapshot, Source
         {
             return Err(SourceSnapshotError::MemberOutsideRoot(relative));
         }
-        let joined = root.join(&relative);
-        let resolved = fs::canonicalize(&joined)?;
-        if !resolved.starts_with(&root) {
-            return Err(SourceSnapshotError::MemberOutsideRoot(relative));
-        }
-        if !resolved.metadata()?.is_file() {
+        let path = normalized_member_path(&relative)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        // The directory descriptor anchors this read beneath `root`; refusing
+        // symlinks keeps a selected member from being replaced between checks.
+        options.follow(FollowSymlinks::No);
+        let mut file = root.open_with(&relative, &options)?;
+        if !file.metadata()?.is_file() {
             return Err(SourceSnapshotError::NotRegularFile(relative));
         }
-        let bytes = fs::read(resolved)?;
-        let path = normalized_member_path(&relative)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
         members.push(SourceMember {
             path,
             content_digest: Digest::blake3(&bytes),
@@ -130,12 +155,16 @@ pub fn snapshot(request: SourceSnapshotRequest) -> Result<SourceSnapshot, Source
     let bytes = serde_json::to_vec(&members)
         .map_err(|error| SourceSnapshotError::Encoding(error.to_string()))?;
     Ok(SourceSnapshot {
-        root,
+        root: root_path,
         members,
         manifest_digest: Digest::blake3(&bytes),
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "the production coordinator is the sole caller; unit tests exercise the adapter directly"
+)]
 fn normalized_member_path(path: &Path) -> Result<String, SourceSnapshotError> {
     let text = path
         .to_str()
@@ -183,5 +212,27 @@ mod tests {
             result,
             Err(SourceSnapshotError::MemberOutsideRoot(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_refuses_a_selected_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("politeiad-source-link-{}", std::process::id()));
+        let outside = root.with_extension("outside");
+        fs::create_dir_all(&root).expect("fixture directory is creatable");
+        fs::write(&outside, b"outside").expect("outside fixture is writable");
+        symlink(&outside, root.join("selected-link")).expect("fixture symlink is creatable");
+
+        let result = snapshot(SourceSnapshotRequest {
+            root: root.clone(),
+            members: BTreeSet::from([PathBuf::from("selected-link")]),
+        });
+        assert!(matches!(result, Err(SourceSnapshotError::Io(_))));
+
+        fs::remove_dir_all(root).expect("fixture directory is removable");
+        fs::remove_file(outside).expect("outside fixture is removable");
     }
 }

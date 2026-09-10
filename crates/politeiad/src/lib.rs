@@ -23,25 +23,25 @@ use crate::source::SourceSnapshot;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SemanticOperation {
-    /// Inspect one source root using an explicit source membership manifest.
+    /// Request an authenticated bounded source capture.
     SnapshotSource {
-        /// Explicit, read-only source request.
-        request: source::SourceSnapshotRequest,
+        /// Signed, typed coordinator input. It has no authority until admitted.
+        request: serde_json::Value,
     },
     /// Initialize the local host trust boundary.
     Initialize {
-        /// Location of an authenticated initialization request.
-        request_path: String,
+        /// Signed, typed coordinator input. It has no authority until admitted.
+        request: serde_json::Value,
     },
     /// Submit a signed commissioning transition for authoritative processing.
     Commissioning {
-        /// Location of the signed, typed request document.
-        request_path: String,
+        /// Signed, typed coordinator input. It has no authority until admitted.
+        request: serde_json::Value,
     },
     /// Ask the active generation to perform a mediated operation.
     Operate {
-        /// Location of the typed operation-intent document.
-        request_path: String,
+        /// Signed, typed coordinator input. It has no authority until admitted.
+        request: serde_json::Value,
     },
     /// Return current state from the durable authority.
     Status,
@@ -51,7 +51,7 @@ pub enum SemanticOperation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationResult {
-    /// A source was read without mutation. Admission remains a coordinator act.
+    /// A coordinator-authorized source capture.
     SourceSnapshot {
         /// Captured source identity and explicit member set.
         snapshot: SourceSnapshot,
@@ -72,7 +72,7 @@ pub enum OperationResult {
 /// durable commits to `politeia-storage`. It exists so neither transport owns
 /// an alternate lifecycle implementation.
 pub trait CommissioningCoordinator: Send + Sync {
-    /// Execute one non-snapshot semantic operation.
+    /// Execute one semantic operation.
     fn execute(&self, operation: SemanticOperation) -> Result<OperationResult, CoordinatorError>;
 }
 
@@ -101,19 +101,14 @@ impl std::error::Error for CoordinatorError {}
 
 /// Execute a semantic operation through the only application boundary.
 ///
-/// Source inspection is intentionally the one local operation: it only reads
-/// an explicit manifest. Its result cannot become an institutional observation
-/// until a signed coordinator request admits it.
+/// Transport input does not receive a local exception. The coordinator admits
+/// every request, checks its bounded grant, and invokes adapters only after
+/// those checks succeed.
 pub fn execute(
     coordinator: &dyn CommissioningCoordinator,
     operation: SemanticOperation,
 ) -> Result<OperationResult, CoordinatorError> {
-    match operation {
-        SemanticOperation::SnapshotSource { request } => source::snapshot(request)
-            .map(|snapshot| OperationResult::SourceSnapshot { snapshot })
-            .map_err(|error| CoordinatorError::Refused(error.to_string())),
-        operation => coordinator.execute(operation),
-    }
+    coordinator.execute(operation)
 }
 
 /// A deliberate fail-closed coordinator for hosts not yet fully configured.
