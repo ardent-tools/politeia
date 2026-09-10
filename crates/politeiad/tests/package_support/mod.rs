@@ -712,6 +712,20 @@ impl ReferenceFixture {
         )
     }
 
+    pub(crate) fn forged_context_requester(&self, delegation: &Delegation) -> serde_json::Value {
+        let generation = RuntimeGenerationId::from_digest(
+            politeiad::service_learning::durable_signed_wire_digest(&self.host_trust.bootstrap)
+                .expect("bootstrap wire canonically digests"),
+        );
+        let request = LearningDisclosureIngress {
+            id: CommissioningRecordId::new(), requester: self.identities.worker.clone(),
+            delegation: delegation.id.clone(), budget: delegation.budget.clone(),
+            input: ContextRequest { institution: self.host_trust.workspace.institution.clone(), workspace: self.host_trust.workspace.id.clone(), generation, compiler_version: "learning-v1".to_owned(), audience: "commissioning".to_owned(), sink: "package-acceptance".to_owned(), trust_domain: self.host_trust.workspace.trust_domain.clone(), limit: 1 },
+        };
+        let signed = SignedAdmissionWire::sign(AdmissionKind::LearningContext, self.host_trust.workspace.institution.clone(), self.host_trust.workspace.id.clone(), self.identities.commissioner.clone(), request, self.identities.commissioner_key()).expect("commissioner signs forged requester envelope");
+        serde_json::json!({"kind":"learning", "request": LearningRequest::CompileContext { request: signed }})
+    }
+
     /// Bind the exact owner-approved fact to public content for later learning.
     ///
     /// This may be sent only after the candidate and its owner approval have

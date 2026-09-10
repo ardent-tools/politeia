@@ -503,7 +503,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         "software-context-delegation.json",
         &serde_json::json!({
             "kind": "admit_delegation",
-            "delegation": software.signed_commissioner_delegation(software_context_delegation),
+            "delegation": software.signed_commissioner_delegation(software_context_delegation.clone()),
         }),
     )?;
     require_coordinated(
@@ -516,6 +516,23 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
             ],
         )?,
         "software context delegation admission",
+    )?;
+    let forged_context_request = write_request(
+        &software,
+        "software-forged-context-requester.json",
+        &software.forged_context_requester(&software_context_delegation),
+    )?;
+    require_refusal(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &software_socket,
+                &forged_context_request,
+            ],
+        )?,
+        "software forged context requester",
+        "learning requester differs from the verified disclosure envelope signer",
     )?;
     let software_context_request = write_request(
         &software,
