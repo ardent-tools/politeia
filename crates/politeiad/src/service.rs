@@ -43,6 +43,7 @@ use serde_json::{Value, json};
 use crate::{
     CommissioningCoordinator, CoordinatorError, OperationResult, SemanticOperation,
     config::InstallationLayout,
+    service_handoff::HandoffSubmission,
     service_operation::{
         CAPTURE_SOURCE_OPERATION, CapabilityEvidenceSubmission,
         DetectorCalibrationEvidenceSubmission, InstalledOperationHandler, OperationSubmission,
@@ -134,6 +135,12 @@ pub enum CommissioningRequest {
     DetectorCalibrationEvidence {
         /// Policy bytes, actual calibration report, live grant, and signed evidence.
         submission: Box<DetectorCalibrationEvidenceSubmission>,
+    },
+    /// Accept custody only after complete commissioner closure and a completed
+    /// active-generation continuity canary.
+    Handoff {
+        /// Owner-signed acceptance evidence and exact completed canary selection.
+        submission: Box<HandoffSubmission>,
     },
 }
 
@@ -1097,6 +1104,7 @@ impl PoliteiadService {
             CommissioningRequest::DetectorCalibrationEvidence { submission } => {
                 self.admit_detector_calibration_evidence(*submission).await
             }
+            CommissioningRequest::Handoff { submission } => self.accept_handoff(*submission).await,
             CommissioningRequest::AdmitDelegation { delegation } => {
                 let admitted = self
                     .anchors

@@ -14,6 +14,7 @@ pub mod learning;
 pub mod service;
 pub mod service_generation;
 pub mod service_generation_validation;
+pub mod service_handoff;
 pub mod service_learning;
 pub mod service_operation;
 pub mod service_revocation;
