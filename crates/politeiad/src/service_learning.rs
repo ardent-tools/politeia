@@ -13,8 +13,9 @@ use std::{
 
 use jiff::Timestamp;
 use politeia_core::{
-    AdapterId, CommissioningRecordId, DataClass, DelegationId, Digest, Effect, EvidenceId,
-    ObservationId, PrincipalId, ResourceBudget, RuntimeGenerationId, SourceCaptureId,
+    AdapterId, BudgetReservationId, CommissioningRecordId, DataClass, DelegationId, Digest, Effect,
+    EffectLeaseId, EvidenceId, InstitutionId, InstitutionWorkspaceId, ObservationId, PrincipalId,
+    ResourceBudget, RuntimeGenerationId, SourceCaptureId,
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     knowledge::{
         FactApprovalRequest, SourceCaptureRequest, TrustedCandidateClaimRegistry,
@@ -23,14 +24,19 @@ use politeia_core::{
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use politeia_evidence::assessment::{AssessmentRelation, Projection};
+use politeia_policy::PolicyDecision;
 use politeia_runtime::{
-    AuthorizedEffect, Dispatcher, DispatcherConfig, EffectPort, OperationIntent,
-    PolicyDecisionPoint,
+    AuthorizationLedger, AuthorizedEffect, Dispatcher, DispatcherConfig, EffectLease, EffectPort,
+    OperationIntent, PolicyDecisionPoint,
 };
-use politeia_storage::{ScopedCommit, SignedRecord, StateMutation, WorkspaceSnapshot};
+use politeia_storage::{
+    CanonicalPayload, OperationOutboxMessage, PostgresAuthorizationLedger, ScopedCommit,
+    SignedRecord, StateMutation, WorkspaceSnapshot,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     CoordinatorError, OperationResult,
@@ -79,6 +85,46 @@ pub struct LearningDisclosureIngress<T> {
     pub budget: ResourceBudget,
     /// Exact inert context or discovery input.
     pub input: T,
+}
+
+/// Immutable receipt retained only after a disclosed result's claimed budget
+/// reservation has completed with its transactional outbox message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LearningDisclosureReceipt {
+    schema: String,
+    id: Uuid,
+    institution: InstitutionId,
+    workspace: InstitutionWorkspaceId,
+    /// Canonical JSON view of the exact installed-key-signed primary request.
+    request: Value,
+    request_digest: Digest,
+    subject: Digest,
+    population: Digest,
+    input_digest: Digest,
+    generation: RuntimeGenerationId,
+    lease: EffectLeaseId,
+    reservation: BudgetReservationId,
+    decision: PolicyDecision,
+    completed_at: Timestamp,
+    outcome: OperationResult,
+}
+
+/// Public evidence that a context or discovery response has completed its
+/// durable reservation and committed its receipt/outbox record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearningDisclosureCompletion {
+    /// Immutable receipt identity retained by PostgreSQL.
+    pub receipt: Uuid,
+    /// Digest of the exact canonical receipt bytes.
+    pub receipt_digest: Digest,
+    /// Claimed reservation transitioned to completed with this receipt.
+    pub reservation: BudgetReservationId,
+    /// Runtime generation bound by the consumed effect lease.
+    pub generation: RuntimeGenerationId,
+    /// Transactional outbox message identity.
+    pub outbox: Uuid,
 }
 
 /// Owner-pinned content and eligibility metadata for one approved fact.
@@ -394,7 +440,8 @@ impl PoliteiadService {
             execution: None,
         };
         let lease = dispatcher.authorize(&intent).await.map_err(refusal)?;
-        dispatcher.execute(&lease).await.map_err(refusal)
+        let output = dispatcher.execute(&lease).await.map_err(refusal)?;
+        self.complete_disclosure(&wire, &lease, output).await
     }
 
     async fn discover_capabilities(
@@ -497,6 +544,7 @@ impl PoliteiadService {
         }
         self.bootstrap_disclosure(
             bootstrap.digest(),
+            &wire,
             &admitted,
             &authority,
             resources,
@@ -526,7 +574,7 @@ impl PoliteiadService {
         input_digest: Digest,
         submission: OperationSubmission,
     ) -> Result<OperationResult, CoordinatorError> {
-        self.active_disclosure(
+        Box::pin(self.active_disclosure(
             durable,
             wire,
             authority,
@@ -538,7 +586,7 @@ impl PoliteiadService {
             &wire.payload.input.audience,
             COMPILE_CONTEXT_OPERATION,
             crate::learning::COMPILE_CONTEXT_ACTION,
-        )
+        ))
         .await
     }
 
@@ -556,7 +604,7 @@ impl PoliteiadService {
         input_digest: Digest,
         submission: OperationSubmission,
     ) -> Result<OperationResult, CoordinatorError> {
-        self.active_disclosure(
+        Box::pin(self.active_disclosure(
             durable,
             wire,
             authority,
@@ -568,7 +616,7 @@ impl PoliteiadService {
             &disclosure_audience(delegation_leaf(authority)?.payload())?,
             DISCOVER_CAPABILITIES_OPERATION,
             crate::learning::DISCOVER_CAPABILITIES_ACTION,
-        )
+        ))
         .await
     }
 
@@ -576,7 +624,7 @@ impl PoliteiadService {
         clippy::too_many_arguments,
         reason = "each authenticated disclosure binding axis is explicit at the service boundary"
     )]
-    async fn active_disclosure<T>(
+    async fn active_disclosure<T: Serialize>(
         &self,
         durable: &WorkspaceSnapshot,
         wire: &SignedAdmissionWire<LearningDisclosureIngress<T>>,
@@ -698,16 +746,18 @@ impl PoliteiadService {
             .authorize(admitted.intent())
             .await
             .map_err(refusal)?;
-        dispatcher.execute(&lease).await.map_err(refusal)
+        let output = dispatcher.execute(&lease).await.map_err(refusal)?;
+        self.complete_disclosure(wire, &lease, output).await
     }
 
     #[expect(
         clippy::too_many_arguments,
         reason = "bootstrap disclosure also binds each durable authorization axis explicitly"
     )]
-    async fn bootstrap_disclosure<T>(
+    async fn bootstrap_disclosure<T: Serialize>(
         &self,
         bootstrap: &Digest,
+        wire: &SignedAdmissionWire<LearningDisclosureIngress<T>>,
         admitted: &Admitted<LearningDisclosureIngress<T>>,
         authority: &[Admitted<politeia_core::Delegation>],
         resources: BTreeSet<String>,
@@ -779,7 +829,70 @@ impl PoliteiadService {
             execution: None,
         };
         let lease = dispatcher.authorize(&intent).await.map_err(refusal)?;
-        dispatcher.execute(&lease).await.map_err(refusal)
+        let output = dispatcher.execute(&lease).await.map_err(refusal)?;
+        self.complete_disclosure(wire, &lease, output).await
+    }
+
+    async fn complete_disclosure<T: Serialize>(
+        &self,
+        request: &SignedAdmissionWire<LearningDisclosureIngress<T>>,
+        lease: &EffectLease,
+        outcome: OperationResult,
+    ) -> Result<OperationResult, CoordinatorError> {
+        let request_digest = durable_signed_wire_digest(request)?;
+        let request = serde_json::to_value(request).map_err(|error| {
+            CoordinatorError::Refused(format!(
+                "learning disclosure receipt cannot encode request: {error}"
+            ))
+        })?;
+        let completed_at =
+            PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone())
+                .observed_at()
+                .await
+                .map_err(refusal)?;
+        let receipt_id = Uuid::now_v7();
+        let receipt = LearningDisclosureReceipt {
+            schema: "politeia.learning-disclosure-receipt.v1".to_string(),
+            id: receipt_id,
+            institution: self.workspace().institution.clone(),
+            workspace: self.workspace().id.clone(),
+            request,
+            request_digest,
+            subject: lease.decision().subject.clone(),
+            population: lease.decision().population.clone(),
+            input_digest: lease.input_digest().clone(),
+            generation: lease.runtime().clone(),
+            lease: lease.id().clone(),
+            reservation: lease.reservation_id().clone(),
+            decision: lease.decision().clone(),
+            completed_at,
+            outcome,
+        };
+        let canonical_receipt = CanonicalPayload::from_serializable(&receipt)
+            .map_err(|error| storage_refusal(&error))?;
+        let outbox_id = Uuid::now_v7();
+        let completion = LearningDisclosureCompletion {
+            receipt: receipt_id,
+            receipt_digest: canonical_receipt.digest().clone(),
+            reservation: lease.reservation_id().clone(),
+            generation: lease.runtime().clone(),
+            outbox: outbox_id,
+        };
+        let response = disclosure_completion_response(receipt.outcome.clone(), &completion)?;
+        self.storage()
+            .record_completion_with_outbox(
+                self.scope(),
+                lease.reservation_id(),
+                &canonical_receipt,
+                &[OperationOutboxMessage {
+                    id: outbox_id,
+                    topic: "politeia.learning.disclosure.completed.v1".to_string(),
+                    payload: canonical_receipt.clone(),
+                }],
+            )
+            .await
+            .map_err(|error| storage_refusal(&error))?;
+        Ok(response)
     }
 
     async fn record_feedback(
@@ -1716,6 +1829,38 @@ impl fmt::Display for ContextPortError {
     }
 }
 impl Error for ContextPortError {}
+fn disclosure_completion_response(
+    outcome: OperationResult,
+    completion: &LearningDisclosureCompletion,
+) -> Result<OperationResult, CoordinatorError> {
+    let OperationResult::Coordinated {
+        mut result,
+        evidence_refs,
+    } = outcome
+    else {
+        return Err(CoordinatorError::Refused(
+            "learning disclosure port returned a non-coordinated result".to_string(),
+        ));
+    };
+    let fields = result.as_object_mut().ok_or_else(|| {
+        CoordinatorError::Refused(
+            "learning disclosure port returned a non-object result".to_string(),
+        )
+    })?;
+    fields.insert(
+        "completion".to_string(),
+        serde_json::to_value(completion).map_err(|error| {
+            CoordinatorError::Refused(format!(
+                "learning disclosure completion cannot encode response: {error}"
+            ))
+        })?,
+    );
+    Ok(OperationResult::Coordinated {
+        result,
+        evidence_refs,
+    })
+}
+
 struct ContextDisclosurePort {
     adapter: AdapterId,
     audience: String,
@@ -2046,6 +2191,69 @@ mod tests {
                 .map_err(|error| error.to_string())?
         );
         assert_eq!(prior_source.content, b"approved institutional content");
+        Ok(())
+    }
+
+    #[test]
+    fn disclosure_response_exposes_only_a_durable_completion_identity() -> Result<(), String> {
+        let completion = LearningDisclosureCompletion {
+            receipt: Uuid::now_v7(),
+            receipt_digest: Digest::blake3(b"receipt"),
+            reservation: BudgetReservationId::new(),
+            generation: RuntimeGenerationId::derive(b"generation"),
+            outbox: Uuid::now_v7(),
+        };
+        let result = disclosure_completion_response(
+            OperationResult::Coordinated {
+                result: json!({"context": [{"content": [1, 2, 3]}]}),
+                evidence_refs: vec!["approved-source:one".to_string()],
+            },
+            &completion,
+        )
+        .map_err(|error| error.to_string())?;
+        let OperationResult::Coordinated {
+            result,
+            evidence_refs,
+        } = result
+        else {
+            panic!("disclosure completion changed the result kind");
+        };
+        assert_eq!(evidence_refs, vec!["approved-source:one"]);
+        assert_eq!(result["completion"]["receipt"], json!(completion.receipt));
+        assert_eq!(
+            result["completion"]["reservation"],
+            json!(completion.reservation)
+        );
+        assert_eq!(result["context"][0]["content"], json!([1, 2, 3]));
+        Ok(())
+    }
+
+    #[test]
+    fn disclosure_response_refuses_a_port_result_that_cannot_carry_completion() -> Result<(), String>
+    {
+        let completion = LearningDisclosureCompletion {
+            receipt: Uuid::now_v7(),
+            receipt_digest: Digest::blake3(b"receipt"),
+            reservation: BudgetReservationId::new(),
+            generation: RuntimeGenerationId::derive(b"generation"),
+            outbox: Uuid::now_v7(),
+        };
+        let error = disclosure_completion_response(
+            OperationResult::Coordinated {
+                result: json!(["unstructured disclosure"]),
+                evidence_refs: Vec::new(),
+            },
+            &completion,
+        )
+        .err()
+        .ok_or_else(|| {
+            "a response without a completion identity unexpectedly succeeded".to_string()
+        })?;
+        assert!(
+            error
+                .to_string()
+                .contains("learning disclosure port returned a non-object result")
+        );
         Ok(())
     }
 }

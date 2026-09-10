@@ -11,7 +11,7 @@ use std::{
 };
 
 use politeia_core::{
-    Delegation, Digest,
+    Delegation, Digest, EvidenceId, ObservationId, SourceCaptureId,
     commissioning::CommissionerGrantRecord,
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     institution::{InstitutionBoundary, InstitutionWorkspace},
@@ -635,38 +635,8 @@ impl PoliteiadService {
         approval: SignedAdmissionWire<FactApprovalRequest>,
     ) -> Result<OperationResult, CoordinatorError> {
         let durable = self.durable_snapshot().await?;
-        let evidence = TrustedEvidenceRegistry::admit_signed(
-            &self.anchors,
-            durable
-                .evidence
-                .values()
-                .map(evidence_wire)
-                .collect::<Result<Vec<_>, _>>()?,
-        )
-        .map_err(refusal)?;
-        let captures = TrustedSourceCaptureRegistry::admit_signed(
-            &self.anchors,
-            durable
-                .state
-                .iter()
-                .filter(|(key, _)| key.starts_with("source_capture:"))
-                .map(|(_, value)| state_wire(value))
-                .collect::<Result<Vec<SignedAdmissionWire<SourceCaptureRequest>>, _>>()?,
-        )
-        .map_err(refusal)?;
-        let observations = TrustedObservationRegistry::admit_signed(
-            &self.workspace,
-            &self.anchors,
-            &evidence,
-            &captures,
-            durable
-                .state
-                .iter()
-                .filter(|(key, _)| key.starts_with("observation:"))
-                .map(|(_, value)| state_wire(value))
-                .collect::<Result<Vec<SignedAdmissionWire<ObservationRequest>>, _>>()?,
-        )
-        .map_err(refusal)?;
+        let (_evidence, _captures, observations) =
+            selected_candidate_provenance(&self.workspace, &self.anchors, &durable, &candidate)?;
         let candidates = TrustedCandidateClaimRegistry::admit_signed(
             &self.workspace,
             &self.anchors,
@@ -1238,6 +1208,150 @@ pub(crate) fn refusal(error: impl std::fmt::Display) -> CoordinatorError {
     CoordinatorError::Refused(error.to_string())
 }
 
+/// Rebuild only the signed provenance explicitly named by a candidate claim.
+///
+/// The evidence journal also preserves control runs and activation proofs. They
+/// are durable governance records, but they are not observation evidence. A
+/// candidate may therefore depend only on the exact observation closure it
+/// names; unrelated records must neither be parsed as `EvidenceRequest`s nor
+/// silently satisfy missing provenance.
+fn selected_candidate_provenance(
+    workspace: &InstitutionWorkspace,
+    anchors: &InstitutionTrustAnchors,
+    durable: &politeia_storage::WorkspaceSnapshot,
+    candidate: &SignedAdmissionWire<CandidateClaimRequest>,
+) -> Result<
+    (
+        TrustedEvidenceRegistry,
+        TrustedSourceCaptureRegistry,
+        TrustedObservationRegistry,
+    ),
+    CoordinatorError,
+> {
+    let observation_ids = candidate
+        .payload
+        .supported_by
+        .values()
+        .chain(candidate.payload.contradicted_by.values())
+        .flat_map(|ids| ids.iter().cloned())
+        .collect::<BTreeSet<ObservationId>>();
+    let observations = observation_ids
+        .iter()
+        .map(|id| selected_observation_wire(durable, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let evidence_ids = observations
+        .iter()
+        .map(|observation| observation.payload.evidence.clone())
+        .collect::<BTreeSet<EvidenceId>>();
+    let captures_ids = observations
+        .iter()
+        .map(|observation| observation.payload.capture.clone())
+        .collect::<BTreeSet<SourceCaptureId>>();
+    let evidence = TrustedEvidenceRegistry::admit_signed(
+        anchors,
+        evidence_ids
+            .iter()
+            .map(|id| selected_evidence_wire(&durable.evidence, id))
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+    .map_err(refusal)?;
+    let captures = TrustedSourceCaptureRegistry::admit_signed(
+        anchors,
+        captures_ids
+            .iter()
+            .map(|id| selected_capture_wire(durable, id))
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+    .map_err(refusal)?;
+    let observations = TrustedObservationRegistry::admit_signed(
+        workspace,
+        anchors,
+        &evidence,
+        &captures,
+        observations,
+    )
+    .map_err(refusal)?;
+    Ok((evidence, captures, observations))
+}
+
+fn selected_evidence_wire(
+    journal: &std::collections::BTreeMap<EvidenceId, SignedRecord>,
+    id: &EvidenceId,
+) -> Result<SignedAdmissionWire<EvidenceRequest>, CoordinatorError> {
+    let record = journal.get(id).ok_or_else(|| {
+        CoordinatorError::Refused(
+            "candidate names evidence absent from durable admission".to_string(),
+        )
+    })?;
+    let envelope: SignedAdmissionWire<Value> =
+        serde_json::from_slice(record.payload()).map_err(|_| {
+            CoordinatorError::Refused(
+                "candidate-selected durable evidence is not a signed envelope".to_string(),
+            )
+        })?;
+    if envelope.signer != *record.signer() || envelope.signature != record.signature() {
+        return Err(CoordinatorError::Refused(
+            "candidate-selected durable evidence differs from its stored signature".to_string(),
+        ));
+    }
+    if envelope.kind != AdmissionKind::Evidence {
+        return Err(CoordinatorError::Refused(
+            "candidate-selected durable evidence has the wrong admission kind".to_string(),
+        ));
+    }
+    let wire = evidence_wire(record)?;
+    if wire.payload.id != *id {
+        return Err(CoordinatorError::Refused(
+            "candidate-selected durable evidence key differs from its signed identity".to_string(),
+        ));
+    }
+    Ok(wire)
+}
+
+fn selected_observation_wire(
+    durable: &politeia_storage::WorkspaceSnapshot,
+    id: &ObservationId,
+) -> Result<SignedAdmissionWire<ObservationRequest>, CoordinatorError> {
+    let key = format!("observation:{}", id.0);
+    let wire: SignedAdmissionWire<ObservationRequest> = durable
+        .state
+        .get(&key)
+        .ok_or_else(|| {
+            CoordinatorError::Refused(
+                "candidate names an observation absent from durable state".to_string(),
+            )
+        })
+        .and_then(state_wire)?;
+    if wire.kind != AdmissionKind::Observation || wire.payload.id != *id {
+        return Err(CoordinatorError::Refused(
+            "candidate-selected observation differs from its durable identity".to_string(),
+        ));
+    }
+    Ok(wire)
+}
+
+fn selected_capture_wire(
+    durable: &politeia_storage::WorkspaceSnapshot,
+    id: &SourceCaptureId,
+) -> Result<SignedAdmissionWire<SourceCaptureRequest>, CoordinatorError> {
+    let key = format!("source_capture:{}", id.0);
+    let wire: SignedAdmissionWire<SourceCaptureRequest> = durable
+        .state
+        .get(&key)
+        .ok_or_else(|| {
+            CoordinatorError::Refused(
+                "candidate-selected observation has no durable source capture".to_string(),
+            )
+        })
+        .and_then(state_wire)?;
+    if wire.kind != AdmissionKind::SourceCapture || wire.payload.id != *id {
+        return Err(CoordinatorError::Refused(
+            "candidate-selected source capture differs from its durable identity".to_string(),
+        ));
+    }
+    Ok(wire)
+}
+
 fn evidence_wire(
     record: &SignedRecord,
 ) -> Result<SignedAdmissionWire<EvidenceRequest>, CoordinatorError> {
@@ -1299,9 +1413,17 @@ fn capture_resources_match(
 
 #[cfg(test)]
 mod capture_tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    use super::capture_resources_match;
+    use ed25519_dalek::SigningKey;
+    use politeia_core::{
+        EvidenceId, InstitutionId, InstitutionWorkspaceId, PrincipalId,
+        trust::{AdmissionKind, SignedAdmissionWire},
+    };
+    use politeia_storage::SignedRecord;
+    use serde_json::json;
+
+    use super::{capture_resources_match, selected_evidence_wire};
 
     #[test]
     fn refuses_a_granted_resource_substituted_for_capture_descriptor_resources() {
@@ -1315,5 +1437,36 @@ mod capture_tests {
             &descriptor,
             &granted_but_unrelated
         ));
+    }
+
+    #[test]
+    fn selected_candidate_evidence_refuses_a_control_record() -> Result<(), String> {
+        let evidence_id = EvidenceId::new();
+        let wire = SignedAdmissionWire::sign(
+            AdmissionKind::ControlRun,
+            InstitutionId::new(),
+            InstitutionWorkspaceId::new(),
+            PrincipalId::new(),
+            json!({"configuration_digest": "not-evidence"}),
+            &SigningKey::from_bytes(&[7; 32]),
+        )
+        .map_err(|error| error.to_string())?;
+        let encoded = serde_json::to_value(&wire).map_err(|error| error.to_string())?;
+        let record = SignedRecord::from_json(&encoded, wire.signer.clone(), wire.signature.clone())
+            .map_err(|error| error.to_string())?;
+        let error = selected_evidence_wire(
+            &BTreeMap::from([(evidence_id.clone(), record)]),
+            &evidence_id,
+        )
+        .err()
+        .ok_or_else(|| {
+            "a selected control record unexpectedly parsed as candidate evidence".to_string()
+        })?;
+        assert!(
+            error
+                .to_string()
+                .contains("candidate-selected durable evidence has the wrong admission kind")
+        );
+        Ok(())
     }
 }
