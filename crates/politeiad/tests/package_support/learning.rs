@@ -14,7 +14,6 @@ use politeia_core::{
     trust::{AdmissionKind, SignedAdmissionWire},
 };
 use politeia_evidence::assessment::AssessmentRelation;
-use politeia_runtime::OperationSubmission;
 use politeiad::{
     learning::{
         COMPILE_CONTEXT_ACTION, CONTEXT_READ_EFFECT, CapabilityRequest, ContextRequest,
@@ -24,6 +23,7 @@ use politeiad::{
     service_learning::{
         LearningDisclosureIngress, LearningIngress, LearningRequest, durable_signed_wire_digest,
     },
+    service_operation::OperationSubmission,
 };
 
 use super::{CandidateDocuments, CaptureDocuments, LearningSourceDocuments, ReferenceFixture};
