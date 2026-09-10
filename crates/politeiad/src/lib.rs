@@ -9,6 +9,7 @@
 
 pub mod artifacts;
 pub mod config;
+pub mod learning;
 pub mod service;
 pub mod source;
 pub mod transport;
