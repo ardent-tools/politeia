@@ -46,3 +46,31 @@ Start with [`START_HERE.md`](START_HERE.md).
 Open source under the **Mozilla Public License 2.0**. See [`LICENSE`](LICENSE). Modifications to
 this project's own files stay MPL when distributed. Adapters, domain packs, and configuration
 built on top remain yours to keep private. Copyright Ardent Works LLC (<https://ardent.tools>).
+
+## Local installation and synthetic commissioning
+
+The first package is a single-tenant Linux daemon backed by PostgreSQL. It uses a private Unix socket and an institution-owned prefix; signing keys remain outside PostgreSQL under `<prefix>/keys` (mode `0700` directory and `0600` files). The daemon never accepts a client filesystem path: CLI request files are read locally and their JSON bytes cross the socket.
+
+Build the CLI from source, prepare an empty PostgreSQL database, and set its connection string only in the process environment:
+
+```sh
+cargo build --release -p politeiad --bin politeia
+export POLITEIA_DATABASE_URL='postgres://…/politeia_synthetic'
+./target/release/politeia initialize /tmp/politeia-synthetic ./host-trust.json
+./target/release/politeia serve /tmp/politeia-synthetic
+```
+
+`host-trust.json` is a serialized `politeiad::config::HostTrustConfiguration`. It contains public verification keys and an owner-signed `WorkspaceBootstrapRequest`; it contains no private signing key. Construct and sign it with the public `politeia-core` Rust APIs used in [`crates/politeiad/tests/slice_composition.rs`](crates/politeiad/tests/slice_composition.rs), then keep the corresponding signing keys in your institution-owned key directory, never in Git or PostgreSQL.
+
+In another terminal, submit an already signed synthetic request document and inspect JSON evidence responses:
+
+```sh
+./target/release/politeia status /tmp/politeia-synthetic/run/politeiad.sock
+./target/release/politeia commissioning /tmp/politeia-synthetic/run/politeiad.sock ./grant.json
+./target/release/politeia snapshot /tmp/politeia-synthetic/run/politeiad.sock ./capture.json
+./target/release/politeia commissioning /tmp/politeia-synthetic/run/politeiad.sock ./approval.json
+```
+
+The command names are stable; their documents are typed signed wires, not loose JSON configuration. `grant.json` is `{"kind":"admit_delegation","delegation":…}`. `capture.json` is a `SourceCaptureSubmission`, and `approval.json` is `{"kind":"approve_claim","candidate":…,"approval":…}`. A bootstrap capture requires a direct owner-to-commissioner grant whose singleton action, resources, effect, audience, and finite budget exactly match the signed capture descriptor. After a generation is published and activated, use `commissioning` with `{"kind":"generation","request":…}` for verify, activation, rollback, and recommissioning lifecycle requests.
+
+Run `politeia serve` only after `initialize` succeeds. A normal daemon exit removes its own socket; a restart removes only a proved stale private socket. Refused requests print a JSON refusal and exit nonzero.
