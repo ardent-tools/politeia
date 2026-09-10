@@ -8,6 +8,7 @@
 mod authority;
 mod completion;
 mod generation;
+mod handoff;
 mod read;
 mod revocation;
 mod transaction;
@@ -47,6 +48,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0004_commissioning_receipts",
         include_str!("../migrations/0004_commissioning_receipts.sql"),
+    ),
+    (
+        "0005_handoff_receipts",
+        include_str!("../migrations/0005_handoff_receipts.sql"),
     ),
 ];
 
@@ -223,6 +228,69 @@ pub struct ScopedCommit {
     pub evidence: Vec<EvidenceAdmission>,
     /// External messages committed transactionally with this transition.
     pub outbox: Vec<OutboxMessage>,
+}
+
+/// One atomic, owner-authorized operational handoff admission.
+///
+/// The semantic service constructs the unsigned receipt from re-admitted core
+/// provenance. Storage rechecks the exact active generation, completed canary,
+/// and complete relevant authority set in the same transaction that preserves
+/// the receipt and its signed evidence.
+#[derive(Clone, Debug)]
+pub struct HandoffCommit {
+    /// Normal workspace transition and signed evidence to append.
+    pub transition: ScopedCommit,
+    /// Exact active generation accepted by the handoff.
+    pub generation: Digest,
+    /// Commissioning provenance incorporated into that generation.
+    pub commissioning_record: CommissioningRecordId,
+    /// Original temporary commissioner whose complete authority must have ended.
+    pub commissioner: PrincipalId,
+    /// Every durable authority record relevant to commissioner closure in the
+    /// coherent service snapshot.
+    pub expected_authorities: std::collections::BTreeSet<DelegationId>,
+    /// Completed operation reservation used as continuity evidence.
+    pub continuity_reservation: BudgetReservationId,
+    /// Exact canonical operation receipt retained by that reservation.
+    pub continuity_receipt: CanonicalPayload,
+    /// Canonical daemon-derived handoff receipt to preserve immutably.
+    pub handoff_receipt: CanonicalPayload,
+}
+
+/// Durable result of an accepted operational handoff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandoffCommitReceipt {
+    /// Newly committed workspace revision.
+    pub revision: i64,
+    /// Digest of the owner-signed continuity transition.
+    pub transition_digest: Digest,
+    /// Digest of the exact unsigned canonical handoff receipt.
+    pub handoff_receipt_digest: Digest,
+    /// Trusted PostgreSQL instant at which the handoff became durable.
+    pub accepted_at: Timestamp,
+}
+
+/// Immutable handoff receipt bytes recovered from durable authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredHandoffReceipt {
+    /// Active generation accepted at handoff.
+    pub generation: Digest,
+    /// Commissioning record incorporated into that generation.
+    pub commissioning_record: CommissioningRecordId,
+    /// Completed operation reservation proving post-revocation continuity.
+    pub continuity_reservation: BudgetReservationId,
+    /// Digest of the exact canonical completed operation receipt.
+    pub continuity_receipt_digest: Digest,
+    /// Digest of the canonical handoff receipt bytes.
+    pub handoff_receipt_digest: Digest,
+    /// Exact canonical handoff receipt bytes.
+    pub payload: Vec<u8>,
+    /// Owner-signed transition digest committed with the receipt.
+    pub transition_digest: Digest,
+    /// Workspace revision at which handoff became durable.
+    pub revision: i64,
+    /// Trusted PostgreSQL acceptance instant.
+    pub accepted_at: Timestamp,
 }
 
 /// The newly committed workspace revision.

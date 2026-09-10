@@ -18,6 +18,9 @@ use politeia_core::{
     AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, EvidenceId, InstitutionId,
     InstitutionWorkspaceId, OperationId, OperationSpec, PolicyBundleId, PrincipalId,
     ResourceBudget, RuntimeGenerationId,
+    commissioning::{
+        COMMISSION_ACTION, commissioning_institution_audience, commissioning_workspace_resource,
+    },
     trust::{
         AdmissionKind, Admitted, InstitutionTrustAnchors, SignedAdmissionWire, TrustedSigningKey,
     },
@@ -28,9 +31,9 @@ use politeia_runtime::{
     PolicyDecisionPoint, RuntimeError,
 };
 use politeia_storage::{
-    ActivationCommit, AttemptStatus, CanonicalPayload, EvidenceAdmission,
-    PostgresAuthorizationLedger, PostgresStorage, Scope, ScopedCommit, SignedRecord, StateMutation,
-    StorageError, WorkspaceBootstrap,
+    ActivationCommit, AttemptStatus, CanonicalPayload, CommissioningReceipt, EvidenceAdmission,
+    HandoffCommit, PostgresAuthorizationLedger, PostgresStorage, Scope, ScopedCommit, SignedRecord,
+    StateMutation, StorageError, WorkspaceBootstrap,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -433,6 +436,7 @@ impl Fixture {
                 key.verifying_key().to_bytes(),
                 BTreeSet::from([
                     AdmissionKind::Delegation,
+                    AdmissionKind::Evidence,
                     AdmissionKind::Generation,
                     AdmissionKind::Revocation,
                 ]),
@@ -625,6 +629,175 @@ impl Fixture {
             .await?;
         Ok(())
     }
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_canary() -> TestResult
+{
+    let fixture = Fixture::new(&database_url()?, 8).await?;
+    let generation = fixture.admit_fixture_generation("handoff").await?;
+    fixture.activate(&generation).await?;
+    let commissioning_record = politeia_core::CommissioningRecordId::new();
+    let commissioning_payload = br#"{"fixture":"handoff-commissioning"}"#.to_vec();
+    fixture
+        .storage
+        .admit_commissioning_receipt(
+            &fixture.scope,
+            &CommissioningReceipt {
+                record: commissioning_record.clone(),
+                record_digest: Digest::blake3(b"handoff-commissioning-record"),
+                payload_digest: Digest::blake3(&commissioning_payload),
+                payload: commissioning_payload,
+            },
+        )
+        .await?;
+
+    let commissioner = PrincipalId::new();
+    let mut commissioner_grant = fixture.authority.payload().clone();
+    commissioner_grant.id = DelegationId::new();
+    commissioner_grant.subject = commissioner.clone();
+    commissioner_grant.actions = BTreeSet::from([COMMISSION_ACTION.to_owned()]);
+    commissioner_grant.resources =
+        BTreeSet::from([commissioning_workspace_resource(fixture.scope.workspace())]);
+    commissioner_grant.audience = BTreeSet::from([commissioning_institution_audience(
+        fixture.scope.institution(),
+    )]);
+    let (commissioner_authority, commissioner_wire) =
+        admit_fixture_authority(&fixture, commissioner_grant.clone())?;
+    fixture
+        .storage
+        .admit_delegation(&fixture.scope, &commissioner_authority, &commissioner_wire)
+        .await?;
+
+    let mut canary_intent = fixture.intent.clone();
+    canary_intent.idempotency_key = Some("handoff-before-revocation".to_owned());
+    let dispatcher = fixture.dispatcher_for_generation(
+        fixture.storage.clone(),
+        SignedDuration::from_secs(30),
+        generation.clone(),
+        false,
+    )?;
+    let early = dispatcher.authorize(&canary_intent).await?;
+    dispatcher.execute(&early).await?;
+    let early_receipt = CanonicalPayload::from_json(&serde_json::json!({
+        "canary": "before-revocation"
+    }))?;
+    fixture
+        .storage
+        .record_completion(&fixture.scope, early.reservation_id(), &early_receipt)
+        .await?;
+
+    let initial = fixture.storage.load_workspace(&fixture.scope).await?;
+    let evidence_a = EvidenceAdmission {
+        id: EvidenceId::new(),
+        record: fixture.signed_fixture_record_for(
+            AdmissionKind::Evidence,
+            serde_json::json!({"handoff": "revocation"}),
+        )?,
+    };
+    let evidence_b = EvidenceAdmission {
+        id: EvidenceId::new(),
+        record: fixture.signed_fixture_record_for(
+            AdmissionKind::Evidence,
+            serde_json::json!({"handoff": "continuity"}),
+        )?,
+    };
+    let handoff = |snapshot: &politeia_storage::WorkspaceSnapshot,
+                   reservation: politeia_core::BudgetReservationId,
+                   canary: CanonicalPayload|
+     -> TestResult<HandoffCommit> {
+        Ok(HandoffCommit {
+            transition: ScopedCommit {
+                scope: fixture.scope.clone(),
+                expected_revision: snapshot.revision,
+                model: snapshot.model.clone(),
+                model_kind: "handoff_receipt".to_owned(),
+                transition: evidence_b.record.clone(),
+                state: vec![],
+                evidence: vec![evidence_a.clone(), evidence_b.clone()],
+                outbox: vec![],
+            },
+            generation: generation.digest().clone(),
+            commissioning_record: commissioning_record.clone(),
+            commissioner: commissioner.clone(),
+            expected_authorities: BTreeSet::from([commissioner_grant.id.clone()]),
+            continuity_reservation: reservation,
+            continuity_receipt: canary,
+            handoff_receipt: CanonicalPayload::from_json(&serde_json::json!({
+                "handoff": generation
+            }))?,
+        })
+    };
+    let still_active = handoff(
+        &initial,
+        early.reservation_id().clone(),
+        early_receipt.clone(),
+    )?;
+    assert!(matches!(
+        fixture
+            .storage
+            .commit_handoff_authorized(&still_active, std::slice::from_ref(&fixture.authority))
+            .await,
+        Err(StorageError::AdmissionMismatch)
+    ));
+
+    revoke_fixture_authority(&fixture, &commissioner_grant).await?;
+    canary_intent.idempotency_key = Some("handoff-after-revocation".to_owned());
+    let dispatcher = fixture.dispatcher_for_generation(
+        fixture.storage.clone(),
+        SignedDuration::from_secs(30),
+        generation.clone(),
+        false,
+    )?;
+    let canary = dispatcher.authorize(&canary_intent).await?;
+    dispatcher.execute(&canary).await?;
+    let canary_receipt = CanonicalPayload::from_json(&serde_json::json!({
+        "canary": "after-revocation"
+    }))?;
+    fixture
+        .storage
+        .record_completion(&fixture.scope, canary.reservation_id(), &canary_receipt)
+        .await?;
+    let closed = fixture.storage.load_workspace(&fixture.scope).await?;
+    let wrong_canary = handoff(
+        &closed,
+        canary.reservation_id().clone(),
+        CanonicalPayload::from_json(&serde_json::json!({"canary": "caller-asserted"}))?,
+    )?;
+    assert!(matches!(
+        fixture
+            .storage
+            .commit_handoff_authorized(&wrong_canary, std::slice::from_ref(&fixture.authority))
+            .await,
+        Err(StorageError::AttemptUnavailable)
+    ));
+
+    let accepted = handoff(
+        &closed,
+        canary.reservation_id().clone(),
+        canary_receipt.clone(),
+    )?;
+    let committed = fixture
+        .storage
+        .commit_handoff_authorized(&accepted, std::slice::from_ref(&fixture.authority))
+        .await?;
+    let retained = fixture
+        .storage
+        .load_handoff_receipt(&fixture.scope, generation.digest())
+        .await?;
+    assert_eq!(retained.revision, committed.revision);
+    assert_eq!(retained.payload, accepted.handoff_receipt.bytes());
+    assert_eq!(retained.continuity_receipt_digest, *canary_receipt.digest());
+    assert_eq!(
+        fixture
+            .storage
+            .load_workspace(&fixture.scope)
+            .await?
+            .revision,
+        closed.revision + 1
+    );
+    Ok(())
 }
 
 fn database_url() -> TestResult<String> {
