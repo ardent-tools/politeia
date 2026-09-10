@@ -156,6 +156,8 @@ pub struct OperationReceipt {
     pub routing: RoutingDecision,
     /// Exact availability input bound into routing.
     pub availability: AvailabilitySnapshot,
+    /// Signed capability-verification claims and their exact live owner grants.
+    pub capability_verifications: Vec<CapabilityVerificationEvidence>,
     /// Signed detector and activation evidence consumed by policy.
     pub assurance: Vec<OperationalControlEvidence>,
     /// Selected resource assignment bound into the signed intent and lease.
@@ -510,6 +512,104 @@ impl ActiveOperationalRegistry {
     }
 }
 
+/// Fully admitted active-operation inputs ready for one shared Dispatcher.
+///
+/// Construction is private to the service admission path. Adjacent typed
+/// handlers may inspect the exact bound values and supply their own installed
+/// effect port without repeating policy, capability, routing, or grant logic.
+pub(crate) struct AdmittedOperationalSubmission {
+    registry: ActiveOperationalRegistry,
+    registered: RegisteredOperation,
+    signed_intent: SignedAdmissionWire<OperationIntent>,
+    intent: Admitted<OperationIntent>,
+    operation_chain: Vec<Delegation>,
+    policy: AdmittedOperationalDecision,
+    availability: AvailabilitySnapshot,
+    routing: RoutingDecision,
+    assignment: ExecutionAssignment,
+    capability_verifications: Vec<CapabilityVerificationEvidence>,
+    assurance: Vec<OperationalControlEvidence>,
+    admission_revision: i64,
+}
+
+impl AdmittedOperationalSubmission {
+    /// Exact active registry from freshly reverified generation bytes.
+    pub(crate) fn registry(&self) -> &ActiveOperationalRegistry {
+        &self.registry
+    }
+
+    /// Registered operation and installed handler named by the signed intent.
+    pub(crate) fn registered(&self) -> &RegisteredOperation {
+        &self.registered
+    }
+
+    /// Authenticated operation intent supplied to Dispatcher authorization.
+    pub(crate) fn intent(&self) -> &OperationIntent {
+        self.intent.payload()
+    }
+
+    /// Original signed intent retained in completion evidence.
+    pub(crate) fn signed_intent(&self) -> &SignedAdmissionWire<OperationIntent> {
+        &self.signed_intent
+    }
+
+    /// Recomputed exact routing decision.
+    pub(crate) fn routing(&self) -> &RoutingDecision {
+        &self.routing
+    }
+
+    /// Selected resource assignment bound by the signed intent.
+    pub(crate) fn assignment(&self) -> &ExecutionAssignment {
+        &self.assignment
+    }
+
+    /// Availability snapshot bound by the routing receipt.
+    pub(crate) fn availability(&self) -> &AvailabilitySnapshot {
+        &self.availability
+    }
+
+    /// Signed capability evidence admitted before routing.
+    pub(crate) fn capability_verifications(&self) -> &[CapabilityVerificationEvidence] {
+        &self.capability_verifications
+    }
+
+    /// Signed public-control evidence admitted before policy evaluation.
+    pub(crate) fn assurance(&self) -> &[OperationalControlEvidence] {
+        &self.assurance
+    }
+
+    /// Durable revision from the coherent selection/admission snapshot.
+    pub(crate) fn admission_revision(&self) -> i64 {
+        self.admission_revision
+    }
+
+    /// Build the only dispatcher configuration for these admitted inputs.
+    pub(crate) fn dispatcher<P: EffectPort>(
+        &self,
+        port: P,
+        ledger: PostgresAuthorizationLedger,
+    ) -> Result<
+        Dispatcher<AdmittedOperationalDecision, P, PostgresAuthorizationLedger>,
+        CoordinatorError,
+    > {
+        let config = DispatcherConfig::new(
+            self.registry.policy().bundle().clone(),
+            self.registry.policy().digest().clone(),
+            self.registry.generation().clone(),
+            format!(
+                "operational:{}",
+                self.registry.generation().digest().as_str()
+            ),
+            jiff::SignedDuration::from_mins(5),
+            self.operation_chain.clone(),
+            [self.registered.spec.clone()],
+        )
+        .and_then(|config| config.with_trusted_routing_decisions([self.routing.clone()]))
+        .map_err(operational_refusal)?;
+        Ok(Dispatcher::new(self.policy.clone(), port, ledger, config))
+    }
+}
+
 impl PoliteiadService {
     /// Load the sole active-generation pointer, reverify the immutable bundle,
     /// and decode its exact canonical operational registries.
@@ -562,16 +662,17 @@ impl PoliteiadService {
             .map_err(|error| operational_refusal(error.to_string()))
     }
 
-    /// Authenticate, authorize, route, execute, and durably complete one
-    /// principal-signed operation under the exact active generation.
-    pub(crate) async fn handle_operation(
+    /// Admit one complete active-generation submission for a typed effect port.
+    ///
+    /// This is the shared authority seam for the manifest, source-capture, and
+    /// learning handlers. It authenticates the principal intent, binds it to
+    /// one coherent workspace snapshot, admits capability evidence, reproduces
+    /// routing, and evaluates the complete active policy.
+    pub(crate) async fn admit_operational_submission(
         &self,
-        request: Value,
-    ) -> Result<crate::OperationResult, CoordinatorError> {
-        let mut submission: OperationSubmission =
-            serde_json::from_value(request).map_err(|error| {
-                operational_refusal(format!("operation submission is malformed: {error}"))
-            })?;
+        durable: &politeia_storage::WorkspaceSnapshot,
+        mut submission: OperationSubmission,
+    ) -> Result<AdmittedOperationalSubmission, CoordinatorError> {
         submission
             .assurance
             .sort_by(|left, right| left.run.payload.control.cmp(&right.run.payload.control));
@@ -581,19 +682,16 @@ impl PoliteiadService {
                 .id
                 .cmp(&right.verification.payload.id)
         });
-
         let signed_intent = submission.intent.clone();
         let admitted_intent = self
             .anchors()
-            .admit_expected(AdmissionKind::OperationIntent, submission.intent.clone())
+            .admit_expected(AdmissionKind::OperationIntent, submission.intent)
             .map_err(operational_refusal)?;
         if admitted_intent.signer() != &admitted_intent.payload().principal {
             return Err(operational_refusal(
                 "operation intent signer is not its requesting principal",
             ));
         }
-
-        let durable = self.durable_snapshot().await?;
         let active = durable
             .active_generation
             .as_ref()
@@ -606,25 +704,10 @@ impl PoliteiadService {
                 operational_refusal("signed intent operation differs from the active registry")
             })?
             .clone();
-        let (maximum_resources, maximum_resource_bytes) = match registered.handler {
-            InstalledOperationHandler::ResourceManifest {
-                maximum_resources,
-                maximum_resource_bytes,
-            } => (maximum_resources, maximum_resource_bytes),
-            _ => {
-                return Err(operational_refusal(
-                    "operation is installed behind another typed service boundary",
-                ));
-            }
-        };
-
         let ledger = PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone());
-        let now = ledger
-            .observed_at()
-            .await
-            .map_err(|error| operational_refusal(error.to_string()))?;
-        let capability_verifications = self.admit_capability_verifications(
-            &durable,
+        let now = ledger.observed_at().await.map_err(operational_refusal)?;
+        let admitted_capabilities = self.admit_capability_verifications(
+            durable,
             &submission.capability_verifications,
             now,
         )?;
@@ -634,10 +717,10 @@ impl PoliteiadService {
                 &registered.spec,
                 submission.routing.id.clone(),
                 &submission.availability,
-                &capability_verifications,
+                &admitted_capabilities,
                 now,
             )
-            .map_err(|error| operational_refusal(error.to_string()))?;
+            .map_err(operational_refusal)?;
         if routing != submission.routing {
             return Err(operational_refusal(
                 "submitted routing receipt differs from deterministic active routing",
@@ -654,9 +737,66 @@ impl PoliteiadService {
                 "signed intent does not bind the exact selected routing assignment",
             ));
         }
-        let selected_resource = registry
+        let operation_chain = self
+            .admit_durable_delegation_chain(
+                durable,
+                &admitted_intent.payload().delegation_chain,
+                admitted_intent.signer(),
+            )?
+            .into_iter()
+            .map(|delegation| delegation.into_payload())
+            .collect();
+        let policy = self.admit_operational_decision(
+            durable,
+            &registry,
+            admitted_intent.payload(),
+            &submission.assurance,
+            now,
+        )?;
+        Ok(AdmittedOperationalSubmission {
+            registry,
+            registered,
+            signed_intent,
+            intent: admitted_intent,
+            operation_chain,
+            policy,
+            availability: submission.availability,
+            routing,
+            assignment,
+            capability_verifications: submission.capability_verifications,
+            assurance: submission.assurance,
+            admission_revision: durable.revision,
+        })
+    }
+
+    /// Authenticate, authorize, route, execute, and durably complete one
+    /// principal-signed operation under the exact active generation.
+    pub(crate) async fn handle_operation(
+        &self,
+        request: Value,
+    ) -> Result<crate::OperationResult, CoordinatorError> {
+        let submission: OperationSubmission = serde_json::from_value(request).map_err(|error| {
+            operational_refusal(format!("operation submission is malformed: {error}"))
+        })?;
+        let durable = self.durable_snapshot().await?;
+        let admitted = self
+            .admit_operational_submission(&durable, submission)
+            .await?;
+        let (maximum_resources, maximum_resource_bytes) = match &admitted.registered().handler {
+            InstalledOperationHandler::ResourceManifest {
+                maximum_resources,
+                maximum_resource_bytes,
+            } => (*maximum_resources, *maximum_resource_bytes),
+            _ => {
+                return Err(operational_refusal(
+                    "operation is installed behind another typed service boundary",
+                ));
+            }
+        };
+        let selected_resource = admitted
+            .registry()
             .execution()
-            .resource(&assignment.resource)
+            .resource(&admitted.assignment().resource)
             .ok_or_else(|| operational_refusal("selected execution resource is absent"))?;
         if !matches!(
             &selected_resource.descriptor,
@@ -668,44 +808,21 @@ impl PoliteiadService {
                 "installed manifest handler requires a deterministic client-local resource in the workspace trust domain",
             ));
         }
-
-        let admitted_operation_chain = self.admit_durable_delegation_chain(
-            &durable,
-            &admitted_intent.payload().delegation_chain,
-            admitted_intent.signer(),
-        )?;
-        let policy = self.admit_operational_decision(
-            &durable,
-            &registry,
-            admitted_intent.payload(),
-            &submission.assurance,
-            now,
-        )?;
         let port = ResourceManifestPort {
-            operation: registered.spec.clone(),
-            resources: admitted_intent.payload().resources.clone(),
-            assignment: assignment.clone(),
+            operation: admitted.registered().spec.clone(),
+            resources: admitted.intent().resources.clone(),
+            assignment: admitted.assignment().clone(),
             adapter: selected_resource.adapter.clone(),
             audience: institution_audience(&self.workspace().institution),
             maximum_resources,
             maximum_resource_bytes,
         };
-        let config = DispatcherConfig::new(
-            registry.policy().bundle().clone(),
-            registry.policy().digest().clone(),
-            registry.generation().clone(),
-            format!("operational:{}", registry.generation().digest().as_str()),
-            jiff::SignedDuration::from_mins(5),
-            admitted_operation_chain
-                .iter()
-                .map(|delegation| delegation.payload().clone()),
-            [registered.spec.clone()],
-        )
-        .and_then(|config| config.with_trusted_routing_decisions([routing.clone()]))
-        .map_err(|error| operational_refusal(error.to_string()))?;
-        let dispatcher = Dispatcher::new(policy, port, ledger, config);
+        let dispatcher = admitted.dispatcher(
+            port,
+            PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone()),
+        )?;
         let lease = dispatcher
-            .authorize(admitted_intent.payload())
+            .authorize(admitted.intent())
             .await
             .map_err(|error| operational_refusal(error.to_string()))?;
         let manifest = dispatcher
@@ -724,15 +841,16 @@ impl PoliteiadService {
             id: receipt_id,
             institution: self.workspace().institution.clone(),
             workspace: self.workspace().id.clone(),
-            generation: registry.generation().clone(),
+            generation: admitted.registry().generation().clone(),
             lease: lease.id().clone(),
             reservation: lease.reservation_id().clone(),
-            intent: signed_intent,
+            intent: admitted.signed_intent().clone(),
             decision: lease.decision().clone(),
-            routing: routing.clone(),
-            availability: submission.availability,
-            assurance: submission.assurance,
-            execution: assignment,
+            routing: admitted.routing().clone(),
+            availability: admitted.availability().clone(),
+            capability_verifications: admitted.capability_verifications().to_vec(),
+            assurance: admitted.assurance().to_vec(),
+            execution: admitted.assignment().clone(),
             adapter: selected_resource.adapter.clone(),
             completed_at,
             outcome: OperationCompletionOutcome::Succeeded {
@@ -759,8 +877,8 @@ impl PoliteiadService {
             receipt: receipt_id,
             receipt_digest: canonical_receipt.digest().clone(),
             reservation: lease.reservation_id().clone(),
-            generation: registry.generation().clone(),
-            routing,
+            generation: admitted.registry().generation().clone(),
+            routing: admitted.routing().clone(),
             manifest,
             outbox: outbox_id,
         };
