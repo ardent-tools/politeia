@@ -67,7 +67,6 @@ impl ReferenceFixture {
 
     /// Produce the intentionally incomplete transport shape for fail-closed proof.
     pub(crate) fn handoff_without_evidence(
-        &self,
         generation: &Digest,
         reservation: &BudgetReservationId,
     ) -> serde_json::Value {

@@ -6,7 +6,6 @@ use jiff::Timestamp;
 use politeia_core::{
     BudgetReservationId, Delegation, DelegationId, Digest, ExecutionLocality, InstitutionId,
     InstitutionWorkspaceId, PrincipalId, RuntimeGenerationId,
-    canonical::to_canonical_bytes,
     commissioning::{
         COMMISSION_ACTION, CommissionerGrantRecord, TrustedCommissionerGrantRegistry,
         commissioning_institution_audience, commissioning_workspace_resource,
@@ -33,7 +32,7 @@ use crate::{
     service::{PoliteiadService, refusal, signed_wire_record, storage_refusal},
     service_operation::{
         ActiveOperationalRegistry, InstalledOperationHandler, OperationCompletionOutcome,
-        OperationReceipt, RESOURCE_MANIFEST_OPERATION, ResourceManifest,
+        OperationReceipt, RESOURCE_MANIFEST_OPERATION, derive_resource_manifest,
     },
 };
 
@@ -454,16 +453,19 @@ impl PoliteiadService {
             .ok_or_else(|| {
                 handoff_refusal("handoff canary operation differs from the active registry")
             })?;
-        if registered.spec.name != RESOURCE_MANIFEST_OPERATION
-            || !matches!(
-                registered.handler,
-                InstalledOperationHandler::ResourceManifest { .. }
-            )
-        {
-            return Err(handoff_refusal(
-                "handoff continuity is not the installed deterministic manifest canary",
-            ));
-        }
+        let (maximum_resources, maximum_resource_bytes) = match &registered.handler {
+            InstalledOperationHandler::ResourceManifest {
+                maximum_resources,
+                maximum_resource_bytes,
+            } if registered.spec.name == RESOURCE_MANIFEST_OPERATION => {
+                (*maximum_resources, *maximum_resource_bytes)
+            }
+            _ => {
+                return Err(handoff_refusal(
+                    "handoff continuity is not the installed deterministic manifest canary",
+                ));
+            }
+        };
         let assignment = receipt
             .routing
             .assignment()
@@ -511,46 +513,35 @@ impl PoliteiadService {
                 "handoff canary receipt is not a completed active-generation local operation",
             ));
         }
-        validate_manifest_outcome(&receipt.outcome, admitted_intent.payload())
+        validate_manifest_outcome(
+            &receipt.outcome,
+            admitted_intent.payload(),
+            maximum_resources,
+            maximum_resource_bytes,
+        )
     }
 }
 
 fn validate_manifest_outcome(
     outcome: &OperationCompletionOutcome,
     intent: &OperationIntent,
+    maximum_resources: u32,
+    maximum_resource_bytes: u64,
 ) -> Result<(), CoordinatorError> {
     let OperationCompletionOutcome::Succeeded { manifest } = outcome;
-    let resources: Vec<_> = intent.resources.iter().cloned().collect();
-    let resource_count = u32::try_from(resources.len())
-        .map_err(|_| handoff_refusal("handoff canary resource count is unrepresentable"))?;
-    let expected_digest = Digest::blake3(
-        &to_canonical_bytes(&ResourceManifestSubject {
-            schema: "politeia.resource-manifest.v1",
-            operation: &intent.operation.id,
-            resources: &resources,
-        })
-        .map_err(refusal)?,
-    );
-    if manifest
-        != &(ResourceManifest {
-            operation: intent.operation.id.clone(),
-            resources,
-            resource_count,
-            manifest_digest: expected_digest,
-        })
-    {
+    let expected = derive_resource_manifest(
+        &intent.operation,
+        &intent.resources,
+        maximum_resources,
+        maximum_resource_bytes,
+    )
+    .map_err(|error| handoff_refusal(error.to_string()))?;
+    if manifest != &expected {
         return Err(handoff_refusal(
             "handoff canary outcome differs from the deterministic manifest result",
         ));
     }
     Ok(())
-}
-
-#[derive(Serialize)]
-struct ResourceManifestSubject<'a> {
-    schema: &'static str,
-    operation: &'a politeia_core::OperationId,
-    resources: &'a [String],
 }
 
 fn is_scoped_commissioner_grant(
@@ -589,9 +580,7 @@ mod tests {
     use politeia_runtime::OperationIntent;
     use serde_json::json;
 
-    use super::{
-        HandoffSubmission, OperationCompletionOutcome, ResourceManifest, validate_manifest_outcome,
-    };
+    use super::{HandoffSubmission, OperationCompletionOutcome, validate_manifest_outcome};
 
     #[test]
     fn handoff_submission_cannot_omit_owner_evidence() {
@@ -633,13 +622,13 @@ mod tests {
             execution: None,
         };
         let asserted = OperationCompletionOutcome::Succeeded {
-            manifest: ResourceManifest {
+            manifest: crate::service_operation::ResourceManifest {
                 operation: intent.operation.id.clone(),
                 resources: vec!["public:caller-asserted".to_owned()],
                 resource_count: 1,
                 manifest_digest: Digest::blake3(b"caller-asserted"),
             },
         };
-        assert!(validate_manifest_outcome(&asserted, &intent).is_err());
+        assert!(validate_manifest_outcome(&asserted, &intent, 4, 256).is_err());
     }
 }
