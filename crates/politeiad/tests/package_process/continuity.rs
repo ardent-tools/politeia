@@ -15,6 +15,7 @@ use std::{
 };
 
 use jiff::Timestamp;
+use politeia_core::Digest;
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
@@ -37,7 +38,7 @@ pub(super) fn exercise(
     fixture: &ReferenceFixture,
     operations: &OperationalFixture,
     daemon: Daemon,
-) -> TestResult<Daemon> {
+) -> TestResult<ContinuityExercise> {
     let crashed = operations.positive_manifest(fixture, Timestamp::now());
     submit_commissioning(
         database_url,
@@ -51,13 +52,14 @@ pub(super) fn exercise(
     let mut barrier = CompletionBarrier::install(database_url, fixture)?;
     let crashed_operation = spawn_operate(database_url, fixture, &crashed_request)?;
     let reservation = barrier.wait_for_claim_and_block()?;
+    let crash_barrier = barrier.observation(&reservation)?;
     stop(daemon)?;
     let crashed_output = crashed_operation.wait()?;
     assert!(
         !crashed_output.status.success(),
         "the killed daemon cannot report a completion from its blocked transaction"
     );
-    barrier.assert_claimed_without_completion(&reservation)?;
+    let crashed_attempt = barrier.assert_claimed_without_completion(&reservation)?;
     barrier.release()?;
     barrier.cleanup()?;
 
@@ -76,15 +78,30 @@ pub(super) fn exercise(
         REPLAY_REFUSAL,
     )?;
 
-    concurrent_one_winner(database_url, fixture, operations)?;
-    Ok(daemon)
+    let overlap_observation = concurrent_one_winner(database_url, fixture, operations)?;
+    Ok(ContinuityExercise {
+        daemon,
+        observations: serde_json::json!({
+            "crash_after_claim": {
+                "barrier": crash_barrier,
+                "durable_attempt": crashed_attempt,
+            },
+            "concurrent_overlap": overlap_observation,
+        }),
+    })
+}
+
+/// A fresh daemon and the exact durable boundaries observed during the exercise.
+pub(super) struct ContinuityExercise {
+    pub(super) daemon: Daemon,
+    pub(super) observations: serde_json::Value,
 }
 
 fn concurrent_one_winner(
     database_url: &str,
     fixture: &ReferenceFixture,
     operations: &OperationalFixture,
-) -> TestResult {
+) -> TestResult<serde_json::Value> {
     let prepared = operations.positive_manifest(fixture, Timestamp::now());
     submit_commissioning(
         database_url,
@@ -101,6 +118,7 @@ fn concurrent_one_winner(
     let mut barrier = CompletionBarrier::install(database_url, fixture)?;
     let winner = spawn_operate(database_url, fixture, &request)?;
     let reservation = barrier.wait_for_claim_and_block()?;
+    let observation = barrier.observation(&reservation)?;
     let loser = spawn_operate(database_url, fixture, &request)?;
     require_refusal(
         loser.wait()?,
@@ -113,10 +131,13 @@ fn concurrent_one_winner(
         winner.wait()?,
         "winner of overlapping identical operation request",
     )?;
-    assert_completion_ids(&completed);
-    barrier.assert_completed(&reservation)?;
+    assert_completion_ids(&completed)?;
+    let completion_observation = barrier.assert_completed(&reservation, &completed)?;
     barrier.cleanup()?;
-    Ok(())
+    Ok(serde_json::json!({
+        "barrier": observation,
+        "completion": completion_observation,
+    }))
 }
 
 fn spawn_operate(
@@ -135,15 +156,21 @@ fn spawn_operate(
     .spawn()?)
 }
 
-fn assert_completion_ids(completion: &serde_json::Value) {
-    for field in ["receipt", "receipt_digest", "reservation", "outbox"] {
-        assert!(
-            completion[field]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()),
-            "the concurrent winner returned a nonempty canonical {field} identity"
+fn assert_completion_ids(completion: &serde_json::Value) -> TestResult {
+    for field in ["receipt", "reservation", "outbox"] {
+        let value = completion[field]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("the concurrent winner omitted its {field} identity"))?;
+        let parsed = Uuid::parse_str(value)?;
+        assert_eq!(
+            parsed.hyphenated().to_string(),
+            value,
+            "the concurrent winner returned a canonical lowercase-hyphenated {field} UUID"
         );
     }
+    let _: Digest = serde_json::from_value(completion["receipt_digest"].clone())?;
+    Ok(())
 }
 
 /// One test-side connection that holds the advisory lock used by the trigger.
@@ -155,6 +182,7 @@ struct CompletionBarrier {
     workspace: Uuid,
     lock_key: i64,
     prior_claims: BTreeSet<Uuid>,
+    blocked_backend: Option<i32>,
     released: bool,
 }
 
@@ -181,6 +209,7 @@ impl CompletionBarrier {
             workspace,
             lock_key,
             prior_claims: BTreeSet::new(),
+            blocked_backend: None,
             released: false,
         };
         barrier.install_schema()?;
@@ -239,7 +268,7 @@ CREATE TRIGGER {BARRIER_TRIGGER}
         Ok(())
     }
 
-    fn wait_for_claim_and_block(&self) -> TestResult<Uuid> {
+    fn wait_for_claim_and_block(&mut self) -> TestResult<Uuid> {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             let claims: Vec<_> = self
@@ -251,9 +280,10 @@ CREATE TRIGGER {BARRIER_TRIGGER}
                 return Err("completion barrier observed more than one claimed operation".into());
             }
             if let Some(reservation) = claims.first()
-                && self.waiting_at_barrier()?
+                && let Some(backend) = self.waiting_backend_at_barrier()?
             {
                 self.bind_reservation(reservation)?;
+                self.blocked_backend = Some(backend);
                 return Ok(*reservation);
             }
             thread::sleep(Duration::from_millis(20));
@@ -289,27 +319,42 @@ CREATE TRIGGER {BARRIER_TRIGGER}
         Ok(())
     }
 
-    fn waiting_at_barrier(&self) -> TestResult<bool> {
+    fn waiting_backend_at_barrier(&self) -> TestResult<Option<i32>> {
         let key = self.lock_key as u64;
         let class_id = (key >> 32) as u32;
         let object_id = key as u32;
-        Ok(self
-            .runtime
-            .block_on(self.client.query_one(
-                "SELECT EXISTS (
-                    SELECT FROM pg_locks
-                     WHERE locktype = 'advisory'
-                       AND classid = $1::oid
-                       AND objid = $2::oid
-                       AND objsubid = 1
-                       AND NOT granted
-                )",
-                &[&class_id, &object_id],
-            ))?
-            .get(0))
+        let rows = self.runtime.block_on(self.client.query(
+            "SELECT pid FROM pg_locks
+                 WHERE locktype = 'advisory'
+                   AND classid = $1::oid
+                   AND objid = $2::oid
+                   AND objsubid = 1
+                   AND NOT granted",
+            &[&class_id, &object_id],
+        ))?;
+        if rows.len() > 1 {
+            return Err("more than one daemon backend waited at the completion barrier".into());
+        }
+        Ok(rows.first().map(|row| row.get(0)))
     }
 
-    fn assert_claimed_without_completion(&self, reservation: &Uuid) -> TestResult {
+    fn observation(&self, reservation: &Uuid) -> TestResult<serde_json::Value> {
+        let backend = self
+            .blocked_backend
+            .ok_or("completion barrier has no observed blocked backend")?;
+        Ok(serde_json::json!({
+            "institution": self.institution,
+            "workspace": self.workspace,
+            "reservation": reservation,
+            "advisory_lock_key": self.lock_key,
+            "blocked_backend_pid": backend,
+        }))
+    }
+
+    fn assert_claimed_without_completion(
+        &self,
+        reservation: &Uuid,
+    ) -> TestResult<serde_json::Value> {
         let row = self.runtime.block_on(self.client.query_one(
             "SELECT status::text, receipt_digest IS NULL, receipt_payload IS NULL, completed_at IS NULL
              FROM operation_attempts
@@ -320,10 +365,20 @@ CREATE TRIGGER {BARRIER_TRIGGER}
         assert!(row.get::<_, bool>(1));
         assert!(row.get::<_, bool>(2));
         assert!(row.get::<_, bool>(3));
-        Ok(())
+        Ok(serde_json::json!({
+            "reservation": reservation,
+            "status": row.get::<_, String>(0),
+            "receipt_digest": serde_json::Value::Null,
+            "receipt_payload": serde_json::Value::Null,
+            "completed_at": serde_json::Value::Null,
+        }))
     }
 
-    fn assert_completed(&self, reservation: &Uuid) -> TestResult {
+    fn assert_completed(
+        &self,
+        reservation: &Uuid,
+        completion: &serde_json::Value,
+    ) -> TestResult<serde_json::Value> {
         let row = self.runtime.block_on(self.client.query_one(
             "SELECT status::text, receipt_digest IS NOT NULL, receipt_payload IS NOT NULL, completed_at IS NOT NULL
              FROM operation_attempts
@@ -334,7 +389,49 @@ CREATE TRIGGER {BARRIER_TRIGGER}
         assert!(row.get::<_, bool>(1));
         assert!(row.get::<_, bool>(2));
         assert!(row.get::<_, bool>(3));
-        Ok(())
+        let receipt_digest: String = self
+            .runtime
+            .block_on(self.client.query_one(
+                "SELECT receipt_digest FROM operation_attempts
+             WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3",
+                &[&self.institution, &self.workspace, reservation],
+            ))?
+            .get(0);
+        let outbox = completion["outbox"]
+            .as_str()
+            .ok_or("completed operation omitted its outbox identifier")?;
+        let outbox = Uuid::parse_str(outbox)?;
+        let outbox_persisted: bool = self
+            .runtime
+            .block_on(self.client.query_one(
+                "SELECT EXISTS (
+                SELECT FROM transactional_outbox
+                 WHERE institution_id = $1 AND workspace_id = $2 AND outbox_id = $3
+            )",
+                &[&self.institution, &self.workspace, &outbox],
+            ))?
+            .get(0);
+        assert!(
+            outbox_persisted,
+            "completed operation committed its returned outbox row"
+        );
+        assert_eq!(
+            completion["reservation"],
+            serde_json::json!(reservation),
+            "completed operation returned the exact reservation observed at the barrier"
+        );
+        assert_eq!(
+            completion["receipt_digest"],
+            serde_json::json!(receipt_digest),
+            "completed operation returned the durable canonical receipt digest"
+        );
+        Ok(serde_json::json!({
+            "reservation": reservation,
+            "receipt": completion["receipt"],
+            "receipt_digest": receipt_digest,
+            "outbox": outbox,
+            "outbox_persisted": outbox_persisted,
+        }))
     }
 
     fn release(&mut self) -> TestResult {
