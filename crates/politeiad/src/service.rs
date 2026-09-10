@@ -349,6 +349,11 @@ impl PoliteiadService {
             .observed_at()
             .await
             .map_err(|error| runtime_refusal(&error))?;
+        if request.observed_at < persisted.admitted_at || request.observed_at > now {
+            return Err(CoordinatorError::Refused(
+                "capture observation is outside its durable authority interval".to_owned(),
+            ));
+        }
         submission
             .reconnaissance
             .admit_authority(delegation.payload(), now)

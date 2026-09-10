@@ -325,6 +325,9 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         software_admission["delegation"],
         analytics_admission["delegation"]
     );
+    let software_capture_documents = software.capture_after_admission(software_capture_documents);
+    let analytics_capture_documents =
+        analytics.capture_after_admission(analytics_capture_documents);
     fs::copy(
         &software.source_document,
         software.prefix().join("workspace/institution.md"),
@@ -570,6 +573,14 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         "software bootstrap context replay",
         "replay",
     )?;
+    let software_generation =
+        commission_generation(&database_url, &software, &software_capture_documents)?;
+    let analytics_generation =
+        commission_generation(&database_url, &analytics, &analytics_capture_documents)?;
+    assert_ne!(
+        software_generation, analytics_generation,
+        "institutional inputs derive disjoint generations"
+    );
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;
     stop(software_daemon)?;
@@ -612,4 +623,162 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         serde_json::Value::Null
     );
     Ok(())
+}
+
+fn submit_commissioning(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    name: &str,
+    document: &serde_json::Value,
+) -> TestResult<serde_json::Value> {
+    let path = write_request(fixture, name, document)?;
+    require_coordinated(
+        run(
+            database_url,
+            &[
+                Path::new("commissioning"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &path,
+            ],
+        )?,
+        name,
+    )
+}
+
+fn commission_generation(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    capture: &package_support::CaptureDocuments,
+) -> TestResult<politeia_core::Digest> {
+    use politeia_core::{Digest, commissioning::CommissionerGrantRecord};
+    use politeiad::service_generation::CommissioningReceipt;
+
+    let root = fixture.owner_root_delegation();
+    submit_commissioning(
+        database_url,
+        fixture,
+        "owner-root.json",
+        &serde_json::json!({
+            "kind": "admit_delegation", "delegation": fixture.signed_commissioner_delegation(root.clone()),
+        }),
+    )?;
+    let commissioner = fixture.commissioner_delegation(&root);
+    let admitted = submit_commissioning(
+        database_url,
+        fixture,
+        "commissioner.json",
+        &serde_json::json!({
+            "kind": "admit_delegation", "delegation": fixture.signed_commissioner_delegation(commissioner.clone()),
+        }),
+    )?;
+    let admitted_at: jiff::Timestamp = serde_json::from_value(admitted["admitted_at"].clone())?;
+    let grant_digest: Digest =
+        serde_json::from_value(admitted["commissioner_grant_digest"].clone())?;
+    assert_eq!(
+        grant_digest,
+        CommissionerGrantRecord {
+            institution: fixture.host_trust.workspace.institution.clone(),
+            workspace: fixture.host_trust.workspace.id.clone(),
+            valid_from: admitted_at,
+            revoked_at: None,
+            delegation: commissioner.clone(),
+        }
+        .digest()?,
+        "public admission receipt identifies the exact durable grant"
+    );
+    let approvals = fixture.commissioning_approvals(capture);
+    let approval_ids: Vec<_> = approvals
+        .iter()
+        .map(|wire| wire.payload.id.clone())
+        .collect();
+    for (index, evidence) in approvals.into_iter().enumerate() {
+        submit_commissioning(
+            database_url,
+            fixture,
+            &format!("owner-approval-{index}.json"),
+            &serde_json::json!({
+                "kind": "commissioning_approval", "evidence": evidence,
+            }),
+        )?;
+    }
+    let selection = serde_json::json!({
+        "delegation": commissioner.id, "observations": [capture.evidence],
+        "approvals": approval_ids, "unresolved_obligations": [],
+    });
+    let mut empty_selection = selection.clone();
+    empty_selection["observations"] = serde_json::json!([]);
+    let path = write_request(
+        fixture,
+        "empty-observation-receipt.json",
+        &serde_json::json!({
+            "kind": "generation", "request": { "kind": "derive_record", "selection": empty_selection },
+        }),
+    )?;
+    require_refusal(
+        run(
+            database_url,
+            &[
+                Path::new("commissioning"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &path,
+            ],
+        )?,
+        "empty observation commissioning receipt",
+        "commissioning has no observations",
+    )?;
+    let receipt: CommissioningReceipt = serde_json::from_value(submit_commissioning(
+        database_url,
+        fixture,
+        "derive-record.json",
+        &serde_json::json!({
+            "kind": "generation", "request": { "kind": "derive_record", "selection": selection },
+        }),
+    )?)?;
+    assert_eq!(receipt.commissioner_grant_digest, grant_digest);
+    assert_eq!(receipt.delegation, commissioner.id);
+    assert!(receipt.captured_at >= admitted_at);
+    assert_eq!(
+        receipt.observations,
+        std::collections::BTreeSet::from([capture.evidence.clone()])
+    );
+    let documents = fixture.generation_documents(&commissioner, &receipt);
+    assert_eq!(
+        documents.inputs.payload.commissioning_record_digest,
+        receipt.record_digest
+    );
+    let published = submit_commissioning(
+        database_url,
+        fixture,
+        "publish-generation.json",
+        &documents.publish,
+    )?;
+    let generation: Digest = serde_json::from_value(published["generation"].clone())?;
+    assert_eq!(published["admitted"], true);
+    let verified = submit_commissioning(
+        database_url,
+        fixture,
+        "verify-generation.json",
+        &serde_json::json!({
+            "kind": "generation", "request": { "kind": "verify", "generation": generation },
+        }),
+    )?;
+    assert_eq!(verified["verified"], true);
+    assert_eq!(
+        verified["artifact_manifest"],
+        published["artifact_manifest"]
+    );
+    let reproduced = submit_commissioning(
+        database_url,
+        fixture,
+        "reproduce-generation.json",
+        &serde_json::json!({
+            "kind": "generation", "request": { "kind": "reproduce", "generation": generation },
+        }),
+    )?;
+    assert_eq!(reproduced["generation_reproduced"], true);
+    assert_eq!(
+        reproduced["artifact_manifest"],
+        published["artifact_manifest"]
+    );
+    Ok(generation)
 }

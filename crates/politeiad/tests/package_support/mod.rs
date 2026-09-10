@@ -42,6 +42,9 @@ use politeiad::{
     service_learning::{LearningDisclosureIngress, LearningRequest, LearningSourceRequest},
 };
 
+mod commissioning;
+use politeiad::service_generation::CommissioningReceipt;
+
 /// The two intentionally disjoint reference institutions exercised by the package.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ReferenceInstitutionKind {
@@ -77,7 +80,7 @@ impl ReferenceInstitutionKind {
     }
 }
 
-/// Four separate identities installed into one reference institution.
+/// Separate identities installed for ownership, commissioning, work, and assurance.
 pub(crate) struct SigningIdentities {
     /// Institutional owner who may approve exact constitutional subjects.
     pub(crate) owner: PrincipalId,
@@ -85,6 +88,8 @@ pub(crate) struct SigningIdentities {
     pub(crate) commissioner: PrincipalId,
     /// Operational canary identity.
     pub(crate) worker: PrincipalId,
+    /// Persistent control producer, independent of the worker and commissioner.
+    pub(crate) control_producer: PrincipalId,
     /// Independent verification identity.
     pub(crate) verifier: PrincipalId,
     /// Fresh handoff identity, deliberately distinct from the commissioner.
@@ -92,6 +97,7 @@ pub(crate) struct SigningIdentities {
     owner_key: SigningKey,
     commissioner_key: SigningKey,
     worker_key: SigningKey,
+    control_producer_key: SigningKey,
     verifier_key: SigningKey,
     replacement_key: SigningKey,
 }
@@ -110,6 +116,11 @@ impl SigningIdentities {
     /// Return the worker signing key only to construct a raw signed document.
     pub(crate) fn worker_key(&self) -> &SigningKey {
         &self.worker_key
+    }
+
+    /// Return the persistent assessor key to sign actual control observations.
+    pub(crate) fn control_producer_key(&self) -> &SigningKey {
+        &self.control_producer_key
     }
 
     /// Return the verifier signing key only to construct a raw signed document.
@@ -148,7 +159,7 @@ pub(crate) struct CaptureDocuments {
     /// Authenticated capture shape used to derive the bootstrap's exact grant resources.
     capture: SourceCaptureRequest,
     /// Evidence identity persisted with the source capture.
-    evidence: EvidenceId,
+    pub(crate) evidence: EvidenceId,
     /// Observation identity a later candidate may cite.
     observation: ObservationRequest,
 }
@@ -167,24 +178,6 @@ pub(crate) struct LearningSourceDocuments {
     pub(crate) document: serde_json::Value,
     /// Durable source identity for later context, feedback, and correction input.
     pub(crate) source: EvidenceId,
-}
-
-/// Durable commissioning evidence selected by the host before publication.
-///
-/// The fixture deliberately cannot create this from arbitrary text: callers
-/// must supply identities returned by admitted service work. The resulting
-/// signed input remains subject to the daemon's durable re-admission.
-pub(crate) struct CommissioningReceipt {
-    /// Rebuilt durable record identity.
-    pub(crate) record: CommissioningRecordId,
-    /// Canonical digest of that exact rebuilt record.
-    pub(crate) record_digest: Digest,
-    /// Discovery evidence already admitted by the daemon.
-    pub(crate) observations: BTreeSet<EvidenceId>,
-    /// Owner approval evidence already admitted by the daemon.
-    pub(crate) approvals: BTreeSet<EvidenceId>,
-    /// Exact owner-approved unresolved obligations.
-    pub(crate) unresolved_obligations: BTreeSet<String>,
 }
 
 /// Complete staged artifact paths and a signed publish request.
@@ -254,11 +247,13 @@ impl ReferenceFixture {
             owner: PrincipalId::new(),
             commissioner: PrincipalId::new(),
             worker: PrincipalId::new(),
+            control_producer: PrincipalId::new(),
             verifier: PrincipalId::new(),
             replacement: PrincipalId::new(),
             owner_key: fixture_signing_key(kind, 0x11),
             commissioner_key: fixture_signing_key(kind, 0x22),
             worker_key: fixture_signing_key(kind, 0x33),
+            control_producer_key: fixture_signing_key(kind, 0x66),
             verifier_key: fixture_signing_key(kind, 0x44),
             replacement_key: fixture_signing_key(kind, 0x55),
         };
@@ -292,6 +287,8 @@ impl ReferenceFixture {
                     AdmissionKind::Generation,
                     AdmissionKind::Revocation,
                     AdmissionKind::LearningSource,
+                    AdmissionKind::Evidence,
+                    AdmissionKind::LearningCorrection,
                 ],
             ),
             anchor(
@@ -310,12 +307,27 @@ impl ReferenceFixture {
             anchor(
                 &identities.worker,
                 identities.worker_key(),
-                [AdmissionKind::Delegation],
+                [
+                    AdmissionKind::Delegation,
+                    AdmissionKind::OperationIntent,
+                    AdmissionKind::LearningContext,
+                    AdmissionKind::LearningDiscovery,
+                    AdmissionKind::LearningFeedback,
+                ],
+            ),
+            anchor(
+                &identities.control_producer,
+                identities.control_producer_key(),
+                [AdmissionKind::ControlRun],
             ),
             anchor(
                 &identities.verifier,
                 identities.verifier_key(),
-                [AdmissionKind::Verification],
+                [
+                    AdmissionKind::Verification,
+                    AdmissionKind::Evidence,
+                    AdmissionKind::ActivationProof,
+                ],
             ),
             anchor(
                 &identities.replacement,
@@ -361,11 +373,19 @@ impl ReferenceFixture {
             issuer: self.identities.owner.clone(),
             subject: self.identities.owner.clone(),
             parent: None,
-            actions: BTreeSet::from([RECONNOITRE_ACTION.to_owned()]),
-            resources: BTreeSet::from([format!("reference:{}:source", self.kind.directory())]),
-            effects: BTreeSet::from([Effect::ReadExternalSystem]),
-            data_classes: BTreeSet::from([DataClass::Internal]),
-            audience: BTreeSet::from(["commissioning".to_owned()]),
+            actions: BTreeSet::from([politeia_core::commissioning::COMMISSION_ACTION.to_owned()]),
+            resources: BTreeSet::from([
+                politeia_core::commissioning::commissioning_workspace_resource(
+                    &self.host_trust.workspace.id,
+                ),
+            ]),
+            effects: BTreeSet::new(),
+            data_classes: BTreeSet::new(),
+            audience: BTreeSet::from([
+                politeia_core::commissioning::commissioning_institution_audience(
+                    &self.host_trust.workspace.institution,
+                ),
+            ]),
             expires_at: Timestamp::now() + SignedDuration::from_hours(2),
             budget: ResourceBudget {
                 wall_ms: Some(120_000),
@@ -378,18 +398,18 @@ impl ReferenceFixture {
         }
     }
 
-    /// Produce a temporary, attenuated read-only delegation required before source capture.
+    /// Produce temporary authority to derive and publish approved generations.
     pub(crate) fn commissioner_delegation(&self, owner_grant: &Delegation) -> Delegation {
         Delegation {
             id: DelegationId::new(),
             issuer: self.identities.owner.clone(),
             subject: self.identities.commissioner.clone(),
             parent: Some(owner_grant.id.clone()),
-            actions: BTreeSet::from([RECONNOITRE_ACTION.to_owned()]),
-            resources: BTreeSet::from([format!("reference:{}:source", self.kind.directory())]),
-            effects: BTreeSet::from([Effect::ReadExternalSystem]),
-            data_classes: BTreeSet::from([DataClass::Internal]),
-            audience: BTreeSet::from(["commissioning".to_owned()]),
+            actions: owner_grant.actions.clone(),
+            resources: owner_grant.resources.clone(),
+            effects: owner_grant.effects.clone(),
+            data_classes: owner_grant.data_classes.clone(),
+            audience: owner_grant.audience.clone(),
             expires_at: Timestamp::now() + SignedDuration::from_hours(1),
             budget: ResourceBudget {
                 wall_ms: Some(60_000),
@@ -708,7 +728,7 @@ impl ReferenceFixture {
         .expect("commissioner signs context request");
         (
             delegation,
-            serde_json::json!({"kind":"learning", "request": LearningRequest::CompileContext { request: signed }}),
+            serde_json::json!({"kind":"learning", "request": LearningRequest::CompileContext { request: signed, active_submission: None }}),
         )
     }
 
@@ -718,12 +738,31 @@ impl ReferenceFixture {
                 .expect("bootstrap wire canonically digests"),
         );
         let request = LearningDisclosureIngress {
-            id: CommissioningRecordId::new(), requester: self.identities.worker.clone(),
-            delegation: delegation.id.clone(), budget: delegation.budget.clone(),
-            input: ContextRequest { institution: self.host_trust.workspace.institution.clone(), workspace: self.host_trust.workspace.id.clone(), generation, compiler_version: "learning-v1".to_owned(), audience: "commissioning".to_owned(), sink: "package-acceptance".to_owned(), trust_domain: self.host_trust.workspace.trust_domain.clone(), limit: 1 },
+            id: CommissioningRecordId::new(),
+            requester: self.identities.worker.clone(),
+            delegation: delegation.id.clone(),
+            budget: delegation.budget.clone(),
+            input: ContextRequest {
+                institution: self.host_trust.workspace.institution.clone(),
+                workspace: self.host_trust.workspace.id.clone(),
+                generation,
+                compiler_version: "learning-v1".to_owned(),
+                audience: "commissioning".to_owned(),
+                sink: "package-acceptance".to_owned(),
+                trust_domain: self.host_trust.workspace.trust_domain.clone(),
+                limit: 1,
+            },
         };
-        let signed = SignedAdmissionWire::sign(AdmissionKind::LearningContext, self.host_trust.workspace.institution.clone(), self.host_trust.workspace.id.clone(), self.identities.commissioner.clone(), request, self.identities.commissioner_key()).expect("commissioner signs forged requester envelope");
-        serde_json::json!({"kind":"learning", "request": LearningRequest::CompileContext { request: signed }})
+        let signed = SignedAdmissionWire::sign(
+            AdmissionKind::LearningContext,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.commissioner.clone(),
+            request,
+            self.identities.commissioner_key(),
+        )
+        .expect("commissioner signs forged requester envelope");
+        serde_json::json!({"kind":"learning", "request": LearningRequest::CompileContext { request: signed, active_submission: None }})
     }
 
     /// Bind the exact owner-approved fact to public content for later learning.
@@ -781,8 +820,8 @@ impl ReferenceFixture {
         }
     }
 
-    /// Copy the approved public bytes under the installed workspace and build
-    /// the exact signed generation publication request.
+    /// Build the exact signed publication request for the already-staged
+    /// approved public bytes under the installed workspace.
     ///
     /// `receipt` is deliberately supplied by the caller because only the
     /// daemon's admitted evidence and reconstructed commissioning record can
@@ -791,9 +830,8 @@ impl ReferenceFixture {
     pub(crate) fn generation_documents(
         &self,
         commissioner: &Delegation,
-        receipt: CommissioningReceipt,
+        receipt: &CommissioningReceipt,
     ) -> GenerationDocuments {
-        self.stage_generation_artifacts();
         let workspace = &self.host_trust.workspace;
         let inputs = RuntimeGenerationInputs {
             institution: workspace.institution.clone(),
@@ -804,8 +842,8 @@ impl ReferenceFixture {
             trust_domain: workspace.trust_domain.clone(),
             policy_bundle: workspace.policy_bundle.clone(),
             policy_digest: workspace.policy_digest.clone(),
-            commissioning_record: receipt.record,
-            commissioning_record_digest: receipt.record_digest,
+            commissioning_record: receipt.record.clone(),
+            commissioning_record_digest: receipt.record_digest.clone(),
             approved: workspace.approved_generation.clone(),
         };
         let inputs = SignedAdmissionWire::sign(
@@ -825,10 +863,8 @@ impl ReferenceFixture {
                 "kind": "publish",
                 "inputs": inputs,
                 "commissioning": {
-                    "delegation": commissioner.id,
-                    "observations": receipt.observations,
-                    "approvals": receipt.approvals,
-                    "unresolved_obligations": receipt.unresolved_obligations,
+                    "receipt": receipt,
+                    "publication_delegation": commissioner.id,
                 },
                 "sources": sources,
             },

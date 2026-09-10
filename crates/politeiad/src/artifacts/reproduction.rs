@@ -75,7 +75,7 @@ impl GenerationArtifactBuilder {
                 .collect(),
         };
         let scratch = ReproductionDirectory::create(&self.artifact_dir)?;
-        let builder = Self::new(scratch.0.clone());
+        let builder = Self::new(scratch.path.clone());
         let reproduced = builder.publish_with_provenance(
             anchors,
             manifest.signed_inputs,
@@ -110,18 +110,25 @@ impl GenerationArtifactBuilder {
     }
 }
 
-struct ReproductionDirectory(PathBuf);
+struct ReproductionDirectory {
+    path: PathBuf,
+    present: bool,
+}
 
 impl ReproductionDirectory {
     fn create(parent: &std::path::Path) -> Result<Self, ArtifactError> {
         let directory = parent.join(format!(".reproduce-{}", uuid::Uuid::now_v7()));
         // Only remove the directory that this call exclusively created.
         fs::create_dir(&directory)?;
-        Ok(Self(directory))
+        Ok(Self {
+            path: directory,
+            present: true,
+        })
     }
 
-    fn remove(self) -> Result<(), ArtifactError> {
-        fs::remove_dir_all(&self.0)?;
+    fn remove(mut self) -> Result<(), ArtifactError> {
+        fs::remove_dir_all(&self.path)?;
+        self.present = false;
         Ok(())
     }
 }
@@ -129,6 +136,8 @@ impl ReproductionDirectory {
 impl Drop for ReproductionDirectory {
     fn drop(&mut self) {
         // Failed reproduction leaves the immutable published generation alone.
-        let _ = fs::remove_dir_all(&self.0);
+        if self.present {
+            let _ = fs::remove_dir_all(&self.path);
+        }
     }
 }
