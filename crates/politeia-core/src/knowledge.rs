@@ -43,10 +43,14 @@ use crate::{
 /// meaning: an observation records that a named source, reached through an
 /// exact adapter, said a particular thing at a particular time. What it is
 /// taken to mean is a [`CandidateClaim`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Observation {
     /// This observation's identity.
     pub id: ObservationId,
+    /// Exact descriptor-bounded capture from which this observation was admitted.
+    pub capture: SourceCaptureId,
+    /// Digest of the exact bounded manifest captured before this observation.
+    pub capture_manifest_digest: Digest,
     /// The workspace that owns the observation.
     ///
     /// WHY an observation names its workspace: institutional facts are
@@ -122,6 +126,8 @@ pub struct SourceCaptureRequest {
     pub observed_at: Timestamp,
     /// Bounded reconnaissance delegation under which capture happened.
     pub reconnaissance_delegation: DelegationId,
+    /// Exact read-only scope checked before this source was accessed.
+    pub reconnaissance: crate::reconnaissance::ReconnaissanceScope,
     /// Explicit relative members selected by the capture descriptor.
     pub manifest: BTreeSet<String>,
     /// Digest of the descriptor that authorized this exact capture selection.
@@ -327,6 +333,8 @@ impl TrustedObservationRegistry {
             }
             let observation = Observation {
                 id: request.id.clone(),
+                capture: request.capture.clone(),
+                capture_manifest_digest: request.capture_manifest_digest.clone(),
                 workspace: workspace.id.clone(),
                 source: request.source.clone(),
                 adapter: request.adapter.clone(),
@@ -394,6 +402,16 @@ impl TrustedObservationRegistry {
     /// or permit callers to replace the stored observation.
     pub fn resolve(&self, id: &ObservationId) -> Option<&Observation> {
         self.observations.get(id)
+    }
+
+    /// Resolve the sole observation that cites one admitted evidence record.
+    pub fn resolve_by_evidence(&self, evidence: &EvidenceId) -> Option<&Observation> {
+        let mut matching = self
+            .observations
+            .values()
+            .filter(|observation| &observation.evidence == evidence);
+        let observation = matching.next()?;
+        matching.next().is_none().then_some(observation)
     }
 
     fn workspace(&self) -> Option<&InstitutionWorkspaceId> {
@@ -580,7 +598,7 @@ pub enum ClaimStatus {
 }
 
 /// An interpreted proposition, with the observations behind and against it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CandidateClaim {
     id: ClaimId,
     workspace: InstitutionWorkspaceId,
@@ -1245,6 +1263,8 @@ mod tests {
         .expect("fixture evidence identity is unique");
         let observation = Observation {
             id: ObservationId::new(),
+            capture: SourceCaptureId::new(),
+            capture_manifest_digest: Digest::blake3(b"fixture capture manifest"),
             workspace: base.workspace.id.clone(),
             source: "crm".to_string(),
             adapter: AdapterId::new(),
@@ -1531,6 +1551,8 @@ mod tests {
             .expect("fixture evidence identity is unique");
         let forged = Observation {
             id: ObservationId::new(),
+            capture: SourceCaptureId::new(),
+            capture_manifest_digest: Digest::blake3(b"forged capture manifest"),
             workspace: fixture.workspace.id.clone(),
             source: "crm".to_string(),
             adapter: AdapterId::new(),
@@ -1573,6 +1595,13 @@ mod tests {
                     statement: request.statement.clone(),
                     observed_at: request.observed_at,
                     reconnaissance_delegation: fixture.workspace.owner_delegation.clone(),
+                    reconnaissance: crate::reconnaissance::ReconnaissanceScope {
+                        commissioner: fixture.owner.clone(),
+                        delegation: fixture.workspace.owner_delegation.clone(),
+                        sources: BTreeSet::from([request.source.clone()]),
+                        adapters: BTreeSet::from([request.adapter.clone()]),
+                        expires_at: request.observed_at + jiff::SignedDuration::from_hours(1),
+                    },
                     manifest: BTreeSet::from(["snapshot.json".to_string()]),
                     descriptor_digest: Digest::blake3(b"capture descriptor"),
                     content_manifest_digest: request.capture_manifest_digest.clone(),

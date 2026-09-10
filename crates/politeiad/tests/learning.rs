@@ -14,7 +14,7 @@ use learning::*;
 use politeia_core::{
     AdapterId, ClaimId, DataClass, Delegation, DelegationId, Digest, EvidenceId, InstitutionId,
     InstitutionWorkspaceId, ObservationId, PolicyBundleId, PrincipalId, ResourceBudget,
-    RuntimeGenerationId,
+    RuntimeGenerationId, SourceCaptureId,
     evidence::{EvidenceRecord, IndependenceClass, TrustedEvidenceRegistry},
     generation::{ApprovedGenerationInputs, ReproducibilityContract},
     institution::{InstitutionWorkspace, TrustDomainId},
@@ -88,6 +88,8 @@ fn approved_fact(
     let subject = Digest::blake3(b"billing");
     let observation = Observation {
         id: ObservationId::new(),
+        capture: SourceCaptureId::new(),
+        capture_manifest_digest: Digest::blake3(b"learning capture manifest"),
         workspace: workspace.id.clone(),
         source: source.to_string(),
         adapter: AdapterId::new(),

@@ -13,11 +13,15 @@ use politeia_core::{
     AdapterId, Delegation, DelegationId, Digest, EvidenceId,
     commissioning::{
         COMMISSION_ACTION, CommissionerGrantRecord, CommissioningRecord,
-        TrustedCommissionerGrantRegistry, commissioning_institution_audience,
-        commissioning_workspace_resource,
+        HistoricalReconnaissanceGrantRecord, TrustedCommissionerGrantRegistry,
+        commissioning_institution_audience, commissioning_workspace_resource,
     },
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     generation::RuntimeGenerationInputs,
+    knowledge::{
+        ObservationRequest, SourceCaptureRequest, TrustedObservationRegistry,
+        TrustedSourceCaptureRegistry,
+    },
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use politeia_evidence::{
@@ -292,11 +296,9 @@ impl PoliteiadService {
         let authority_chain = self
             .admit_live_delegation_chain(&selection.publication_delegation, admitted.signer())
             .await?;
-        self.require_live_publication_grant(
-            authority_chain
-                .last()
-                .ok_or_else(|| CoordinatorError::Refused("publication authority chain is empty".to_string()))?,
-        )?;
+        self.require_live_publication_grant(authority_chain.last().ok_or_else(|| {
+            CoordinatorError::Refused("publication authority chain is empty".to_string())
+        })?)?;
         self.storage()
             .admit_generation_authorized(&stored, durable.revision, &authority_chain)
             .await
@@ -363,10 +365,7 @@ impl PoliteiadService {
                 &admitted.payload().commissioning_record,
                 &admitted.payload().commissioning_record_digest,
                 &self
-                    .load_commissioning_receipt(
-                        &durable,
-                        &admitted.payload().commissioning_record,
-                    )
+                    .load_commissioning_receipt(&durable, &admitted.payload().commissioning_record)
                     .await?,
             )
             .await?;
@@ -471,15 +470,18 @@ impl PoliteiadService {
         ];
         let receipt = self
             .storage()
-            .activate_generation_authorized(&ActivationCommit {
-                scope: self.scope().clone(),
-                expected_revision,
-                expected_active,
-                generation: generation.clone(),
-                transition,
-                evidence,
-                outbox: Vec::new(),
-            }, &authority_chains)
+            .activate_generation_authorized(
+                &ActivationCommit {
+                    scope: self.scope().clone(),
+                    expected_revision,
+                    expected_active,
+                    generation: generation.clone(),
+                    transition,
+                    evidence,
+                    outbox: Vec::new(),
+                },
+                &authority_chains,
+            )
             .await
             .map_err(storage_refusal)?;
         Ok(OperationResult::Coordinated {
@@ -524,9 +526,14 @@ impl PoliteiadService {
         selection: CommissioningRecordRequest,
     ) -> Result<OperationResult, CoordinatorError> {
         let durable = self.durable_snapshot().await?;
-        let persisted = durable.delegations.get(&selection.delegation).ok_or_else(|| {
-            CoordinatorError::Refused("commissioner delegation is not durably admitted".to_string())
-        })?;
+        let persisted = durable
+            .delegations
+            .get(&selection.delegation)
+            .ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "commissioner delegation is not durably admitted".to_string(),
+                )
+            })?;
         if persisted.revoked {
             return Err(CoordinatorError::Refused(
                 "commissioner delegation is revoked before receipt derivation".to_string(),
@@ -543,18 +550,9 @@ impl PoliteiadService {
                 "commissioner delegation expired before receipt derivation".to_string(),
             ));
         }
-        let evidence_wires = selection
-            .observations
-            .iter()
-            .chain(selection.approvals.iter())
-            .map(|id| {
-                durable.evidence.get(id).ok_or_else(|| {
-                    CoordinatorError::Refused(
-                        "commissioning evidence is not durably admitted".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?
+        let evidence_wires = durable
+            .evidence
+            .values()
             .into_iter()
             .map(evidence_wire)
             .collect::<Result<Vec<_>, _>>()?;
@@ -569,11 +567,19 @@ impl PoliteiadService {
         };
         let grants = TrustedCommissionerGrantRegistry::from_trusted_bootstrap(captured_at, [grant])
             .map_err(refusal)?;
-        let record = CommissioningRecord::new(
+        let historical_observations = historical_reconnaissance_observations(
+            self,
+            &durable,
+            &evidence,
+            &selection.observations,
+            captured_at,
+        )?;
+        let record = CommissioningRecord::new_from_historical_observations(
             self.workspace(),
             &grants,
             &evidence,
             &selection.observations,
+            &historical_observations,
             &selection.approvals,
             selection.unresolved_obligations.clone(),
         )
@@ -623,12 +629,16 @@ impl PoliteiadService {
             .load_commissioning_receipt(self.scope(), record)
             .await
             .map_err(storage_refusal)?;
-        let receipt: CommissioningReceipt = serde_json::from_slice(&stored.payload).map_err(|error| {
-            CoordinatorError::Refused(format!("durable commissioning receipt is malformed: {error}"))
-        })?;
+        let receipt: CommissioningReceipt =
+            serde_json::from_slice(&stored.payload).map_err(|error| {
+                CoordinatorError::Refused(format!(
+                    "durable commissioning receipt is malformed: {error}"
+                ))
+            })?;
         if receipt.record != stored.record || receipt.record_digest != stored.record_digest {
             return Err(CoordinatorError::Refused(
-                "durable commissioning receipt identity differs from its storage binding".to_string(),
+                "durable commissioning receipt identity differs from its storage binding"
+                    .to_string(),
             ));
         }
         Ok(receipt)
@@ -646,7 +656,9 @@ impl PoliteiadService {
                 .contains(&commissioning_workspace_resource(&self.workspace().id))
             || !delegation
                 .audience
-                .contains(&commissioning_institution_audience(&self.workspace().institution))
+                .contains(&commissioning_institution_audience(
+                    &self.workspace().institution,
+                ))
         {
             return Err(CoordinatorError::Refused(
                 "generation publisher lacks a scoped live commissioning grant".to_string(),
@@ -695,18 +707,9 @@ impl PoliteiadService {
                 "generation signer does not hold the selected commissioner delegation".to_string(),
             ));
         }
-        let evidence_wires = receipt
-            .observations
-            .iter()
-            .chain(receipt.approvals.iter())
-            .map(|id| {
-                durable.evidence.get(id).ok_or_else(|| {
-                    CoordinatorError::Refused(
-                        "commissioning evidence is not durably admitted".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?
+        let evidence_wires = durable
+            .evidence
+            .values()
             .into_iter()
             .map(evidence_wire)
             .collect::<Result<Vec<_>, _>>()?;
@@ -718,10 +721,9 @@ impl PoliteiadService {
                 institution: self.workspace().institution.clone(),
                 workspace: self.workspace().id.clone(),
                 valid_from: persisted.admitted_at,
-                // Historical reconstruction retains the actual revocation
-                // instant, so the core registry accepts this grant only when
-                // it was active at the retained receipt snapshot time.
-                revoked_at: persisted.revoked_at,
+                // The historical registry sees revocation only if it had
+                // already happened at this record's retained snapshot.
+                revoked_at: revocation_as_of(persisted.revoked_at, receipt.captured_at),
                 delegation: delegation.into_payload(),
             }],
         )
@@ -735,6 +737,13 @@ impl PoliteiadService {
                 observation_ids: &receipt.observations,
                 approval_ids: &receipt.approvals,
                 unresolved_obligations: receipt.unresolved_obligations.clone(),
+                historical_observations: &historical_reconnaissance_observations(
+                    self,
+                    durable,
+                    &evidence,
+                    &receipt.observations,
+                    receipt.captured_at,
+                )?,
             },
         )
         .map_err(refusal)?;
@@ -800,7 +809,6 @@ impl PoliteiadService {
         }
         Ok(())
     }
-
 }
 
 fn confined(root: &Path, path: &Path) -> Result<PathBuf, CoordinatorError> {
@@ -842,6 +850,139 @@ fn evidence_wire(
         ));
     }
     Ok(wire)
+}
+
+/// Recover preserved, signed reconnaissance provenance for the selected
+/// evidence identities. Every source capture and observation is re-admitted;
+/// the original delegation chain is then checked at the observation instant,
+/// so a later revoke does not rewrite the past and an earlier revoke refuses.
+fn historical_reconnaissance_observations(
+    service: &PoliteiadService,
+    durable: &politeia_storage::WorkspaceSnapshot,
+    evidence: &TrustedEvidenceRegistry,
+    evidence_ids: &BTreeSet<EvidenceId>,
+    as_of: jiff::Timestamp,
+) -> Result<
+    BTreeMap<EvidenceId, politeia_core::commissioning::HistoricalObservationProvenance>,
+    CoordinatorError,
+> {
+    let captures = TrustedSourceCaptureRegistry::admit_signed(
+        service.anchors(),
+        durable
+            .state
+            .iter()
+            .filter(|(key, _)| key.starts_with("source_capture:"))
+            .map(|(_, value)| crate::service::state_wire(value))
+            .collect::<Result<Vec<SignedAdmissionWire<SourceCaptureRequest>>, _>>()?,
+    )
+    .map_err(refusal)?;
+    let observations = TrustedObservationRegistry::admit_signed(
+        service.workspace(),
+        service.anchors(),
+        evidence,
+        &captures,
+        durable
+            .state
+            .iter()
+            .filter(|(key, _)| key.starts_with("observation:"))
+            .map(|(_, value)| crate::service::state_wire(value))
+            .collect::<Result<Vec<SignedAdmissionWire<ObservationRequest>>, _>>()?,
+    )
+    .map_err(refusal)?;
+    evidence_ids
+        .iter()
+        .map(|evidence_id| {
+            let observation = observations
+                .resolve_by_evidence(evidence_id)
+                .ok_or_else(|| {
+                    CoordinatorError::Refused(
+                        "commissioning evidence has no retained signed observation".to_string(),
+                    )
+                })?;
+            let capture = captures.resolve(&observation.capture).ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "commissioning observation has no retained signed capture".to_string(),
+                )
+            })?;
+            let chain = service.admit_historical_delegation_chain(
+                durable,
+                &capture.request().reconnaissance_delegation,
+                capture.signer(),
+                observation.observed_at,
+            )?;
+            let leaf = chain.last().ok_or_else(|| {
+                CoordinatorError::Refused("historical delegation chain is empty".to_string())
+            })?;
+            let persisted = durable.delegations.get(&leaf.payload().id).ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "historical capture delegation is no longer durable".to_string(),
+                )
+            })?;
+            let provenance = CommissioningRecord::historical_observation_from_trusted(
+                service.workspace(),
+                evidence,
+                &captures,
+                &observations,
+                evidence_id,
+                HistoricalReconnaissanceGrantRecord {
+                    institution: service.workspace().institution.clone(),
+                    workspace: service.workspace().id.clone(),
+                    valid_from: persisted.admitted_at,
+                    revoked_at: persisted.revoked_at,
+                    scope: capture.request().reconnaissance.clone(),
+                    delegation: leaf.payload().clone(),
+                },
+                as_of,
+            )
+            .map_err(refusal)?;
+            Ok((evidence_id.clone(), provenance))
+        })
+        .collect()
+}
+
+/// Project durable revocation state into a retained historical snapshot.
+/// A later revoke remains in PostgreSQL but was not a fact at this record's
+/// capture instant; an earlier revoke remains visible and refuses replay.
+fn revocation_as_of(
+    revoked_at: Option<jiff::Timestamp>,
+    as_of: jiff::Timestamp,
+) -> Option<jiff::Timestamp> {
+    revoked_at.filter(|revoked| *revoked <= as_of)
+}
+
+#[cfg(test)]
+mod historical_replay_tests {
+    use jiff::SignedDuration;
+
+    use super::revocation_as_of;
+
+    #[expect(
+        clippy::expect_used,
+        reason = "fixed historical snapshot witness must parse"
+    )]
+    fn captured_at() -> jiff::Timestamp {
+        "2026-09-10T00:00:00Z"
+            .parse()
+            .expect("the witness timestamp is RFC 3339")
+    }
+
+    #[test]
+    fn later_revoke_does_not_rewrite_a_historical_receipt() {
+        let captured = captured_at();
+        assert_eq!(
+            revocation_as_of(Some(captured + SignedDuration::from_secs(1)), captured),
+            None
+        );
+    }
+
+    #[test]
+    fn earlier_revoke_remains_visible_to_historical_replay() {
+        let captured = captured_at();
+        assert_eq!(
+            revocation_as_of(Some(captured - SignedDuration::from_secs(1)), captured),
+            Some(captured - SignedDuration::from_secs(1))
+        );
+    }
 }
 
 fn stored_inputs(

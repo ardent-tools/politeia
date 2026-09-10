@@ -92,6 +92,13 @@ impl Fixture {
             statement: Digest::blake3(b"expected source snapshot"),
             observed_at: now,
             reconnaissance_delegation: delegation_id.clone(),
+            reconnaissance: ReconnaissanceScope {
+                commissioner: commissioner.clone(),
+                delegation: delegation_id.clone(),
+                sources: BTreeSet::from(["institution-crm".to_string()]),
+                adapters: BTreeSet::from([adapter.clone()]),
+                expires_at: now + SignedDuration::from_hours(1),
+            },
             manifest: BTreeSet::from([
                 "accounts.json".to_string(),
                 "schema/accounts.json".to_string(),

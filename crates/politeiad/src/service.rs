@@ -338,6 +338,11 @@ impl PoliteiadService {
                 "capture signer does not hold its durable reconnaissance delegation".to_string(),
             ));
         }
+        if request.reconnaissance != submission.reconnaissance {
+            return Err(CoordinatorError::Refused(
+                "signed capture reconnaissance scope differs from submitted scope".to_string(),
+            ));
+        }
         let now = PostgresAuthorizationLedger::new(self.storage.clone(), self.scope.clone())
             .observed_at()
             .await
@@ -461,28 +466,31 @@ impl PoliteiadService {
         )?;
         let receipt = self
             .storage
-            .commit_authorized(&ScopedCommit {
-                scope: self.scope.clone(),
-                expected_revision: durable.revision,
-                model: durable.model,
-                model_kind: "source_capture".to_string(),
-                transition: capture_record.clone(),
-                state: vec![
-                    StateMutation {
-                        key: format!("source_capture:{}", request.id.0),
-                        value: capture_record,
-                    },
-                    StateMutation {
-                        key: format!("observation:{}", observation.id.0),
-                        value: observation_record,
-                    },
-                ],
-                evidence: vec![EvidenceAdmission {
-                    id: submission.evidence.payload.id.clone(),
-                    record: evidence_record,
-                }],
-                outbox: Vec::new(),
-            }, &authority_chain)
+            .commit_authorized(
+                &ScopedCommit {
+                    scope: self.scope.clone(),
+                    expected_revision: durable.revision,
+                    model: durable.model,
+                    model_kind: "source_capture".to_string(),
+                    transition: capture_record.clone(),
+                    state: vec![
+                        StateMutation {
+                            key: format!("source_capture:{}", request.id.0),
+                            value: capture_record,
+                        },
+                        StateMutation {
+                            key: format!("observation:{}", observation.id.0),
+                            value: observation_record,
+                        },
+                    ],
+                    evidence: vec![EvidenceAdmission {
+                        id: submission.evidence.payload.id.clone(),
+                        record: evidence_record,
+                    }],
+                    outbox: Vec::new(),
+                },
+                &authority_chain,
+            )
             .await
             .map_err(|error| storage_refusal(&error))?;
         self.storage
@@ -636,8 +644,7 @@ impl PoliteiadService {
             || admitted.method != "institution-owner commissioning approval.v1"
         {
             return Err(CoordinatorError::Refused(
-                "commissioning approval is not owner-scoped human authority evidence"
-                    .to_string(),
+                "commissioning approval is not owner-scoped human authority evidence".to_string(),
             ));
         }
         if durable.evidence.contains_key(&admitted.id) {
@@ -730,9 +737,7 @@ impl PoliteiadService {
             .and_then(|current| current.parent.clone())
         {
             let persisted = durable.delegations.get(&parent).ok_or_else(|| {
-                CoordinatorError::Refused(
-                    "delegation parent is not durably admitted".to_string(),
-                )
+                CoordinatorError::Refused("delegation parent is not durably admitted".to_string())
             })?;
             if persisted.revoked {
                 return Err(CoordinatorError::Refused(
@@ -754,7 +759,11 @@ impl PoliteiadService {
         expected: &[Delegation],
         requester: &politeia_core::PrincipalId,
     ) -> Result<Vec<politeia_core::trust::Admitted<Delegation>>, CoordinatorError> {
-        if expected.is_empty() || expected.last().is_none_or(|leaf| leaf.subject != *requester) {
+        if expected.is_empty()
+            || expected
+                .last()
+                .is_none_or(|leaf| leaf.subject != *requester)
+        {
             return Err(CoordinatorError::Refused(
                 "delegation chain does not end at the requester".to_string(),
             ));
@@ -801,6 +810,93 @@ impl PoliteiadService {
             })?,
         )?;
         Ok(admitted)
+    }
+
+    /// Re-admit one durable root-to-leaf chain as it stood at a retained
+    /// historical instant. Later revocation remains preserved in storage but
+    /// cannot erase authority that was valid when a signed capture occurred.
+    pub(crate) fn admit_historical_delegation_chain(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        delegation_id: &politeia_core::DelegationId,
+        requester: &politeia_core::PrincipalId,
+        at: jiff::Timestamp,
+    ) -> Result<Vec<politeia_core::trust::Admitted<Delegation>>, CoordinatorError> {
+        if durable.owner != self.workspace.owner
+            || durable.owner_delegation != self.workspace.owner_delegation
+        {
+            return Err(CoordinatorError::Refused(
+                "durable workspace owner differs from installed workspace skeleton".to_string(),
+            ));
+        }
+        let mut leaf_to_root = Vec::new();
+        let mut current = delegation_id.clone();
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current.clone()) {
+                return Err(CoordinatorError::Refused(
+                    "historical delegation chain contains a cycle".to_string(),
+                ));
+            }
+            let persisted = durable.delegations.get(&current).ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "historical delegation is not durably admitted".to_string(),
+                )
+            })?;
+            if persisted.admitted_at > at
+                || persisted.revoked_at.is_some_and(|revoked| revoked <= at)
+                || persisted.wire.payload.expires_at <= at
+            {
+                return Err(CoordinatorError::Refused(
+                    "historical delegation was not live at the retained capture instant"
+                        .to_string(),
+                ));
+            }
+            let admitted = self
+                .anchors
+                .admit_expected(AdmissionKind::Delegation, persisted.wire.clone())
+                .map_err(refusal)?;
+            if admitted.signer() != &admitted.payload().issuer {
+                return Err(CoordinatorError::Refused(
+                    "historical delegation envelope signer is not its semantic issuer".to_string(),
+                ));
+            }
+            current = match admitted.payload().parent.clone() {
+                Some(parent) => parent,
+                None => {
+                    if admitted.payload().issuer != self.workspace.owner {
+                        return Err(CoordinatorError::Refused(
+                            "historical delegation chain is not rooted in the installed owner"
+                                .to_string(),
+                        ));
+                    }
+                    leaf_to_root.push(admitted);
+                    break;
+                }
+            };
+            leaf_to_root.push(admitted);
+        }
+        leaf_to_root.reverse();
+        if leaf_to_root
+            .last()
+            .is_none_or(|leaf| leaf.payload().subject != *requester)
+        {
+            return Err(CoordinatorError::Refused(
+                "historical delegation chain does not end at the capture signer".to_string(),
+            ));
+        }
+        for (parent, child) in leaf_to_root.iter().zip(leaf_to_root.iter().skip(1)) {
+            if child.payload().parent.as_ref() != Some(&parent.payload().id)
+                || child.payload().issuer != parent.payload().subject
+                || !child.payload().is_attenuation_of(parent.payload())
+            {
+                return Err(CoordinatorError::Refused(
+                    "historical delegation chain is not ordered root-to-leaf attenuation"
+                        .to_string(),
+                ));
+            }
+        }
+        Ok(leaf_to_root)
     }
 
     /// Verify that a newly admitted delegation is signed by its semantic issuer
@@ -898,7 +994,8 @@ impl PoliteiadService {
                     .map_err(refusal)?;
                 let durable = self.durable_snapshot().await?;
                 self.validate_delegation_authority(&durable, &admitted)?;
-                let durable_receipt = self.storage
+                let durable_receipt = self
+                    .storage
                     .admit_delegation(&self.scope, &admitted, &delegation)
                     .await
                     .map_err(|error| storage_refusal(&error))?;
@@ -1040,7 +1137,7 @@ fn evidence_wire(
     Ok(wire)
 }
 
-fn state_wire<T: serde::de::DeserializeOwned>(
+pub(crate) fn state_wire<T: serde::de::DeserializeOwned>(
     value: &politeia_storage::StoredPayload,
 ) -> Result<SignedAdmissionWire<T>, CoordinatorError> {
     serde_json::from_slice(&value.bytes).map_err(|error| {

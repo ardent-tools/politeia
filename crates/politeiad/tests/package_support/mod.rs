@@ -493,6 +493,7 @@ impl ReferenceFixture {
             statement: Digest::blake3(&bytes),
             observed_at,
             reconnaissance_delegation: delegation.id.clone(),
+            reconnaissance: scope.clone(),
             manifest: BTreeSet::from([member]),
             descriptor_digest: Digest::blake3(
                 &serde_json::to_vec(&scope).expect("reconnaissance descriptor serializes"),
@@ -659,10 +660,9 @@ impl ReferenceFixture {
         let source = capture.evidence.clone();
         let content = fs::read(&self.source_document)
             .expect("owner-approved public content remains readable");
-        let approval_digest = politeiad::service_learning::durable_signed_wire_digest(
-            &candidate.approval,
-        )
-        .expect("approval wire canonically encodes for durable storage");
+        let approval_digest =
+            politeiad::service_learning::durable_signed_wire_digest(&candidate.approval)
+                .expect("approval wire canonically encodes for durable storage");
         let request = LearningSourceRequest {
             id: source.clone(),
             claim: candidate.candidate.payload.id.clone(),

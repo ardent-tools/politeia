@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ed25519_dalek::SigningKey;
 use jiff::{SignedDuration, Timestamp};
+use politeia_core::SourceCaptureId;
 use politeia_core::evidence::{EvidenceRecord, IndependenceClass, TrustedEvidenceRegistry};
 use politeia_core::generation::{
     ApprovedGenerationInputs, CommissioningCapability, ReproducibilityContract,
@@ -175,6 +176,8 @@ fn slice() -> Slice {
 fn observation(s: &Slice, statement: &[u8]) -> Observation {
     Observation {
         id: ObservationId::new(),
+        capture: SourceCaptureId::new(),
+        capture_manifest_digest: Digest::blake3(b"slice capture manifest"),
         workspace: s.boundary.workspace().clone(),
         source: SOURCE.to_string(),
         adapter: s.adapter.clone(),
