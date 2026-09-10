@@ -1025,7 +1025,13 @@ impl PostgresStorage {
 pub struct PostgresAuthorizationLedger {
     storage: PostgresStorage,
     scope: Scope,
+    generation: GenerationAdmission,
+}
+
+#[derive(Clone, Debug)]
+struct GenerationAdmission {
     bootstrap: Option<Digest>,
+    workspace_revision: Option<i64>,
 }
 
 impl PostgresAuthorizationLedger {
@@ -1037,7 +1043,10 @@ impl PostgresAuthorizationLedger {
         Self {
             storage,
             scope,
-            bootstrap: None,
+            generation: GenerationAdmission {
+                bootstrap: None,
+                workspace_revision: None,
+            },
         }
     }
 
@@ -1052,8 +1061,23 @@ impl PostgresAuthorizationLedger {
         Self {
             storage,
             scope,
-            bootstrap: Some(bootstrap),
+            generation: GenerationAdmission {
+                bootstrap: Some(bootstrap),
+                workspace_revision: None,
+            },
         }
+    }
+
+    /// Pin both reservation and claim to the snapshot used to evaluate policy.
+    ///
+    /// Typed service boundaries must supply their coherent snapshot revision.
+    /// This also fences changes to knowledge and independent assurance grants
+    /// that occur after evaluation but before the first reservation. Checking
+    /// only the revision captured by reservation would miss that interval.
+    #[must_use]
+    pub fn with_workspace_revision(mut self, revision: i64) -> Self {
+        self.generation.workspace_revision = Some(revision);
+        self
     }
 
     /// Return the exact workspace authority domain this ledger serves.
@@ -1078,14 +1102,14 @@ impl AuthorizationLedger for PostgresAuthorizationLedger {
 
     async fn reserve(&self, request: &ReservationRequest) -> Result<(), RuntimeError> {
         self.storage
-            .reserve_runtime_request(&self.scope, request, self.bootstrap.as_ref())
+            .reserve_runtime_request(&self.scope, request, &self.generation)
             .await
             .map_err(runtime_state_error)
     }
 
     async fn claim(&self, request: &ReservationRequest) -> Result<(), RuntimeError> {
         self.storage
-            .claim_runtime_request(&self.scope, request, self.bootstrap.as_ref())
+            .claim_runtime_request(&self.scope, request, &self.generation)
             .await
             .map_err(runtime_state_error)
     }
@@ -1096,7 +1120,7 @@ impl PostgresStorage {
         &self,
         scope: &Scope,
         request: &ReservationRequest,
-        bootstrap: Option<&Digest>,
+        generation: &GenerationAdmission,
     ) -> Result<(), StorageError> {
         if !request.requested_budget().is_finite() || request.budget_scopes().is_empty() {
             return Err(StorageError::AttemptUnavailable);
@@ -1108,7 +1132,7 @@ impl PostgresStorage {
         let payload = politeia_core::canonical::to_canonical_bytes(&payload)
             .map_err(StorageError::Canonical)?;
         transaction::retry(|| {
-            self.reserve_runtime_once(scope, request, &requested, &payload, bootstrap)
+            self.reserve_runtime_once(scope, request, &requested, &payload, generation)
         })
         .await
     }
@@ -1119,7 +1143,7 @@ impl PostgresStorage {
         request: &ReservationRequest,
         requested: &BudgetAmounts,
         payload: &[u8],
-        bootstrap: Option<&Digest>,
+        generation: &GenerationAdmission,
     ) -> Result<(), StorageError> {
         let mut client = self.client().await?;
         let transaction = client
@@ -1129,7 +1153,7 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
-        let admission_revision = check_generation(&transaction, scope, request, bootstrap).await?;
+        let admission_revision = check_generation(&transaction, scope, request, generation).await?;
         transaction
             .execute(
                 "DELETE FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND expires_at <= CURRENT_TIMESTAMP AND (status = 'reserved' OR (status = 'completed' AND retain_replay = FALSE))",
@@ -1220,18 +1244,18 @@ impl PostgresStorage {
         &self,
         scope: &Scope,
         request: &ReservationRequest,
-        bootstrap: Option<&Digest>,
+        generation: &GenerationAdmission,
     ) -> Result<(), StorageError> {
         // A serialization refusal proves the transaction aborted before claim.
         // Retrying this boundary never invokes or retries an effect port.
-        transaction::retry(|| self.claim_runtime_once(scope, request, bootstrap)).await
+        transaction::retry(|| self.claim_runtime_once(scope, request, generation)).await
     }
 
     async fn claim_runtime_once(
         &self,
         scope: &Scope,
         request: &ReservationRequest,
-        bootstrap: Option<&Digest>,
+        generation: &GenerationAdmission,
     ) -> Result<(), StorageError> {
         let mut client = self.client().await?;
         let transaction = client
@@ -1241,7 +1265,7 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
-        let admission_revision = check_generation(&transaction, scope, request, bootstrap).await?;
+        let admission_revision = check_generation(&transaction, scope, request, generation).await?;
         for budget_scope in request.budget_scopes() {
             let admitted = transaction
                 .query_opt(
@@ -1289,7 +1313,7 @@ async fn check_generation(
     transaction: &tokio_postgres::Transaction<'_>,
     scope: &Scope,
     request: &ReservationRequest,
-    bootstrap: Option<&Digest>,
+    generation: &GenerationAdmission,
 ) -> Result<i64, StorageError> {
     let scoped = scope_values(scope);
     // FOR SHARE conflicts with activation's non-key UPDATE; FOR KEY SHARE
@@ -1299,8 +1323,15 @@ async fn check_generation(
         &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
     ).await.map_err(StorageError::Database)?.ok_or(StorageError::NotFound)?;
     let active: Option<String> = row.get(0);
+    let revision: i64 = row.get(2);
+    if generation
+        .workspace_revision
+        .is_some_and(|expected| expected != revision)
+    {
+        return Err(StorageError::RevisionConflict);
+    }
     let expected = request.runtime_generation().digest().as_str();
-    let matches = match bootstrap {
+    let matches = match generation.bootstrap.as_ref() {
         None => active.as_deref() == Some(expected),
         Some(digest) => {
             let genesis: Option<String> = row.get(1);
@@ -1312,7 +1343,7 @@ async fn check_generation(
     if !matches {
         return Err(StorageError::AttemptUnavailable);
     }
-    Ok(row.get(2))
+    Ok(revision)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -78,6 +78,67 @@ fn admit_fixture_authority(
 
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn stale_policy_snapshot_cannot_reserve_after_an_independent_grant_revoke() -> TestResult {
+    let fixture = Fixture::new(&database_url()?, 8).await?;
+    // This independent grant is deliberately absent from the operation's
+    // delegation chain. Checking only that chain cannot detect this race.
+    let mut verifier = fixture.authority.payload().clone();
+    verifier.id = DelegationId::new();
+    let (verifier, wire) = admit_fixture_authority(&fixture, verifier)?;
+    fixture
+        .storage
+        .admit_delegation(&fixture.scope, &verifier, &wire)
+        .await?;
+    let evaluated = fixture.storage.load_workspace(&fixture.scope).await?;
+    let dispatcher_at = |revision| -> TestResult<TestDispatcher> {
+        let config = DispatcherConfig::new(
+            fixture.policy.clone(),
+            fixture.policy_digest.clone(),
+            fixture.generation.clone(),
+            "fixture:snapshot-replay".to_owned(),
+            SignedDuration::from_mins(1),
+            fixture.intent.delegation_chain.clone(),
+            [fixture.intent.operation.clone()],
+        )?;
+        Ok(Dispatcher::new(
+            LedgerFixturePolicy {
+                bundle: fixture.policy.clone(),
+                digest: fixture.policy_digest.clone(),
+            },
+            CountingPort {
+                adapter: fixture.adapter.clone(),
+                calls: fixture.calls.clone(),
+            },
+            PostgresAuthorizationLedger::for_bootstrap(
+                fixture.storage.clone(),
+                fixture.scope.clone(),
+                fixture.bootstrap_digest.clone(),
+            )
+            .with_workspace_revision(revision),
+            config,
+        ))
+    };
+    let stale = dispatcher_at(evaluated.revision)?;
+    revoke_fixture_authority(&fixture, verifier.payload()).await?;
+    let refusal = stale.authorize(&fixture.intent).await;
+    assert!(
+        matches!(refusal, Err(RuntimeError::AuthorizationState { source, .. })
+        if matches!(source.downcast_ref::<StorageError>(), Some(StorageError::RevisionConflict)))
+    );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+
+    // A fresh evaluation can reserve the same replay key: the refused stale
+    // evaluation neither claimed an effect nor spent its budget.
+    let current = fixture.storage.load_workspace(&fixture.scope).await?;
+    let fresh = dispatcher_at(current.revision)?;
+    let lease = fresh.authorize(&fixture.intent).await?;
+    fresh.execute(&lease).await?;
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
 async fn delegated_commits_recheck_current_exact_authority_and_all_ancestors() -> TestResult {
     let fixture = Fixture::new(&database_url()?, 8).await?;
     let parent = fixture.authority.clone();
