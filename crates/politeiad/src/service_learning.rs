@@ -271,15 +271,11 @@ impl PoliteiadService {
         }
         let output = self.hydrate_context(&durable, &result)?;
         let resources = disclosure_resources(
-            &durable_signed_wire_digest(&wire)?,
-            admitted.payload(),
             &self.workspace().id,
-            &admitted.payload().input.generation,
-            result
-                .items
-                .iter()
-                .map(|item| (item.source.clone(), item.content.proposition.clone())),
+            result.items.iter().map(|item| item.source.clone()),
         );
+        let request_digest = durable_signed_wire_digest(&wire)?;
+        let population = disclosure_population(&result)?;
         let data_classes = result
             .items
             .iter()
@@ -304,7 +300,8 @@ impl PoliteiadService {
             operation: operation.clone(),
             resources: resources.clone(),
             budget: admitted.payload().budget.clone(),
-            request: durable_signed_wire_digest(&wire)?,
+            request: request_digest.clone(),
+            population: population.clone(),
             replay_key: format!("learning:{}", admitted.payload().id.0),
         };
         let port = ContextDisclosurePort {
@@ -312,6 +309,9 @@ impl PoliteiadService {
             audience: admitted.payload().input.audience.clone(),
             resources: resources.clone(),
             output,
+            request: request_digest,
+            population,
+            runtime: admitted.payload().input.generation.clone(),
         };
         let dispatcher = Dispatcher::new(
             policy,
@@ -1065,28 +1065,28 @@ fn require_finite_disclosure_budget<T>(
 /// Derive every resource a disclosure may touch from admitted facts rather
 /// than from caller-selected labels. These strings are carried unchanged by
 /// the runtime intent, the policy wrapper, and the disclosure effect port.
-fn disclosure_resources<T>(
-    wire_digest: &Digest,
-    request: &LearningDisclosureIngress<T>,
+fn disclosure_resources(
     workspace: &politeia_core::InstitutionWorkspaceId,
-    generation: &RuntimeGenerationId,
-    sources: impl IntoIterator<Item = (EvidenceId, Digest)>,
+    sources: impl IntoIterator<Item = EvidenceId>,
 ) -> BTreeSet<String> {
-    let mut resources = BTreeSet::from([
-        crate::learning::context_workspace_resource(workspace),
-        format!("learning-request:{}", wire_digest.as_str()),
-        format!("commissioning-record:{}", request.id.0),
-        format!("active-generation:{}", generation.digest().as_str()),
-    ]);
-    for (source, proposition) in sources {
+    let mut resources = BTreeSet::from([crate::learning::context_workspace_resource(workspace)]);
+    for source in sources {
         resources.insert(crate::learning::context_source_resource(workspace, &source));
-        resources.insert(format!(
-            "approved-source:{}:{}",
-            source.0,
-            proposition.as_str()
-        ));
     }
     resources
+}
+
+fn disclosure_population(context: &CompiledContext) -> Result<Digest, CoordinatorError> {
+    let selected: Vec<_> = context
+        .items
+        .iter()
+        .map(|item| (&item.source, &item.content.proposition))
+        .collect();
+    politeia_core::canonical::to_canonical_bytes(&selected)
+        .map(|bytes| Digest::blake3(&bytes))
+        .map_err(|error| {
+            CoordinatorError::Refused(format!("context selection cannot bind: {error}"))
+        })
 }
 
 /// The service-only binding that turns an admitted learning request into a
@@ -1278,6 +1278,7 @@ struct BootstrapDisclosurePolicy {
     resources: BTreeSet<String>,
     budget: ResourceBudget,
     request: Digest,
+    population: Digest,
     replay_key: String,
 }
 
@@ -1307,10 +1308,7 @@ impl PolicyDecisionPoint for BootstrapDisclosurePolicy {
                 .digest()
                 .map_err(|_| LearningDisclosureRefusal::OperationMismatch)?,
             subject: self.request.clone(),
-            population: Digest::blake3(
-                &politeia_core::canonical::to_canonical_bytes(&self.resources)
-                    .map_err(|_| LearningDisclosureRefusal::ResourceMismatch)?,
-            ),
+            population: self.population.clone(),
             principal: self.requester.clone(),
             allowed: true,
             binding_ids: vec!["politeia.bootstrap.learning-disclosure.v1".to_string()],
@@ -1338,6 +1336,9 @@ struct ContextDisclosurePort {
     audience: String,
     resources: BTreeSet<String>,
     output: OperationResult,
+    request: Digest,
+    population: Digest,
+    runtime: RuntimeGenerationId,
 }
 impl EffectPort for ContextDisclosurePort {
     type Output = OperationResult;
@@ -1352,7 +1353,11 @@ impl EffectPort for ContextDisclosurePort {
         &'a self,
         effect: AuthorizedEffect<'a>,
     ) -> Result<Self::Output, Self::Error> {
-        if effect.lease().resources() != &self.resources {
+        if effect.lease().resources() != &self.resources
+            || effect.lease().decision().subject != self.request
+            || effect.lease().decision().population != self.population
+            || effect.lease().runtime() != &self.runtime
+        {
             return Err(ContextPortError);
         }
         Ok(self.output.clone())
