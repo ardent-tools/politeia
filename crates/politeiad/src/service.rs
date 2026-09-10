@@ -12,6 +12,7 @@ use std::{
 
 use politeia_core::{
     Delegation,
+    commissioning::CommissionerGrantRecord,
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     institution::{InstitutionBoundary, InstitutionWorkspace},
     knowledge::{
@@ -897,13 +898,24 @@ impl PoliteiadService {
                     .map_err(refusal)?;
                 let durable = self.durable_snapshot().await?;
                 self.validate_delegation_authority(&durable, &admitted)?;
-                self.storage
+                let durable_receipt = self.storage
                     .admit_delegation(&self.scope, &admitted, &delegation)
                     .await
                     .map_err(|error| storage_refusal(&error))?;
+                let commissioner_grant_digest = CommissionerGrantRecord {
+                    institution: self.workspace.institution.clone(),
+                    workspace: self.workspace.id.clone(),
+                    valid_from: durable_receipt.admitted_at,
+                    revoked_at: None,
+                    delegation: admitted.payload().clone(),
+                }
+                .digest()
+                .map_err(refusal)?;
                 Ok(OperationResult::Coordinated {
                     result: json!({
                         "delegation": admitted.payload().id,
+                        "admitted_at": durable_receipt.admitted_at,
+                        "commissioner_grant_digest": commissioner_grant_digest,
                         "admitted": true,
                     }),
                     evidence_refs: Vec::new(),

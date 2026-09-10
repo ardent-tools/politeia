@@ -234,6 +234,13 @@ pub struct CommitReceipt {
     pub transition_digest: Digest,
 }
 
+/// Exact durable receipt returned when a signed delegation is admitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DelegationAdmissionReceipt {
+    /// Trusted PostgreSQL instant assigned to the immutable admission.
+    pub admitted_at: Timestamp,
+}
+
 /// An unsigned, daemon-derived commissioning record receipt retained by the
 /// institution-controlled durable authority.
 ///
@@ -551,7 +558,7 @@ impl PostgresStorage {
         scope: &Scope,
         admitted: &Admitted<Delegation>,
         wire: &SignedAdmissionWire<Delegation>,
-    ) -> Result<(), StorageError> {
+    ) -> Result<DelegationAdmissionReceipt, StorageError> {
         if admitted.kind() != AdmissionKind::Delegation
             || admitted.institution() != scope.institution()
             || admitted.workspace() != scope.workspace()
@@ -570,14 +577,19 @@ impl PostgresStorage {
         let wire_digest = Digest::blake3(&wire_payload);
         let client = self.client().await?;
         let scoped = scope_values(scope);
-        let inserted = client.execute(
-            "INSERT INTO delegations (institution_id, workspace_id, delegation_id, delegation_digest, wire_digest, payload, signature, signer_id) SELECT $1, $2, $3, $4, $5, $6, $7, $8 WHERE EXISTS (SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $9) ON CONFLICT DO NOTHING",
+        let row = client.query_opt(
+            "INSERT INTO delegations (institution_id, workspace_id, delegation_id, delegation_digest, wire_digest, payload, signature, signer_id) SELECT $1, $2, $3, $4, $5, $6, $7, $8 WHERE EXISTS (SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $9) ON CONFLICT DO NOTHING RETURNING (EXTRACT(EPOCH FROM admitted_at) * 1000000)::bigint",
             &[&scoped.institution, &scoped.workspace, &delegation.id.0, &delegation_digest.as_str(), &wire_digest.as_str(), &wire_payload, &wire.signature, &wire.signer.0, &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?;
-        if inserted == 0 {
+        let Some(row) = row else {
             return Err(StorageError::ImmutableConflict);
-        }
-        Ok(())
+        };
+        let micros: i64 = row.get(0);
+        let nanos = i32::try_from(micros.rem_euclid(1_000_000) * 1_000)
+            .map_err(|_| StorageError::AdmissionMismatch)?;
+        let admitted_at = Timestamp::new(micros.div_euclid(1_000_000), nanos)
+            .map_err(|_| StorageError::AdmissionMismatch)?;
+        Ok(DelegationAdmissionReceipt { admitted_at })
     }
 
     /// Retain a daemon-derived commissioning receipt after its semantic inputs
