@@ -606,7 +606,12 @@ impl AdmittedOperationalSubmission {
         )
         .and_then(|config| config.with_trusted_routing_decisions([self.routing.clone()]))
         .map_err(operational_refusal)?;
-        Ok(Dispatcher::new(self.policy.clone(), port, ledger, config))
+        Ok(Dispatcher::new(
+            self.policy.clone(),
+            port,
+            ledger.with_workspace_revision(self.admission_revision),
+            config,
+        ))
     }
 }
 
