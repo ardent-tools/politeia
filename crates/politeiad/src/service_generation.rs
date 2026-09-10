@@ -16,7 +16,7 @@ use politeia_core::{
         HistoricalReconnaissanceGrantRecord, TrustedCommissionerGrantRegistry,
         commissioning_institution_audience, commissioning_workspace_resource,
     },
-    evidence::TrustedEvidenceRegistry,
+    evidence::{EvidenceRequest, IndependenceClass, TrustedEvidenceRegistry},
     generation::RuntimeGenerationInputs,
     knowledge::{TrustedObservationRegistry, TrustedSourceCaptureRegistry},
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
@@ -42,7 +42,7 @@ use crate::{
         VerifiedGenerationArtifact,
     },
     service::PoliteiadService,
-    service_generation_validation::GenerationValidationReport,
+    service_generation_validation::{GenerationValidationReport, LIFECYCLE_CALIBRATION_METHOD},
     service_operation::direct_grant_authorization_digest,
 };
 
@@ -134,6 +134,8 @@ pub struct CommissioningSelection {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActivationAssurance {
+    /// Verifier-signed calibration evidence retained by the activation proof.
+    pub calibration: SignedAdmissionWire<EvidenceRequest>,
     /// Signed run of the exact lifecycle control.
     pub run: SignedAdmissionWire<ControlRun>,
     /// Signed direct grant for the control-run producer.
@@ -512,6 +514,10 @@ impl PoliteiadService {
         );
         self.require_current_direct_grant(&durable, &assurance.run_authority)?;
         self.require_current_direct_grant(&durable, &assurance.proof_authority)?;
+        let calibration = self
+            .anchors()
+            .admit_expected(AdmissionKind::Evidence, assurance.calibration.clone())
+            .map_err(refusal)?;
         let run = self
             .anchors()
             .admit_expected(AdmissionKind::ControlRun, assurance.run.clone())
@@ -535,6 +541,22 @@ impl PoliteiadService {
         let artifact = stored.artifact_digest.clone();
         let run_value = authorized.run();
         let proof_value = verified.proof();
+        let validation_digest = validation.digest().map_err(refusal)?;
+        if calibration.signer() != proof.signer()
+            || calibration.payload().producer_delegation != proof_authority.payload().id
+            || calibration.payload().method != LIFECYCLE_CALIBRATION_METHOD
+            || calibration.payload().subject != validation_digest
+            || calibration.payload().payload_digest != validation_digest
+            || calibration.payload().independence != IndependenceClass::IndependentAgent
+            || calibration.payload().observed_at > proof_value.proved_at
+            || proof_value.proved_at > run_value.started_at
+            || proof_value.retained_evidence != calibration.payload().id
+        {
+            return Err(CoordinatorError::Refused(
+                "activation proof lacks exact verifier-signed lifecycle calibration evidence"
+                    .to_string(),
+            ));
+        }
         let run_authorization =
             direct_grant_authorization_digest(run_authority.payload()).map_err(refusal)?;
         if run_value.authorization != run_authorization {
@@ -574,6 +596,10 @@ impl PoliteiadService {
         }
         clean_claim(&[authorized], control, &generation, &verified).map_err(refusal)?;
         let evidence = vec![
+            EvidenceAdmission {
+                id: assurance.calibration.payload.id.clone(),
+                record: signed_wire_record(&assurance.calibration)?,
+            },
             EvidenceAdmission {
                 id: assurance.run.payload.id.clone(),
                 record: signed_wire_record(&assurance.run)?,
@@ -621,6 +647,7 @@ impl PoliteiadService {
                 "control": control,
             }),
             evidence_refs: vec![
+                assurance.calibration.payload.id.0.to_string(),
                 assurance.run.payload.id.0.to_string(),
                 assurance.proof.payload.id.0.to_string(),
             ],

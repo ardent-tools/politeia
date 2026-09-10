@@ -20,6 +20,8 @@ pub const LIFECYCLE_VERIFIER_VERSION: &str = "generation-artifact-verifier.v1";
 pub const LIFECYCLE_VERIFIER_PATH: &str = "generation-artifact-bundle-verifier.v1";
 /// Stable schema for unsigned generation validation output.
 pub const GENERATION_VALIDATION_SCHEMA: &str = "politeia.generation-validation.v1";
+/// Exact method identifier for a verifier-signed lifecycle calibration record.
+pub const LIFECYCLE_CALIBRATION_METHOD: &str = "politeia.generation-calibration.v1";
 
 /// Exact unsigned output of a real generation artifact validation.
 ///
@@ -90,6 +92,17 @@ struct CalibrationPopulation<'a> {
 }
 
 impl GenerationValidationReport {
+    /// Canonically digest this exact public validation report for retained
+    /// lifecycle-calibration evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an encoding error if this report cannot be represented in its
+    /// canonical lifecycle-calibration form.
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
+        to_canonical_bytes(self).map(|bytes| Digest::blake3(&bytes))
+    }
+
     /// Bind one real verifier calibration into stable unsigned vector values.
     ///
     /// # Errors
