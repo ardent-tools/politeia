@@ -233,6 +233,8 @@ pub enum DigestDomain {
     OperationIntent,
     /// The sealed claims of one dispatcher-issued effect lease.
     LeaseClaims,
+    /// The canonical semantic subject of one potentially productive effect.
+    EffectSubject,
     /// An execution resource available for bounded work.
     ExecutionResource,
     /// An evidence-backed execution-resource capability profile.
@@ -268,6 +270,7 @@ impl DigestDomain {
             | Self::RuntimeGenerationInputs
             | Self::OperationIntent
             | Self::LeaseClaims
+            | Self::EffectSubject
             | Self::ExecutionResource
             | Self::CapabilityProfile
             | Self::CapabilityVerification
@@ -286,6 +289,7 @@ impl DigestDomain {
             Self::RuntimeGenerationInputs,
             Self::OperationIntent,
             Self::LeaseClaims,
+            Self::EffectSubject,
             Self::ExecutionResource,
             Self::CapabilityProfile,
             Self::CapabilityVerification,
@@ -311,6 +315,7 @@ impl DigestDomain {
             DigestDomain::RuntimeGenerationInputs => "runtime_generation_inputs_v1",
             DigestDomain::OperationIntent => "operation_intent_v1",
             DigestDomain::LeaseClaims => "lease_claims_v1",
+            DigestDomain::EffectSubject => "effect_subject_v1",
             DigestDomain::ExecutionResource => "execution_resource_v1",
             DigestDomain::CapabilityProfile => "capability_profile_v1",
             DigestDomain::CapabilityVerification => "capability_verification_v1",

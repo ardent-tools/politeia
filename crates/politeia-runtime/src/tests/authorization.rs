@@ -293,6 +293,7 @@ async fn a_substituted_claims_digest_is_refused_at_the_ledger() {
         reservation.reservation_id().clone(),
         reservation.replay_key().clone(),
         reservation.retains_replay(),
+        reservation.effect().clone(),
         reservation.replay_domain().to_string(),
         reservation.budget_scopes().to_vec(),
         reservation.requested_budget().clone(),

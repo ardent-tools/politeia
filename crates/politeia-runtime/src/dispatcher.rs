@@ -6,7 +6,7 @@ use super::{
     AuthorizationLedger, AuthorizedEffect, DecisionMismatchSnafu, DeniedSnafu, Dispatcher,
     DispatcherConfig, EffectLease, EffectPort, InvalidDelegationSnafu,
     InvalidExecutionAssignmentSnafu, LeaseClaims, LeaseMismatchSnafu, OperationIntent,
-    PolicyDecisionPoint, RuntimeError, WrongAudienceSnafu,
+    PolicyDecisionPoint, RuntimeError, WrongAudienceSnafu, effect_reservation,
 };
 
 impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P, H, L> {
@@ -78,6 +78,7 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             .execution
             .as_ref()
             .map_or(max_expiry, |assignment| assignment.expires_at);
+        let effect = effect_reservation(intent, &self.adapter, self.port.audience())?;
         let claims = LeaseClaims {
             id: EffectLeaseId::new(),
             reservation_id: BudgetReservationId::new(),
@@ -88,6 +89,7 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             resources: intent.resources.clone(),
             budget: intent.budget.clone(),
             idempotency_key: intent.idempotency_key.clone(),
+            effect,
             execution: intent.execution.clone(),
             decision,
             runtime: self.config.runtime.clone(),
@@ -330,6 +332,15 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             lease.allows_audience(self.port.audience()),
             WrongAudienceSnafu
         );
+        if let Some(subject) = lease.effect_subject() {
+            ensure!(
+                subject.overlap().target().adapter() == &self.adapter
+                    && subject.overlap().target().audience() == self.port.audience(),
+                LeaseMismatchSnafu {
+                    field: "effect target"
+                }
+            );
+        }
 
         let reservation = lease.reservation_request()?;
         self.ledger.claim(&reservation).await?;
