@@ -49,7 +49,8 @@ use politeiad::{
     service_operation::{
         BOUNDED_LOCAL_OPERATION_CAPABILITY, BOUNDED_LOCAL_OPERATION_TASK_CLASS,
         CAPABILITY_QUALIFICATION_METHOD, CAPTURE_SOURCE_OPERATION, COMPILE_CONTEXT_OPERATION,
-        CapabilityEvidenceSubmission, CapabilityVerificationEvidence, DETECTOR_CALIBRATION_METHOD,
+        CapabilityEvidenceSubmission, CapabilityQualificationEvidence,
+        CapabilityVerificationEvidence, DETECTOR_CALIBRATION_METHOD,
         DISCOVER_CAPABILITIES_OPERATION, DetectorCalibrationEvidenceSubmission,
         InstalledOperationHandler, OPERATION_RECEIPT_OBLIGATION, OperationSubmission,
         OperationalControlEvidence, OperationalExecutionRegistry, RESOURCE_MANIFEST_ACTION,
@@ -100,7 +101,6 @@ impl OperationalFixture {
         let executable_digest =
             Digest::blake3(&fs::read(&executable).expect("staged package executable is readable"));
         let adapter = fixture.adapter.clone();
-        let now = Timestamp::now();
 
         let local_resource = ExecutionResource {
             id: ExecutionResourceId::new(),
@@ -150,6 +150,7 @@ impl OperationalFixture {
         let verifier_domain = trust_domain("reference.independent-verifier");
         let local_profile_id = CapabilityProfileId::new();
         let remote_profile_id = CapabilityProfileId::new();
+        let local_probe_started_at = Timestamp::now();
         let local_verification = CapabilityVerificationRecord {
             id: CapabilityVerificationId::new(),
             profile: local_profile_id.clone(),
@@ -160,9 +161,10 @@ impl OperationalFixture {
             verifier: fixture.identities.verifier.clone(),
             verifier_control_domain: verifier_domain.clone(),
             evidence: BTreeSet::from([local_evidence.clone()]),
-            observed_at: now - SignedDuration::from_secs(2),
-            expires_at: now + SignedDuration::from_hours(2),
+            observed_at: local_probe_started_at,
+            expires_at: local_probe_started_at + SignedDuration::from_hours(2),
         };
+        let remote_probe_started_at = Timestamp::now();
         let remote_verification = CapabilityVerificationRecord {
             id: CapabilityVerificationId::new(),
             profile: remote_profile_id.clone(),
@@ -173,11 +175,25 @@ impl OperationalFixture {
             verifier: fixture.identities.verifier.clone(),
             verifier_control_domain: verifier_domain,
             evidence: BTreeSet::from([remote_evidence.clone()]),
-            observed_at: now - SignedDuration::from_secs(2),
-            expires_at: now + SignedDuration::from_hours(2),
+            observed_at: remote_probe_started_at,
+            expires_at: remote_probe_started_at + SignedDuration::from_hours(2),
         };
-        let local_profile = capability_profile(&local_verification);
-        let remote_profile = capability_profile(&remote_verification);
+        let manifest_operation = operations
+            .iter()
+            .find(|operation| operation.spec.name == RESOURCE_MANIFEST_OPERATION)
+            .expect("manifest operation is registered");
+        let (local_verification, local_profile, local_qualification, local_evidence_observed_at) =
+            qualified_capability_material(
+                local_verification,
+                &local_resource,
+                Some(manifest_operation),
+            );
+        let (
+            remote_verification,
+            remote_profile,
+            remote_qualification,
+            remote_evidence_observed_at,
+        ) = qualified_capability_material(remote_verification, &remote_resource, None);
         let execution = OperationalExecutionRegistry::new(
             operations,
             vec![local_resource, remote_resource],
@@ -242,14 +258,14 @@ impl OperationalFixture {
             &fixture.identities.control_producer,
             RUN_POLICY_CONTROL_ACTION,
             &policy_control_resource(PUBLIC_RESOURCE_DETECTOR),
-            now,
+            Timestamp::now(),
         );
         let activation_authority = assurance_authority(
             fixture,
             &fixture.identities.verifier,
             VERIFY_POLICY_CONTROL_ACTION,
             &policy_control_resource(PUBLIC_RESOURCE_DETECTOR),
-            now,
+            Timestamp::now(),
         );
 
         let mut capability_evidence = Vec::new();
@@ -257,17 +273,25 @@ impl OperationalFixture {
             delegation_admission(&run_authority),
             delegation_admission(&activation_authority),
         ];
-        for verification in [local_verification, remote_verification] {
-            let qualification = execution
-                .capability_qualification(&verification)
-                .expect("public capability qualification reproduces");
+        for (verification, qualification, evidence_observed_at) in [
+            (
+                local_verification,
+                local_qualification,
+                local_evidence_observed_at,
+            ),
+            (
+                remote_verification,
+                remote_qualification,
+                remote_evidence_observed_at,
+            ),
+        ] {
             let authority = assurance_authority(
                 fixture,
                 &fixture.identities.verifier,
                 VERIFY_EXECUTION_CAPABILITY_ACTION,
                 &capability_verification_resource(&verification)
                     .expect("verification resource derives"),
-                now,
+                Timestamp::now(),
             );
             let verification_wire = sign(
                 fixture,
@@ -294,7 +318,7 @@ impl OperationalFixture {
                     producer_delegation: authority.payload.id.clone(),
                     method: CAPABILITY_QUALIFICATION_METHOD.to_string(),
                     payload_digest: qualification_digest,
-                    observed_at: verification.observed_at,
+                    observed_at: evidence_observed_at,
                     independence: IndependenceClass::IndependentAgent,
                 },
             );
@@ -317,6 +341,7 @@ impl OperationalFixture {
         let calibration = policy
             .calibrate_detector(PUBLIC_RESOURCE_DETECTOR)
             .expect("public detector calibration executes");
+        let calibration_observed_at = Timestamp::now();
         let calibration_digest = calibration.digest().expect("calibration digests");
         let calibration_evidence_id = EvidenceId::new();
         let calibration_evidence = sign(
@@ -330,7 +355,7 @@ impl OperationalFixture {
                 producer_delegation: activation_authority.payload.id.clone(),
                 method: DETECTOR_CALIBRATION_METHOD.to_string(),
                 payload_digest: calibration_digest,
-                observed_at: now - SignedDuration::from_secs(1),
+                observed_at: calibration_observed_at,
                 independence: IndependenceClass::IndependentAgent,
             },
         );
@@ -340,11 +365,7 @@ impl OperationalFixture {
             &fixture.identities.verifier,
             fixture.identities.verifier_key(),
             calibration
-                .activation_proof(
-                    EvidenceId::new(),
-                    calibration_evidence_id,
-                    now - SignedDuration::from_secs(1),
-                )
+                .activation_proof(EvidenceId::new(), calibration_evidence_id, Timestamp::now())
                 .expect("activation proof binds actual detector vectors"),
         );
         capability_admissions.push(serde_json::json!({
@@ -458,7 +479,7 @@ impl OperationalFixture {
     /// cheaper, higher-scoring but hard-ineligible remote reference resource.
     pub(crate) fn availability(&self, at: Timestamp) -> AvailabilitySnapshot {
         AvailabilitySnapshot {
-            observed_at: at - SignedDuration::from_millis(2),
+            observed_at: at,
             expires_at: at + SignedDuration::from_mins(10),
             available_resources: self.execution.available_resources().clone(),
         }
@@ -519,7 +540,8 @@ impl OperationalFixture {
             execution: Some(assignment),
         };
         let intent_digest = intent.digest().expect("operation intent digests");
-        let run = self
+        let control_started_at = Timestamp::now();
+        let mut run = self
             .policy
             .run_control(
                 &OperationalEvaluationRequest {
@@ -537,10 +559,11 @@ impl OperationalFixture {
                     &to_canonical_bytes(&self.run_authority.payload)
                         .expect("control authority encodes"),
                 ),
-                at - SignedDuration::from_millis(2),
-                at - SignedDuration::from_millis(1),
+                control_started_at,
+                control_started_at,
             )
             .expect("public detector executes");
+        run.finished_at = Timestamp::now();
         OperationSubmission {
             intent: sign(
                 fixture,
@@ -756,6 +779,45 @@ fn capability_profile(verification: &CapabilityVerificationRecord) -> Capability
         verification: verification.id.clone(),
         verification_digest: verification.digest().expect("verification digests"),
     }
+}
+
+/// Execute the public probe before fixing the signed observation time.
+///
+/// The profile digest includes the verification record, so a provisional
+/// record is needed to run the probe without predicting its completion time.
+/// Only the probe result survives that provisional record. The returned
+/// verification/profile pair is bound to the timestamp captured immediately
+/// after the actual probe, and that same instant is signed by its evidence.
+fn qualified_capability_material(
+    mut verification: CapabilityVerificationRecord,
+    resource: &ExecutionResource,
+    manifest_operation: Option<&RegisteredOperation>,
+) -> (
+    CapabilityVerificationRecord,
+    CapabilityProfile,
+    CapabilityQualificationEvidence,
+    Timestamp,
+) {
+    let provisional_profile = capability_profile(&verification);
+    let observed = CapabilityQualificationEvidence::reproduce(
+        &verification,
+        resource,
+        &provisional_profile,
+        manifest_operation,
+    )
+    .expect("public capability qualification executes");
+    let evidence_observed_at = Timestamp::now();
+    verification.observed_at = evidence_observed_at;
+    verification.expires_at = evidence_observed_at + SignedDuration::from_hours(2);
+    let profile = capability_profile(&verification);
+    let qualification = CapabilityQualificationEvidence {
+        schema: observed.schema,
+        verification: verification.id.clone(),
+        resource: resource.clone(),
+        profile: profile.clone(),
+        probe: observed.probe,
+    };
+    (verification, profile, qualification, evidence_observed_at)
 }
 
 fn enforced_authority() -> BindingAuthority {
