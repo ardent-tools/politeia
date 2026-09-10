@@ -8,6 +8,7 @@
 
 use std::{
     collections::BTreeSet,
+    error::Error,
     path::Path,
     process::Child,
     thread,
@@ -29,11 +30,10 @@ use super::{
     require_coordinated, require_refusal, run, serve, stop, submit_commissioning, write_request,
 };
 
-const REPLAY_REFUSAL: &str = "attempt is missing, expired, replayed, or not claimable";
 const BARRIER_TABLE: &str = "politeia_test_completion_barriers";
 const BARRIER_TRIGGER: &str = "politeia_test_block_operation_completion";
 const BARRIER_FUNCTION: &str = "politeia_test_block_completion";
-const UNRESOLVED_OVERLAP: &str = "canonical mutating effect overlap is unresolved";
+const UNRESOLVED_OVERLAP: &str = "unresolved overlapping effect subject";
 const CRASH_RESOURCE: &str = "public:continuity-crash";
 const CONCURRENT_RESOURCE: &str = "public:continuity-concurrent";
 
@@ -87,8 +87,8 @@ pub(super) fn exercise(
                 &crashed_request,
             ],
         )?,
-        "post-crash replay of the claimed operation",
-        REPLAY_REFUSAL,
+        "same-wire operation overlapping a crashed claim",
+        UNRESOLVED_OVERLAP,
     )?;
 
     let fresh_overlap = fresh_manifest(fixture, operations, CRASH_RESOURCE)?;
@@ -302,6 +302,114 @@ fn assert_completion_ids(completion: &serde_json::Value) -> TestResult {
     }
     let _: Digest = serde_json::from_value(completion["receipt_digest"].clone())?;
     Ok(())
+}
+
+/// Read the durable completion and its transactional outbox counterpart for
+/// one learning disclosure. This is test administration only; production
+/// consumers still use the daemon's authenticated receipt.
+pub(crate) fn observe_completed_disclosure(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    completion: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn Error + Send + Sync>> {
+    let completion = completion.get("completion").unwrap_or(completion);
+    assert_completion_ids(completion)?;
+    let reservation = Uuid::parse_str(
+        completion["reservation"]
+            .as_str()
+            .ok_or("disclosure completion omitted its reservation")?,
+    )?;
+    let generation: Digest = serde_json::from_value(completion["generation"].clone())?;
+    let receipt_digest: Digest = serde_json::from_value(completion["receipt_digest"].clone())?;
+    let outbox = Uuid::parse_str(
+        completion["outbox"]
+            .as_str()
+            .ok_or("disclosure completion omitted its outbox")?,
+    )?;
+    with_admin(database_url, |runtime, client| {
+        let institution = fixture.host_trust.workspace.institution.0;
+        let workspace = fixture.host_trust.workspace.id.0;
+        let row = runtime.block_on(client.query_one(
+            "SELECT status::text, receipt_digest, receipt_payload
+             FROM operation_attempts
+             WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3",
+            &[&institution, &workspace, &reservation],
+        ))?;
+        assert_eq!(row.get::<_, String>(0), "completed");
+        let stored_digest: String = row.get(1);
+        let stored_payload: Vec<u8> = row.get(2);
+        assert_eq!(stored_digest, receipt_digest.as_str());
+        assert_eq!(Digest::blake3(&stored_payload), receipt_digest);
+        let receipt: serde_json::Value = serde_json::from_slice(&stored_payload)?;
+        assert_eq!(
+            receipt["generation"],
+            serde_json::json!(generation.clone()),
+            "durable disclosure receipt binds the returned active generation"
+        );
+        assert_eq!(
+            receipt["reservation"],
+            serde_json::json!(reservation),
+            "durable disclosure receipt binds the returned reservation"
+        );
+        assert_eq!(to_canonical_bytes(&receipt)?, stored_payload);
+        let outbox_row = runtime.block_on(client.query_one(
+            "SELECT payload_digest, payload FROM transactional_outbox
+             WHERE institution_id = $1 AND workspace_id = $2 AND outbox_id = $3",
+            &[&institution, &workspace, &outbox],
+        ))?;
+        let outbox_digest: String = outbox_row.get(0);
+        let outbox_payload: Vec<u8> = outbox_row.get(1);
+        assert_eq!(outbox_digest, receipt_digest.as_str());
+        assert_eq!(outbox_payload, stored_payload);
+        Ok(serde_json::json!({
+            "institution": institution,
+            "workspace": workspace,
+            "status": "completed",
+            "generation": generation,
+            "reservation": reservation,
+            "receipt_digest": receipt_digest,
+            "receipt": receipt,
+            "outbox": outbox,
+            "outbox_digest": outbox_digest,
+        }))
+    })
+}
+
+/// Read one scoped signed-state record without using an application service.
+pub(crate) fn observe_signed_state(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    key: &str,
+) -> Result<serde_json::Value, Box<dyn Error + Send + Sync>> {
+    with_admin(database_url, |runtime, client| {
+        let institution = fixture.host_trust.workspace.institution.0;
+        let workspace = fixture.host_trust.workspace.id.0;
+        let row = runtime.block_on(client.query_one(
+            "SELECT value_digest, value_payload FROM state_entries
+             WHERE institution_id = $1 AND workspace_id = $2 AND state_key = $3",
+            &[&institution, &workspace, &key],
+        ))?;
+        let digest: String = row.get(0);
+        let bytes: Vec<u8> = row.get(1);
+        assert_eq!(Digest::blake3(&bytes).as_str(), digest);
+        Ok(serde_json::json!({
+            "institution": institution,
+            "workspace": workspace,
+            "key": key,
+            "digest": digest,
+            "bytes": bytes,
+        }))
+    })
+}
+
+fn with_admin<T>(
+    database_url: &str,
+    operation: impl FnOnce(&tokio::runtime::Runtime, &Client) -> TestResult<T>,
+) -> TestResult<T> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (client, connection) = runtime.block_on(tokio_postgres::connect(database_url, NoTls))?;
+    let _connection = runtime.spawn(connection);
+    operation(&runtime, &client)
 }
 
 /// One test-side connection that holds the advisory lock used by the trigger.
