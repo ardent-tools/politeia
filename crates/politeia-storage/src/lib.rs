@@ -1234,6 +1234,27 @@ impl PostgresStorage {
         request: &ReservationRequest,
         bootstrap: Option<&Digest>,
     ) -> Result<(), StorageError> {
+        // A serialization refusal proves the transaction aborted before claim.
+        // Retrying this boundary never invokes or retries an effect port.
+        for attempt in 0..SERIALIZABLE_ATTEMPTS {
+            match self.claim_runtime_once(scope, request, bootstrap).await {
+                Err(StorageError::Database(source))
+                    if is_serialization_failure(&source) && attempt + 1 < SERIALIZABLE_ATTEMPTS =>
+                {
+                    tokio::task::yield_now().await;
+                }
+                outcome => return outcome,
+            }
+        }
+        Err(StorageError::SerializationExhausted)
+    }
+
+    async fn claim_runtime_once(
+        &self,
+        scope: &Scope,
+        request: &ReservationRequest,
+        bootstrap: Option<&Digest>,
+    ) -> Result<(), StorageError> {
         let mut client = self.client().await?;
         let transaction = client
             .build_transaction()
