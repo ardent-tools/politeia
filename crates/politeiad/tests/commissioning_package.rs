@@ -496,6 +496,44 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         "analytics owner learning source registration",
     )?;
     assert_ne!(software_learning.source, analytics_learning.source);
+    let (software_context_delegation, software_context) =
+        software.bootstrap_context_documents(&software_learning.source);
+    let software_context_delegation_request = write_request(
+        &software,
+        "software-context-delegation.json",
+        &serde_json::json!({
+            "kind": "admit_delegation",
+            "delegation": software.signed_commissioner_delegation(software_context_delegation),
+        }),
+    )?;
+    require_coordinated(
+        run(
+            &database_url,
+            &[Path::new("commissioning"), &software_socket, &software_context_delegation_request],
+        )?,
+        "software context delegation admission",
+    )?;
+    let software_context_request = write_request(&software, "software-bootstrap-context.json", &software_context)?;
+    let context = require_coordinated(
+        run(
+            &database_url,
+            &[Path::new("commissioning"), &software_socket, &software_context_request],
+        )?,
+        "software bootstrap context disclosure",
+    )?;
+    assert_eq!(context["context"]["input_ids"][0], serde_json::json!(software_learning.source));
+    assert_eq!(
+        context["content"][software_learning.source.0.to_string()],
+        serde_json::json!(fs::read(&software.source_document)?)
+    );
+    require_refusal(
+        run(
+            &database_url,
+            &[Path::new("commissioning"), &software_socket, &software_context_request],
+        )?,
+        "software bootstrap context replay",
+        "replay",
+    )?;
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;
     stop(software_daemon)?;

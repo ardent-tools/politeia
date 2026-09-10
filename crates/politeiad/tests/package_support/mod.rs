@@ -17,7 +17,7 @@ use jiff::{SignedDuration, Timestamp};
 use politeia_core::{
     AdapterId, CommissioningRecordId, DataClass, Delegation, DelegationId, Digest, Effect,
     EvidenceId, InstitutionId, InstitutionWorkspaceId, ObservationId, PolicyBundleId, PrincipalId,
-    ResourceBudget, SourceCaptureId,
+    ResourceBudget, RuntimeGenerationId, SourceCaptureId,
     evidence::{EvidenceRequest, IndependenceClass},
     generation::{
         ApprovedGenerationInputs, CommissioningCapability, ReproducibilityContract,
@@ -35,8 +35,8 @@ use politeia_core::{
 use politeia_evidence::assurance::{ActivationProof, ControlRun};
 use politeiad::config::{HostTrustConfiguration, InstalledTrustAnchor};
 use politeiad::{
-    learning::KnowledgeCurrency,
-    service_learning::{LearningRequest, LearningSourceRequest},
+    learning::{COMPILE_CONTEXT_ACTION, CONTEXT_READ_EFFECT, ContextRequest, KnowledgeCurrency, context_source_resource, context_workspace_resource},
+    service_learning::{LearningDisclosureIngress, LearningRequest, LearningSourceRequest},
 };
 
 /// The two intentionally disjoint reference institutions exercised by the package.
@@ -301,6 +301,7 @@ impl ReferenceFixture {
                     AdmissionKind::CandidateClaim,
                     AdmissionKind::Delegation,
                     AdmissionKind::Generation,
+                    AdmissionKind::LearningContext,
                 ],
             ),
             anchor(
@@ -642,6 +643,38 @@ impl ReferenceFixture {
             "candidate": candidate.candidate.clone(),
             "approval": forged,
         })
+    }
+
+    /// Build a bounded commissioner request for the owner-pinned source using
+    /// the immutable bootstrap runtime identity.
+    pub(crate) fn bootstrap_context_documents(
+        &self,
+        source: &EvidenceId,
+    ) -> (Delegation, serde_json::Value) {
+        let delegation = Delegation {
+            id: DelegationId::new(), issuer: self.identities.owner.clone(),
+            subject: self.identities.commissioner.clone(), parent: None,
+            actions: BTreeSet::from([COMPILE_CONTEXT_ACTION.to_owned()]),
+            resources: BTreeSet::from([
+                context_workspace_resource(&self.host_trust.workspace.id),
+                context_source_resource(&self.host_trust.workspace.id, source),
+            ]), effects: BTreeSet::from([CONTEXT_READ_EFFECT]),
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audience: BTreeSet::from(["commissioning".to_owned()]),
+            expires_at: Timestamp::now() + SignedDuration::from_hours(1),
+            budget: ResourceBudget { wall_ms: Some(30_000), cpu_ms: Some(10_000), memory_bytes: Some(32 * 1024 * 1024), io_bytes: Some(1024 * 1024), network_bytes: Some(0), external_cost_microunits: Some(0) },
+        };
+        let generation = RuntimeGenerationId::from_digest(
+            politeiad::service_learning::durable_signed_wire_digest(&self.host_trust.bootstrap)
+                .expect("bootstrap wire canonically digests"),
+        );
+        let request = LearningDisclosureIngress {
+            id: CommissioningRecordId::new(), requester: self.identities.commissioner.clone(),
+            delegation: delegation.id.clone(), budget: delegation.budget.clone(),
+            input: ContextRequest { institution: self.host_trust.workspace.institution.clone(), workspace: self.host_trust.workspace.id.clone(), generation, compiler_version: "learning-v1".to_owned(), audience: "commissioning".to_owned(), sink: "package-acceptance".to_owned(), trust_domain: self.host_trust.workspace.trust_domain.clone(), limit: 1 },
+        };
+        let signed = SignedAdmissionWire::sign(AdmissionKind::LearningContext, self.host_trust.workspace.institution.clone(), self.host_trust.workspace.id.clone(), self.identities.commissioner.clone(), request, self.identities.commissioner_key()).expect("commissioner signs context request");
+        (delegation, serde_json::json!({"kind":"learning", "request": LearningRequest::CompileContext { request: signed }}))
     }
 
     /// Bind the exact owner-approved fact to public content for later learning.
