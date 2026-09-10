@@ -140,6 +140,11 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         analytics.identities.owner,
         analytics.identities.commissioner
     );
+    assert_ne!(
+        software.identities.owner_key().verifying_key().to_bytes(),
+        analytics.identities.owner_key().verifying_key().to_bytes(),
+        "the two institutions must not reuse owner signing material"
+    );
     let software_config = software.write_host_trust();
     let analytics_config = analytics.write_host_trust();
 

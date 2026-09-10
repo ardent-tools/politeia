@@ -159,11 +159,11 @@ impl ReferenceFixture {
             worker: PrincipalId::new(),
             verifier: PrincipalId::new(),
             replacement: PrincipalId::new(),
-            owner_key: SigningKey::from_bytes(&[0x11; 32]),
-            commissioner_key: SigningKey::from_bytes(&[0x22; 32]),
-            worker_key: SigningKey::from_bytes(&[0x33; 32]),
-            verifier_key: SigningKey::from_bytes(&[0x44; 32]),
-            replacement_key: SigningKey::from_bytes(&[0x55; 32]),
+            owner_key: fixture_signing_key(kind, 0x11),
+            commissioner_key: fixture_signing_key(kind, 0x22),
+            worker_key: fixture_signing_key(kind, 0x33),
+            verifier_key: fixture_signing_key(kind, 0x44),
+            replacement_key: fixture_signing_key(kind, 0x55),
         };
         let institution = InstitutionId::new();
         let workspace_id = InstitutionWorkspaceId::new();
@@ -467,6 +467,14 @@ impl Drop for ReferenceFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn fixture_signing_key(kind: ReferenceInstitutionKind, role_seed: u8) -> SigningKey {
+    let institution_offset = match kind {
+        ReferenceInstitutionKind::SoftwareDevelopment => 0,
+        ReferenceInstitutionKind::Analytics => 0x50,
+    };
+    SigningKey::from_bytes(&[role_seed + institution_offset; 32])
 }
 
 fn anchor(
