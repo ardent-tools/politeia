@@ -25,15 +25,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ed25519_dalek::SigningKey;
 use jiff::{SignedDuration, Timestamp};
-use politeia_core::evidence::{EvidenceRecord, TrustedEvidenceRegistry};
+use politeia_core::evidence::{EvidenceRecord, IndependenceClass, TrustedEvidenceRegistry};
 use politeia_core::generation::{
     ApprovedGenerationInputs, CommissioningCapability, ReproducibilityContract,
 };
 use politeia_core::institution::{InstitutionBoundary, InstitutionWorkspace};
 use politeia_core::journal::{TransitionEntry, TransitionJournal, verify_chain};
 use politeia_core::knowledge::{
-    CandidateClaim, ClaimStatus, FactApprovalRequest, Observation, TrustedObservationRegistry,
-    approve_claim,
+    CandidateClaimRequest, ClaimStatus, FactApprovalRequest, Observation,
+    TrustedCandidateClaimRegistry, TrustedObservationRegistry, approve_claim,
+    candidate_claim_digest,
 };
 use politeia_core::lifecycle::{DeploymentTopology, LifecycleProfile};
 use politeia_core::outbox::{
@@ -48,7 +49,11 @@ use politeia_core::{
     InstitutionId, InstitutionWorkspaceId, ObservationId, OperationId, PolicyBundleId, PrincipalId,
     ResourceBudget, RuntimeGenerationId,
 };
-use politeia_evidence::{Attestation, IndependenceClass, Verification};
+use politeia_evidence::authority::{AuthorityContext, institution_audience};
+use politeia_evidence::{
+    Attestation, DelegatedVerification, VERIFY_ASSURANCE_ACTION, Verification,
+    assurance_subject_resource,
+};
 
 const SOURCE: &str = "crm";
 const SINK: &str = "inference:acme";
@@ -194,7 +199,7 @@ fn one_bounded_path_runs_end_to_end() {
     );
 
     // 2. Interpretation produces a candidate, uncontested.
-    let claim = CandidateClaim {
+    let candidate = CandidateClaimRequest {
         id: politeia_core::ClaimId::new(),
         workspace: s.workspace.id.clone(),
         subject: seen.subject.clone(),
@@ -205,8 +210,6 @@ fn one_bounded_path_runs_end_to_end() {
         interpreter: s.commissioner.clone(),
         interpreter_delegation: s.delegation.id.clone(),
     };
-    assert_eq!(claim.status(), ClaimStatus::Candidate);
-
     // 3. The owner signs approval, which resolves a trusted evidence-backed observation.
     let evidence = TrustedEvidenceRegistry::from_trusted_bootstrap([EvidenceRecord {
         id: seen.evidence.clone(),
@@ -226,34 +229,69 @@ fn one_bounded_path_runs_end_to_end() {
     )
     .unwrap_or_else(|refusal| unreachable!("fixture observation is evidence-bound: {refusal}"));
     let owner_key = SigningKey::from_bytes(&[23; 32]);
-    let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
-        s.workspace.institution.clone(),
-        s.workspace.id.clone(),
-        [TrustedSigningKey::new(
-            s.owner.clone(),
-            owner_key.verifying_key().to_bytes(),
-            BTreeSet::from([AdmissionKind::FactApproval]),
-        )
-        .unwrap_or_else(|refusal| unreachable!("fixture key is valid: {refusal}"))],
-    )
-    .unwrap_or_else(|refusal| unreachable!("fixture owner anchor is unique: {refusal}"));
+    let verifier = PrincipalId::new();
+    let verifier_key = SigningKey::from_bytes(&[31; 32]);
     let approval = SignedAdmissionWire::sign(
         AdmissionKind::FactApproval,
         s.workspace.institution.clone(),
         s.workspace.id.clone(),
         s.owner.clone(),
         FactApprovalRequest {
-            claim: claim.id.clone(),
-            subject: claim.subject.clone(),
-            proposition: claim.proposition.clone(),
-            acknowledged_status: claim.status(),
-            acknowledged_missed_axes: claim.missed_axes.clone(),
+            claim: candidate.id.clone(),
+            candidate_digest: candidate_claim_digest(&candidate)
+                .unwrap_or_else(|error| unreachable!("candidate request encodes: {error}")),
+            subject: candidate.subject.clone(),
+            proposition: candidate.proposition.clone(),
+            acknowledged_status: ClaimStatus::Candidate,
+            acknowledged_missed_axes: candidate.missed_axes.clone(),
             approved_at: at(),
         },
         &owner_key,
     )
     .unwrap_or_else(|refusal| unreachable!("fixture approval encodes: {refusal}"));
-    let fact = approve_claim(&s.workspace, &observations, &anchors, &claim, approval)
+    let commissioner_key = SigningKey::from_bytes(&[29; 32]);
+    let candidate_wire = SignedAdmissionWire::sign(
+        AdmissionKind::CandidateClaim,
+        s.workspace.institution.clone(),
+        s.workspace.id.clone(),
+        s.commissioner.clone(),
+        candidate,
+        &commissioner_key,
+    )
+    .unwrap_or_else(|refusal| unreachable!("candidate request encodes: {refusal}"));
+    let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
+        s.workspace.institution.clone(),
+        s.workspace.id.clone(),
+        [
+            TrustedSigningKey::new(
+                s.owner.clone(),
+                owner_key.verifying_key().to_bytes(),
+                BTreeSet::from([AdmissionKind::FactApproval, AdmissionKind::Delegation]),
+            )
+            .unwrap_or_else(|refusal| unreachable!("fixture owner key is valid: {refusal}")),
+            TrustedSigningKey::new(
+                s.commissioner.clone(),
+                commissioner_key.verifying_key().to_bytes(),
+                BTreeSet::from([AdmissionKind::CandidateClaim]),
+            )
+            .unwrap_or_else(|refusal| unreachable!("fixture commissioner key is valid: {refusal}")),
+            TrustedSigningKey::new(
+                verifier.clone(),
+                verifier_key.verifying_key().to_bytes(),
+                BTreeSet::from([AdmissionKind::Verification]),
+            )
+            .unwrap_or_else(|refusal| unreachable!("fixture verifier key is valid: {refusal}")),
+        ],
+    )
+    .unwrap_or_else(|refusal| unreachable!("fixture anchors are unique: {refusal}"));
+    let candidates = TrustedCandidateClaimRegistry::admit_signed(
+        &s.workspace,
+        &anchors,
+        &observations,
+        [candidate_wire],
+    )
+    .unwrap_or_else(|refusal| unreachable!("the signed candidate is admitted: {refusal}"));
+    let fact = approve_claim(&s.workspace, &observations, &anchors, &candidates, approval)
         .unwrap_or_else(|refusal| unreachable!("the signed candidate is approvable: {refusal}"));
     assert_eq!(
         fact.accepted_gaps(),
@@ -309,14 +347,69 @@ fn one_bounded_path_runs_end_to_end() {
         "a fully declared crossing is allowed"
     );
 
-    // 6. An independent verifier attests the result, bound to this subject.
-    let verification = Verification {
-        subject: fact.subject().clone(),
-        verifier: PrincipalId::new(),
-        evidence: vec![seen.evidence.clone()],
-        passed: true,
-        independence: IndependenceClass::IndependentService,
+    // 6. A separately owner-delegated verifier attests the result.
+    let verification_grant = Delegation {
+        id: DelegationId::new(),
+        issuer: s.owner.clone(),
+        subject: verifier.clone(),
+        parent: None,
+        actions: BTreeSet::from([VERIFY_ASSURANCE_ACTION.to_string()]),
+        resources: BTreeSet::from([assurance_subject_resource(fact.subject())
+            .unwrap_or_else(|error| unreachable!("subject resource encodes: {error}"))]),
+        effects: BTreeSet::new(),
+        data_classes: BTreeSet::new(),
+        audience: BTreeSet::from([institution_audience(&s.workspace.institution)]),
+        expires_at: at() + SignedDuration::from_hours(1),
+        budget: ResourceBudget {
+            wall_ms: None,
+            cpu_ms: None,
+            memory_bytes: None,
+            io_bytes: None,
+            network_bytes: None,
+            external_cost_microunits: None,
+        },
     };
+    let verification_grant = anchors
+        .admit_expected(
+            AdmissionKind::Delegation,
+            SignedAdmissionWire::sign(
+                AdmissionKind::Delegation,
+                s.workspace.institution.clone(),
+                s.workspace.id.clone(),
+                s.owner.clone(),
+                verification_grant,
+                &owner_key,
+            )
+            .unwrap_or_else(|refusal| unreachable!("verification grant encodes: {refusal}")),
+        )
+        .unwrap_or_else(|refusal| unreachable!("verification grant is admitted: {refusal}"));
+    let verification = anchors
+        .admit_expected(
+            AdmissionKind::Verification,
+            SignedAdmissionWire::sign(
+                AdmissionKind::Verification,
+                s.workspace.institution.clone(),
+                s.workspace.id.clone(),
+                verifier,
+                Verification {
+                    subject: fact.subject().clone(),
+                    evidence: vec![seen.evidence.clone()],
+                    passed: true,
+                    verified_at: at(),
+                },
+                &verifier_key,
+            )
+            .unwrap_or_else(|refusal| unreachable!("verification encodes: {refusal}")),
+        )
+        .unwrap_or_else(|refusal| unreachable!("verification is admitted: {refusal}"));
+    let authority = AuthorityContext::new(
+        s.workspace.institution.clone(),
+        s.workspace.id.clone(),
+        s.owner.clone(),
+        at(),
+    );
+    let verification = DelegatedVerification::admit(&verification, &verification_grant, &authority)
+        .unwrap_or_else(|refusal| unreachable!("verification has direct authority: {refusal}"));
     let attestation = Attestation::issue(
         &verification,
         &s.commissioner,
