@@ -551,6 +551,11 @@ impl AdmittedOperationalSubmission {
         self.intent.payload()
     }
 
+    /// Normalized active-policy decision for the exact admitted intent.
+    pub(crate) fn decision(&self) -> &PolicyDecision {
+        self.policy.decision()
+    }
+
     /// Original signed intent retained in completion evidence.
     pub(crate) fn signed_intent(&self) -> &SignedAdmissionWire<OperationIntent> {
         &self.signed_intent

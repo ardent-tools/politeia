@@ -20,7 +20,7 @@ use politeia_core::{
         FactApprovalRequest, SourceCaptureRequest, TrustedCandidateClaimRegistry,
         TrustedObservationRegistry, TrustedSourceCaptureRegistry, approve_claim,
     },
-    trust::{AdmissionKind, SignedAdmissionWire},
+    trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use politeia_evidence::assessment::{AssessmentRelation, Projection};
 use politeia_runtime::{
@@ -39,6 +39,10 @@ use crate::{
         FeedbackRequest, KnowledgeCurrency, LearningSnapshot,
     },
     service::{PoliteiadService, refusal, signed_wire_record, storage_refusal},
+    service_operation::{
+        AdmittedOperationalSubmission, COMPILE_CONTEXT_OPERATION, DISCOVER_CAPABILITIES_OPERATION,
+        InstalledOperationHandler, OperationSubmission,
+    },
 };
 
 /// A signed request that proves a durable delegation holder requested one exact
@@ -62,7 +66,7 @@ pub struct LearningIngress<T> {
 /// key before its effect port may return any selected bytes or capability
 /// identities.  Keeping this distinct from [`LearningIngress`] makes a
 /// missing budget unrepresentable at the protected read boundary.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LearningDisclosureIngress<T> {
     /// Stable request identity used as the durable replay key.
@@ -75,6 +79,15 @@ pub struct LearningDisclosureIngress<T> {
     pub budget: ResourceBudget,
     /// Exact inert context or discovery input.
     pub input: T,
+    /// Complete signed active-generation operation admission material.
+    ///
+    /// Bootstrap disclosures have no active generation and therefore must omit
+    /// this field. Active disclosures carry a separately principal-signed
+    /// operation intent, deterministic routing inputs, capability proofs, and
+    /// independently signed policy-control evidence. The service derives and
+    /// compares that intent before passing it to the shared admission seam.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_submission: Option<OperationSubmission>,
 }
 
 /// Owner-pinned content and eligibility metadata for one approved fact.
@@ -188,9 +201,11 @@ impl PoliteiadService {
         })?;
         match request {
             LearningRequest::RegisterSource { source } => self.register_source(source).await,
-            LearningRequest::CompileContext { request } => self.compile_context(request).await,
+            LearningRequest::CompileContext { request } => {
+                Box::pin(self.compile_context(request)).await
+            }
             LearningRequest::DiscoverCapabilities { request } => {
-                self.discover_capabilities(request).await
+                Box::pin(self.discover_capabilities(request)).await
             }
             LearningRequest::RecordFeedback { request } => self.record_feedback(request).await,
             LearningRequest::CorrectionView { request } => self.correction_view(request).await,
@@ -263,12 +278,6 @@ impl PoliteiadService {
             .load_bootstrap(self.scope())
             .await
             .map_err(|error| storage_refusal(&error))?;
-        if bootstrap.digest() != admitted.payload().input.generation.digest() {
-            return Err(CoordinatorError::Refused(
-                "bootstrap disclosure requires the immutable bootstrap runtime identity"
-                    .to_string(),
-            ));
-        }
         let output = self.hydrate_context(&durable, &result)?;
         let resources = disclosure_resources(
             &self.workspace().id,
@@ -285,6 +294,24 @@ impl PoliteiadService {
                 CoordinatorError::Refused(format!("learning input cannot bind: {error}"))
             })?,
         );
+        if bootstrap.digest() != admitted.payload().input.generation.digest() {
+            return self
+                .compile_active_context(
+                    &durable,
+                    &wire,
+                    &authority,
+                    &resources,
+                    &output,
+                    input_digest,
+                )
+                .await;
+        }
+        if admitted.payload().active_submission.is_some() {
+            return Err(CoordinatorError::Refused(
+                "bootstrap disclosure must not carry active operational admission material"
+                    .to_string(),
+            ));
+        }
         let data_classes = result
             .items
             .iter()
@@ -318,7 +345,7 @@ impl PoliteiadService {
             audience: admitted.payload().input.audience.clone(),
             resources: resources.clone(),
             output,
-            request: request_digest,
+            subject: request_digest,
             population,
             runtime: admitted.payload().input.generation.clone(),
             input_digest: input_digest.clone(),
@@ -330,7 +357,8 @@ impl PoliteiadService {
                 self.storage().clone(),
                 self.scope().clone(),
                 bootstrap.digest().clone(),
-            ),
+            )
+            .with_workspace_revision(durable.revision),
             DispatcherConfig::new(
                 self.workspace().policy_bundle.clone(),
                 self.workspace().policy_digest.clone(),
@@ -340,7 +368,7 @@ impl PoliteiadService {
                 authority.iter().map(|grant| grant.payload().clone()),
                 [operation.clone()],
             )
-            .map_err(|error| refusal(error))?,
+            .map_err(refusal)?,
         );
         let intent = OperationIntent {
             principal: admitted.payload().requester.clone(),
@@ -365,7 +393,7 @@ impl PoliteiadService {
     ) -> Result<OperationResult, CoordinatorError> {
         let admitted = self
             .anchors()
-            .admit_expected(AdmissionKind::LearningDiscovery, wire)
+            .admit_expected(AdmissionKind::LearningDiscovery, wire.clone())
             .map_err(refusal)?;
         require_disclosure_requester_signer(&admitted)?;
         require_finite_disclosure_budget(&admitted)?;
@@ -378,9 +406,36 @@ impl PoliteiadService {
             )
             .await?;
         let delegation = delegation_leaf(&authority)?;
-        let snapshot = self
+        let mut snapshot = self
             .learning_snapshot(&durable, &admitted.payload().input.generation)
             .await?;
+        let bootstrap = self
+            .storage()
+            .load_bootstrap(self.scope())
+            .await
+            .map_err(|error| storage_refusal(&error))?;
+        if bootstrap.digest() != admitted.payload().input.generation.digest() {
+            let registry = self.active_operational_registry().await?;
+            if registry.generation() != &admitted.payload().input.generation {
+                return Err(CoordinatorError::Refused(
+                    "active learning disclosure generation differs from the live operational registry"
+                        .to_string(),
+                ));
+            }
+            let inventory = registry.execution().capability_inventory();
+            snapshot.capabilities = ActiveCapabilities {
+                operations: inventory
+                    .operations
+                    .into_iter()
+                    .map(|operation| operation.spec.id)
+                    .collect(),
+                resources: inventory
+                    .resources
+                    .into_iter()
+                    .map(|resource| resource.id)
+                    .collect(),
+            };
+        }
         let result = crate::learning::discover_capabilities(
             &snapshot,
             &admitted.payload().requester,
@@ -389,10 +444,326 @@ impl PoliteiadService {
             self.now().await?,
         )
         .map_err(refusal)?;
-        Ok(OperationResult::Coordinated {
+        let resources = disclosure_resources(&self.workspace().id, std::iter::empty());
+        let request_digest = durable_signed_wire_digest(&wire)?;
+        let population = capability_population(&result)?;
+        let input_digest = Digest::blake3(
+            &politeia_core::canonical::to_canonical_bytes(&(
+                request_digest.clone(),
+                population.clone(),
+            ))
+            .map_err(|error| {
+                CoordinatorError::Refused(format!("learning input cannot bind: {error}"))
+            })?,
+        );
+        let output = OperationResult::Coordinated {
             result: json!(result),
             evidence_refs: Vec::new(),
-        })
+        };
+        if bootstrap.digest() != admitted.payload().input.generation.digest() {
+            return self
+                .discover_active_capabilities(
+                    &durable,
+                    &wire,
+                    &authority,
+                    &resources,
+                    &output,
+                    input_digest,
+                )
+                .await;
+        }
+        if admitted.payload().active_submission.is_some() {
+            return Err(CoordinatorError::Refused(
+                "bootstrap discovery must not carry active operational admission material"
+                    .to_string(),
+            ));
+        }
+        self.bootstrap_disclosure(
+            bootstrap.digest(),
+            &admitted,
+            &authority,
+            resources,
+            output,
+            request_digest,
+            population,
+            input_digest,
+            bootstrap_discovery_operation()?,
+            admitted.payload().input.generation.clone(),
+            disclosure_audience(delegation_leaf(&authority)?.payload())?,
+            durable.revision,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the active context binding keeps its independently authenticated axes explicit"
+    )]
+    async fn compile_active_context(
+        &self,
+        durable: &WorkspaceSnapshot,
+        wire: &SignedAdmissionWire<LearningDisclosureIngress<ContextRequest>>,
+        authority: &[Admitted<politeia_core::Delegation>],
+        resources: &BTreeSet<String>,
+        output: &OperationResult,
+        input_digest: Digest,
+    ) -> Result<OperationResult, CoordinatorError> {
+        self.active_disclosure(
+            durable,
+            wire,
+            authority,
+            resources,
+            output,
+            input_digest,
+            &wire.payload.input.generation,
+            &wire.payload.input.audience,
+            COMPILE_CONTEXT_OPERATION,
+            crate::learning::COMPILE_CONTEXT_ACTION,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the active capability binding keeps its independently authenticated axes explicit"
+    )]
+    async fn discover_active_capabilities(
+        &self,
+        durable: &WorkspaceSnapshot,
+        wire: &SignedAdmissionWire<LearningDisclosureIngress<CapabilityRequest>>,
+        authority: &[Admitted<politeia_core::Delegation>],
+        resources: &BTreeSet<String>,
+        output: &OperationResult,
+        input_digest: Digest,
+    ) -> Result<OperationResult, CoordinatorError> {
+        self.active_disclosure(
+            durable,
+            wire,
+            authority,
+            resources,
+            output,
+            input_digest,
+            &wire.payload.input.generation,
+            &disclosure_audience(delegation_leaf(authority)?.payload())?,
+            DISCOVER_CAPABILITIES_OPERATION,
+            crate::learning::DISCOVER_CAPABILITIES_ACTION,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each authenticated disclosure binding axis is explicit at the service boundary"
+    )]
+    async fn active_disclosure<T>(
+        &self,
+        durable: &WorkspaceSnapshot,
+        wire: &SignedAdmissionWire<LearningDisclosureIngress<T>>,
+        authority: &[Admitted<politeia_core::Delegation>],
+        resources: &BTreeSet<String>,
+        output: &OperationResult,
+        input_digest: Digest,
+        generation: &RuntimeGenerationId,
+        audience: &str,
+        operation_name: &str,
+        action: &str,
+    ) -> Result<OperationResult, CoordinatorError> {
+        let submission = wire.payload.active_submission.clone().ok_or_else(|| {
+            CoordinatorError::Refused(
+                "active disclosure requires signed operation, routing, capability, and control evidence"
+                    .to_string(),
+            )
+        })?;
+        let signed_intent = self
+            .anchors()
+            .admit_expected(AdmissionKind::OperationIntent, submission.intent.clone())
+            .map_err(refusal)?;
+        if signed_intent.signer() != &wire.payload.requester {
+            return Err(CoordinatorError::Refused(
+                "active disclosure operation intent signer differs from the signed learning requester"
+                    .to_string(),
+            ));
+        }
+        verify_active_disclosure_intent(
+            signed_intent.payload(),
+            authority,
+            resources,
+            &wire.payload.budget,
+            &input_digest,
+            &wire.payload.id,
+            operation_name,
+            action,
+        )?;
+
+        let admitted = self
+            .admit_operational_submission(durable, submission)
+            .await?;
+        if admitted.registry().generation() != generation {
+            return Err(CoordinatorError::Refused(
+                "active disclosure operation does not use the requested active generation"
+                    .to_string(),
+            ));
+        }
+        if admitted.registered().spec.name != operation_name
+            || !active_handler_matches(&admitted, operation_name)
+        {
+            return Err(CoordinatorError::Refused(
+                "active disclosure operation is not installed for this learning endpoint"
+                    .to_string(),
+            ));
+        }
+        verify_active_disclosure_intent(
+            admitted.intent(),
+            authority,
+            resources,
+            &wire.payload.budget,
+            &input_digest,
+            &wire.payload.id,
+            operation_name,
+            action,
+        )?;
+
+        let evaluation = politeia_policy::operational::OperationalEvaluationRequest {
+            institution: self.workspace().institution.clone(),
+            workspace: self.workspace().id.clone(),
+            intent_digest: admitted.intent().digest().map_err(|error| {
+                CoordinatorError::Refused(format!("active disclosure intent cannot bind: {error}"))
+            })?,
+            principal: admitted.intent().principal.clone(),
+            operation: admitted.intent().operation.clone(),
+            resources: admitted.intent().resources.clone(),
+            // The normalized subject and population do not vary with this
+            // instant; admission itself evaluates with the ledger's DB clock.
+            at: self.now().await?,
+        };
+        let normalized = evaluation
+            .evaluation_subject(admitted.registry().policy())
+            .map_err(|error| {
+                CoordinatorError::Refused(format!(
+                    "active disclosure policy subject cannot bind: {error}"
+                ))
+            })?;
+        if admitted.decision().subject != normalized.subject
+            || admitted.decision().population != normalized.population
+        {
+            return Err(CoordinatorError::Refused(
+                "active policy decision differs from the normalized disclosure subject and population"
+                    .to_string(),
+            ));
+        }
+        let selected_resource = admitted
+            .registry()
+            .execution()
+            .resource(&admitted.assignment().resource)
+            .ok_or_else(|| {
+                CoordinatorError::Refused(
+                    "active disclosure routing selected an unknown execution resource".to_string(),
+                )
+            })?;
+        let port = ContextDisclosurePort {
+            adapter: selected_resource.adapter.clone(),
+            audience: audience.to_string(),
+            resources: resources.clone(),
+            output: output.clone(),
+            subject: normalized.subject,
+            population: normalized.population,
+            runtime: generation.clone(),
+            input_digest,
+        };
+        let dispatcher = admitted.dispatcher(
+            port,
+            politeia_storage::PostgresAuthorizationLedger::new(
+                self.storage().clone(),
+                self.scope().clone(),
+            )
+            .with_workspace_revision(admitted.admission_revision()),
+        )?;
+        let lease = dispatcher
+            .authorize(admitted.intent())
+            .await
+            .map_err(refusal)?;
+        dispatcher.execute(&lease).await.map_err(refusal)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "bootstrap disclosure also binds each durable authorization axis explicitly"
+    )]
+    async fn bootstrap_disclosure<T>(
+        &self,
+        bootstrap: &Digest,
+        admitted: &Admitted<LearningDisclosureIngress<T>>,
+        authority: &[Admitted<politeia_core::Delegation>],
+        resources: BTreeSet<String>,
+        output: OperationResult,
+        request: Digest,
+        population: Digest,
+        input_digest: Digest,
+        operation: politeia_core::OperationSpec,
+        runtime: RuntimeGenerationId,
+        audience: String,
+        revision: i64,
+    ) -> Result<OperationResult, CoordinatorError> {
+        let policy = BootstrapDisclosurePolicy {
+            workspace: self.workspace().clone(),
+            bootstrap: bootstrap.clone(),
+            requester: admitted.payload().requester.clone(),
+            authority: authority
+                .iter()
+                .map(|grant| grant.payload().clone())
+                .collect(),
+            operation: operation.clone(),
+            resources: resources.clone(),
+            budget: admitted.payload().budget.clone(),
+            request: request.clone(),
+            population: population.clone(),
+            replay_key: format!("learning:{}", admitted.payload().id.0),
+        };
+        let port = ContextDisclosurePort {
+            adapter: AdapterId::new(),
+            audience,
+            resources: resources.clone(),
+            output,
+            subject: request,
+            population,
+            runtime: runtime.clone(),
+            input_digest: input_digest.clone(),
+        };
+        let dispatcher = Dispatcher::new(
+            policy,
+            port,
+            politeia_storage::PostgresAuthorizationLedger::for_bootstrap(
+                self.storage().clone(),
+                self.scope().clone(),
+                bootstrap.clone(),
+            )
+            .with_workspace_revision(revision),
+            DispatcherConfig::new(
+                self.workspace().policy_bundle.clone(),
+                self.workspace().policy_digest.clone(),
+                runtime,
+                format!("bootstrap-learning:{}", bootstrap.as_str()),
+                jiff::SignedDuration::from_mins(5),
+                authority.iter().map(|grant| grant.payload().clone()),
+                [operation.clone()],
+            )
+            .map_err(refusal)?,
+        );
+        let intent = OperationIntent {
+            principal: admitted.payload().requester.clone(),
+            input_digest,
+            delegation_chain: authority
+                .iter()
+                .map(|grant| grant.payload().clone())
+                .collect(),
+            operation,
+            resources,
+            budget: admitted.payload().budget.clone(),
+            idempotency_key: Some(format!("learning:{}", admitted.payload().id.0)),
+            execution: None,
+        };
+        let lease = dispatcher.authorize(&intent).await.map_err(refusal)?;
+        dispatcher.execute(&lease).await.map_err(refusal)
     }
 
     async fn record_feedback(
@@ -582,6 +953,10 @@ impl PoliteiadService {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the commit retains separately authenticated provenance and live authority axes"
+    )]
     async fn commit_learning(
         &self,
         durable: &WorkspaceSnapshot,
@@ -1051,6 +1426,14 @@ fn delegation_leaf(
         .ok_or_else(|| CoordinatorError::Refused("learning authority chain is empty".to_string()))
 }
 
+fn disclosure_audience(delegation: &politeia_core::Delegation) -> Result<String, CoordinatorError> {
+    delegation.audience.iter().next().cloned().ok_or_else(|| {
+        CoordinatorError::Refused(
+            "learning disclosure delegation has no permitted audience".to_string(),
+        )
+    })
+}
+
 fn require_disclosure_requester_signer<T>(
     admitted: &politeia_core::trust::Admitted<LearningDisclosureIngress<T>>,
 ) -> Result<(), CoordinatorError> {
@@ -1100,192 +1483,122 @@ fn disclosure_population(context: &CompiledContext) -> Result<Digest, Coordinato
         })
 }
 
-/// The service-only binding that turns an admitted learning request into a
-/// concrete policy subject. It adds no permission: after checking the exact
-/// signed request, chain, finite budget, and selected approved sources, it
-/// delegates to the active generation's detector-backed policy evaluator.
-struct LearningDisclosurePolicy<'policy, P> {
-    policy: &'policy P,
-    requester: PrincipalId,
-    authority: Vec<politeia_core::Delegation>,
-    operation: politeia_core::OperationSpec,
-    action: String,
-    resources: BTreeSet<String>,
-    budget: ResourceBudget,
-    idempotency_key: String,
-    input_digest: Digest,
-    subject: Digest,
-    population: Digest,
+fn capability_population(
+    capabilities: &crate::learning::CapabilityDiscovery,
+) -> Result<Digest, CoordinatorError> {
+    politeia_core::canonical::to_canonical_bytes(&(
+        &capabilities.operations,
+        &capabilities.resources,
+    ))
+    .map(|bytes| Digest::blake3(&bytes))
+    .map_err(|error| {
+        CoordinatorError::Refused(format!("capability selection cannot bind: {error}"))
+    })
 }
 
-impl<'policy, P> LearningDisclosurePolicy<'policy, P> {
-    fn new<T>(
-        policy: &'policy P,
-        requester: PrincipalId,
-        authority: impl IntoIterator<Item = politeia_core::Delegation>,
-        operation: politeia_core::OperationSpec,
-        action: impl Into<String>,
-        resources: BTreeSet<String>,
-        request: &LearningDisclosureIngress<T>,
-        input_digest: Digest,
-        subject: Digest,
-        population: Digest,
-    ) -> Self {
-        Self {
-            policy,
-            requester,
-            authority: authority.into_iter().collect(),
-            operation,
-            action: action.into(),
-            resources,
-            budget: request.budget.clone(),
-            idempotency_key: format!("learning:{}", request.id.0),
-            input_digest,
-            subject,
-            population,
-        }
-    }
-
-    fn verify(&self, intent: &OperationIntent) -> Result<(), LearningDisclosureRefusal> {
-        if intent.principal != self.requester {
-            return Err(LearningDisclosureRefusal::RequesterMismatch);
-        }
-        if intent.input_digest != self.input_digest {
-            return Err(LearningDisclosureRefusal::InputBindingMismatch);
-        }
-        if intent.delegation_chain != self.authority {
-            return Err(LearningDisclosureRefusal::AuthorityMismatch);
-        }
-        if intent.operation != self.operation {
-            return Err(LearningDisclosureRefusal::OperationMismatch);
-        }
-        if intent.operation.actions != BTreeSet::from([self.action.clone()])
-            || intent.operation.effects != BTreeSet::from([Effect::ReadInstitutionalContext])
-            || intent.operation.retryable
-            || !intent.operation.requires_idempotency
-        {
-            return Err(LearningDisclosureRefusal::OperationShapeMismatch);
-        }
-        if intent.resources != self.resources {
-            return Err(LearningDisclosureRefusal::ResourceMismatch);
-        }
-        if intent.budget != self.budget || !intent.budget.is_finite() {
-            return Err(LearningDisclosureRefusal::BudgetMismatch);
-        }
-        if intent.idempotency_key.as_deref() != Some(&self.idempotency_key) {
-            return Err(LearningDisclosureRefusal::ReplayKeyMismatch);
-        }
-        if intent.execution.is_some() {
-            return Err(LearningDisclosureRefusal::ExecutionAssignment);
-        }
-        Ok(())
-    }
+fn active_handler_matches(admitted: &AdmittedOperationalSubmission, operation_name: &str) -> bool {
+    matches!(
+        (&admitted.registered().handler, operation_name),
+        (
+            InstalledOperationHandler::CompileInstitutionalContext,
+            COMPILE_CONTEXT_OPERATION
+        ) | (
+            InstalledOperationHandler::DiscoverInstitutionalCapabilities,
+            DISCOVER_CAPABILITIES_OPERATION,
+        )
+    )
 }
 
-impl<P> PolicyDecisionPoint for LearningDisclosurePolicy<'_, P>
-where
-    P: PolicyDecisionPoint,
-{
-    type Error = LearningDisclosurePolicyError<P::Error>;
-
-    async fn decide(
-        &self,
-        intent: &OperationIntent,
-    ) -> Result<politeia_policy::PolicyDecision, Self::Error> {
-        self.verify(intent)
-            .map_err(LearningDisclosurePolicyError::Binding)?;
-        let decision = self
-            .policy
-            .decide(intent)
-            .await
-            .map_err(LearningDisclosurePolicyError::Policy)?;
-        if decision.subject != self.subject || decision.population != self.population {
-            return Err(LearningDisclosurePolicyError::Binding(
-                LearningDisclosureRefusal::DecisionBindingMismatch,
-            ));
-        }
-        Ok(decision)
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the exact signed-request-to-operation mapping is security critical"
+)]
+fn verify_active_disclosure_intent(
+    intent: &OperationIntent,
+    authority: &[Admitted<politeia_core::Delegation>],
+    resources: &BTreeSet<String>,
+    budget: &ResourceBudget,
+    input_digest: &Digest,
+    request_id: &CommissioningRecordId,
+    operation_name: &str,
+    action: &str,
+) -> Result<(), CoordinatorError> {
+    let expected_chain: Vec<_> = authority
+        .iter()
+        .map(|grant| grant.payload().clone())
+        .collect();
+    if intent.delegation_chain != expected_chain {
+        return Err(CoordinatorError::Refused(
+            "active disclosure operation delegation chain differs from the live signed authority"
+                .to_string(),
+        ));
     }
+    if intent.input_digest != *input_digest {
+        return Err(CoordinatorError::Refused(
+            "active disclosure operation input does not bind the signed request and selected population"
+                .to_string(),
+        ));
+    }
+    if &intent.resources != resources {
+        return Err(CoordinatorError::Refused(
+            "active disclosure operation resources differ from the approved context selection"
+                .to_string(),
+        ));
+    }
+    if &intent.budget != budget || !intent.budget.is_finite() {
+        return Err(CoordinatorError::Refused(
+            "active disclosure operation budget differs from the finite signed request".to_string(),
+        ));
+    }
+    if intent.idempotency_key.as_deref() != Some(&format!("learning:{}", request_id.0)) {
+        return Err(CoordinatorError::Refused(
+            "active disclosure operation replay key differs from the signed request identity"
+                .to_string(),
+        ));
+    }
+    if intent.operation.name != operation_name
+        || intent.operation.actions != BTreeSet::from([action.to_string()])
+        || intent.operation.effects != BTreeSet::from([Effect::ReadInstitutionalContext])
+        || intent.operation.retryable
+        || !intent.operation.requires_idempotency
+    {
+        return Err(CoordinatorError::Refused(
+            "active disclosure operation contract is not the installed non-retryable context-read operation"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each variant names the rejected lease axis"
+)]
 #[derive(Debug)]
 enum LearningDisclosureRefusal {
-    RequesterMismatch,
     AuthorityMismatch,
     OperationMismatch,
-    OperationShapeMismatch,
     ResourceMismatch,
     BudgetMismatch,
-    ReplayKeyMismatch,
-    ExecutionAssignment,
-    DecisionBindingMismatch,
-    InputBindingMismatch,
 }
 
 impl fmt::Display for LearningDisclosureRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
-            Self::RequesterMismatch => "disclosure intent requester differs from signed request",
             Self::AuthorityMismatch => {
                 "disclosure intent delegation chain differs from live authority"
             }
             Self::OperationMismatch => "disclosure intent operation differs from active registry",
-            Self::OperationShapeMismatch => {
-                "disclosure operation does not require one non-retryable context-read lease"
-            }
             Self::ResourceMismatch => {
                 "disclosure intent resources differ from signed approved disclosure"
             }
             Self::BudgetMismatch => "disclosure intent budget differs from signed finite budget",
-            Self::ReplayKeyMismatch => {
-                "disclosure intent replay key differs from signed request identity"
-            }
-            Self::ExecutionAssignment => {
-                "institutional disclosure cannot substitute an execution assignment"
-            }
-            Self::DecisionBindingMismatch => {
-                "policy decision does not bind the signed request and selected source population"
-            }
-            Self::InputBindingMismatch => {
-                "disclosure intent does not bind the signed request and selected source population"
-            }
         };
         formatter.write_str(message)
     }
 }
 
 impl Error for LearningDisclosureRefusal {}
-
-#[derive(Debug)]
-enum LearningDisclosurePolicyError<E> {
-    Binding(LearningDisclosureRefusal),
-    Policy(E),
-}
-
-impl<E: fmt::Display> fmt::Display for LearningDisclosurePolicyError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Binding(error) => {
-                write!(formatter, "learning disclosure binding refused: {error}")
-            }
-            Self::Policy(error) => {
-                write!(
-                    formatter,
-                    "active policy refused learning disclosure: {error}"
-                )
-            }
-        }
-    }
-}
-
-impl<E: Error + 'static> Error for LearningDisclosurePolicyError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Binding(error) => Some(error),
-            Self::Policy(error) => Some(error),
-        }
-    }
-}
 
 fn bootstrap_context_operation(
     data_classes: BTreeSet<DataClass>,
@@ -1301,6 +1614,24 @@ fn bootstrap_context_operation(
         effects: BTreeSet::from([Effect::ReadInstitutionalContext]),
         data_classes,
         evidence_obligations: vec!["learning.bootstrap.disclosure.v1".to_string()],
+        execution_requirement: None,
+        retryable: false,
+        requires_idempotency: true,
+    })
+}
+
+fn bootstrap_discovery_operation() -> Result<politeia_core::OperationSpec, CoordinatorError> {
+    let id = serde_json::from_value(serde_json::json!("00000000-0000-7000-8000-000000000002"))
+        .map_err(|error| {
+            CoordinatorError::Refused(format!("bootstrap discovery identity invalid: {error}"))
+        })?;
+    Ok(politeia_core::OperationSpec {
+        id,
+        name: "bootstrap.discover_institutional_capabilities".to_string(),
+        actions: BTreeSet::from([crate::learning::DISCOVER_CAPABILITIES_ACTION.to_string()]),
+        effects: BTreeSet::from([Effect::ReadInstitutionalContext]),
+        data_classes: BTreeSet::from([DataClass::Public]),
+        evidence_obligations: vec!["learning.bootstrap.discovery.v1".to_string()],
         execution_requirement: None,
         retryable: false,
         requires_idempotency: true,
@@ -1374,7 +1705,7 @@ struct ContextDisclosurePort {
     audience: String,
     resources: BTreeSet<String>,
     output: OperationResult,
-    request: Digest,
+    subject: Digest,
     population: Digest,
     runtime: RuntimeGenerationId,
     input_digest: Digest,
@@ -1393,7 +1724,7 @@ impl EffectPort for ContextDisclosurePort {
         effect: AuthorizedEffect<'a>,
     ) -> Result<Self::Output, Self::Error> {
         if effect.lease().resources() != &self.resources
-            || effect.lease().decision().subject != self.request
+            || effect.lease().decision().subject != self.subject
             || effect.lease().decision().population != self.population
             || effect.lease().runtime() != &self.runtime
             || effect.lease().input_digest() != &self.input_digest
