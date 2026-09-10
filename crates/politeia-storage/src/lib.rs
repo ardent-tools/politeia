@@ -6,9 +6,11 @@
 #![deny(missing_docs)]
 
 mod authority;
+mod completion;
 mod generation;
 mod read;
 mod revocation;
+pub use completion::{CanonicalPayload, OperationOutboxMessage};
 pub use read::{PersistedDelegation, StoredPayload, WorkspaceSnapshot};
 
 use std::str::FromStr;
@@ -36,6 +38,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     (
         "0002_admission_revision",
         include_str!("../migrations/0002_admission_revision.sql"),
+    ),
+    (
+        "0003_operation_completion",
+        include_str!("../migrations/0003_operation_completion.sql"),
     ),
 ];
 const SERIALIZABLE_ATTEMPTS: usize = 3;
