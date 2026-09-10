@@ -36,7 +36,8 @@ impl PostgresStorage {
     /// authority membership changed; [`StorageError::AdmissionMismatch`] when
     /// signed owner authority or commissioner closure is invalid; and
     /// [`StorageError::AttemptUnavailable`] when the selected continuity receipt
-    /// is missing, incomplete, mismatched, or predates authority closure.
+    /// is missing, incomplete, mismatched, was reserved before authority
+    /// closure, or completed before authority closure.
     pub async fn commit_handoff_authorized(
         &self,
         handoff: &HandoffCommit,
@@ -157,7 +158,7 @@ impl PostgresStorage {
 
         let attempt = transaction
             .query_opt(
-                "SELECT a.status::text, a.receipt_digest, a.receipt_payload, (EXTRACT(EPOCH FROM a.completed_at) * 1000000)::bigint, a.retain_replay FROM operation_attempts a JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND w.trust_domain = $4 FOR SHARE OF a",
+                "SELECT a.status::text, a.receipt_digest, a.receipt_payload, (EXTRACT(EPOCH FROM a.completed_at) * 1000000)::bigint, a.retain_replay, (EXTRACT(EPOCH FROM a.created_at) * 1000000)::bigint FROM operation_attempts a JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.reservation_id = $3 AND w.trust_domain = $4 FOR SHARE OF a",
                 &[
                     &scoped.institution,
                     &scoped.workspace,
@@ -171,10 +172,12 @@ impl PostgresStorage {
         let receipt_digest: Option<String> = attempt.get(1);
         let receipt_payload: Option<Vec<u8>> = attempt.get(2);
         let completed_at: Option<i64> = attempt.get(3);
+        let created_at = timestamp_from_micros(attempt.get(5))?;
         if attempt.get::<_, String>(0) != "completed"
             || !attempt.get::<_, bool>(4)
             || receipt_digest.as_deref() != Some(handoff.continuity_receipt.digest().as_str())
             || receipt_payload.as_deref() != Some(handoff.continuity_receipt.bytes())
+            || created_at <= latest_authority_end
             || completed_at
                 .map(timestamp_from_micros)
                 .transpose()?

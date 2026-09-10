@@ -1952,7 +1952,7 @@ impl EffectPort for ResourceManifestPort {
     }
 }
 
-fn derive_resource_manifest(
+pub(crate) fn derive_resource_manifest(
     operation: &OperationSpec,
     resources: &BTreeSet<String>,
     maximum_resources: u32,

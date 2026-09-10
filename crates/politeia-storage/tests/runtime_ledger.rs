@@ -688,6 +688,10 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
         .record_completion(&fixture.scope, early.reservation_id(), &early_receipt)
         .await?;
 
+    canary_intent.idempotency_key = Some("handoff-crosses-revocation".to_owned());
+    let crossing = dispatcher.authorize(&canary_intent).await?;
+    dispatcher.execute(&crossing).await?;
+
     let initial = fixture.storage.load_workspace(&fixture.scope).await?;
     let evidence_a = EvidenceAdmission {
         id: EvidenceId::new(),
@@ -743,6 +747,23 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
     ));
 
     revoke_fixture_authority(&fixture, &commissioner_grant).await?;
+    let crossing_receipt = CanonicalPayload::from_json(&serde_json::json!({
+        "canary": "reserved-before-revocation-completed-after"
+    }))?;
+    fixture
+        .storage
+        .record_completion(&fixture.scope, crossing.reservation_id(), &crossing_receipt)
+        .await?;
+    let closed = fixture.storage.load_workspace(&fixture.scope).await?;
+    let crossing_boundary = handoff(&closed, crossing.reservation_id().clone(), crossing_receipt)?;
+    assert!(matches!(
+        fixture
+            .storage
+            .commit_handoff_authorized(&crossing_boundary, std::slice::from_ref(&fixture.authority))
+            .await,
+        Err(StorageError::AttemptUnavailable)
+    ));
+
     canary_intent.idempotency_key = Some("handoff-after-revocation".to_owned());
     let dispatcher = fixture.dispatcher_for_generation(
         fixture.storage.clone(),
