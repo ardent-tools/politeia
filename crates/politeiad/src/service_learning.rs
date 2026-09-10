@@ -976,3 +976,138 @@ fn durable_delegations(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    use jiff::Timestamp;
+    use politeia_core::{
+        Delegation, Effect, ResourceBudget,
+        evidence::{EvidenceRecord, IndependenceClass},
+        institution::TrustDomainId,
+    };
+    use politeia_evidence::assessment::{RelationKind, SUPERSEDE_ACTION};
+
+    fn at() -> Result<Timestamp, String> {
+        "2026-09-09T00:00:00Z"
+            .parse::<Timestamp>()
+            .map_err(|error| error.to_string())
+    }
+
+    fn source(id: EvidenceId, subject: Digest) -> Result<LearningSourceRequest, String> {
+        let content = b"approved institutional content".to_vec();
+        Ok(LearningSourceRequest {
+            id: id.clone(),
+            claim: politeia_core::ClaimId::new(),
+            approval_digest: Digest::blake3(b"approval"),
+            subject,
+            proposition: Digest::blake3(&content),
+            content,
+            evidence: BTreeSet::from([id]),
+            observations: BTreeSet::new(),
+            captures: BTreeSet::new(),
+            adapter: AdapterId::new(),
+            currency: KnowledgeCurrency::Canonical,
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audiences: BTreeSet::from(["operator".to_string()]),
+            sinks: BTreeSet::from(["local".to_string()]),
+            trust_domain: "institution:learning"
+                .parse::<TrustDomainId>()
+                .map_err(|error| error.to_string())?,
+            relevance: 1,
+        })
+    }
+
+    fn corrections(
+        authority: PrincipalId,
+        delegation_id: DelegationId,
+        first: EvidenceId,
+        second: EvidenceId,
+        subject: Digest,
+    ) -> Result<DurableCorrections, String> {
+        let at = at()?;
+        let delegation = Delegation {
+            id: delegation_id.clone(),
+            issuer: authority.clone(),
+            subject: authority.clone(),
+            parent: None,
+            actions: BTreeSet::from([SUPERSEDE_ACTION.to_string()]),
+            resources: BTreeSet::new(),
+            effects: BTreeSet::from([Effect::ReadInstitutionalContext]),
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audience: BTreeSet::from(["operator".to_string()]),
+            expires_at: "2026-09-10T00:00:00Z"
+                .parse::<Timestamp>()
+                .map_err(|error| error.to_string())?,
+            budget: ResourceBudget {
+                wall_ms: None,
+                cpu_ms: None,
+                memory_bytes: None,
+                io_bytes: None,
+                network_bytes: None,
+                external_cost_microunits: None,
+            },
+        };
+        let relation = AssessmentRelation {
+            id: EvidenceId::new(),
+            kind: RelationKind::Supersession,
+            prior: first,
+            successor: second,
+            authority,
+            authority_delegation: delegation_id.clone(),
+            asserted_at: at,
+        };
+        let _ = subject;
+        Ok(DurableCorrections {
+            relations: vec![relation],
+            delegations: BTreeMap::from([(delegation_id, delegation)]),
+        })
+    }
+
+    #[test]
+    fn supersession_changes_context_selection_without_rewriting_source() -> Result<(), String> {
+        let subject = Digest::blake3(b"billing");
+        let authority = PrincipalId::new();
+        let delegation = DelegationId::new();
+        let prior = EvidenceId::new();
+        let successor = EvidenceId::new();
+        let registry = TrustedEvidenceRegistry::from_trusted_bootstrap([
+            EvidenceRecord {
+                id: prior.clone(),
+                subject: subject.clone(),
+                producer: authority.clone(),
+                producer_delegation: delegation.clone(),
+                method: "fixture".to_string(),
+                payload_digest: Digest::blake3(b"prior"),
+                observed_at: at()?,
+                independence: IndependenceClass::HumanAuthority,
+            },
+            EvidenceRecord {
+                id: successor.clone(),
+                subject: subject.clone(),
+                producer: authority.clone(),
+                producer_delegation: delegation.clone(),
+                method: "fixture".to_string(),
+                payload_digest: Digest::blake3(b"successor"),
+                observed_at: at()?,
+                independence: IndependenceClass::HumanAuthority,
+            },
+        ])
+        .map_err(|error| error.to_string())?;
+        let prior_source = source(prior.clone(), subject.clone())?;
+        let successor_source = source(successor.clone(), subject.clone())?;
+        let corrections = corrections(authority, delegation, prior, successor, subject)?;
+        assert!(
+            !source_survives_corrections(&prior_source, &registry, &corrections)
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            source_survives_corrections(&successor_source, &registry, &corrections)
+                .map_err(|error| error.to_string())?
+        );
+        assert_eq!(prior_source.content, b"approved institutional content");
+        Ok(())
+    }
+}
