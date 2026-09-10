@@ -11,6 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::{CanonicalError, to_canonical_bytes};
+use crate::institution::InstitutionWorkspace;
 use crate::{InstitutionId, InstitutionWorkspaceId, PrincipalId};
 
 /// The semantic statement class an installed principal may sign.
@@ -22,6 +23,10 @@ use crate::{InstitutionId, InstitutionWorkspaceId, PrincipalId};
 pub enum AdmissionKind {
     /// A sourced observation presented to the institution.
     Observation,
+    /// A descriptor-bounded snapshot captured from one external source.
+    SourceCapture,
+    /// An institution-owner signed installed workspace skeleton.
+    WorkspaceBootstrap,
     /// A provenance-bearing evidence record.
     Evidence,
     /// An owner approval of an institutional claim.
@@ -189,6 +194,78 @@ impl InstitutionTrustAnchors {
             signer: statement.signer,
             payload: statement.payload,
         })
+    }
+
+    /// Admit an owner-signed installed workspace skeleton.
+    ///
+    /// This is host installation metadata only. It does not approve the
+    /// workspace's institutional model, policy, or future observations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceBootstrapRefusal`] when the signed workspace differs
+    /// from installed scope or its signer is not its declared owner.
+    pub fn admit_workspace_bootstrap(
+        &self,
+        statement: SignedAdmissionWire<WorkspaceBootstrapRequest>,
+    ) -> Result<Admitted<WorkspaceBootstrapRequest>, WorkspaceBootstrapRefusal> {
+        let admitted = self
+            .admit_expected(AdmissionKind::WorkspaceBootstrap, statement)
+            .map_err(WorkspaceBootstrapRefusal::Authentication)?;
+        let workspace = &admitted.payload().workspace;
+        if workspace.institution != self.institution || workspace.id != self.workspace {
+            return Err(WorkspaceBootstrapRefusal::ScopeMismatch);
+        }
+        if admitted.signer() != &workspace.owner {
+            return Err(WorkspaceBootstrapRefusal::NotWorkspaceOwner);
+        }
+        Ok(admitted)
+    }
+}
+
+/// Inert installed-workspace skeleton received before owner authentication.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceBootstrapRequest {
+    /// Workspace skeleton signed by its declared owner.
+    pub workspace: InstitutionWorkspace,
+}
+
+/// Why an installed-workspace skeleton was not admitted.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum WorkspaceBootstrapRefusal {
+    /// Installed-key authentication failed.
+    Authentication(AdmissionError),
+    /// Signed workspace does not match the installed anchor scope.
+    ScopeMismatch,
+    /// The signed principal is not the workspace's declared owner.
+    NotWorkspaceOwner,
+}
+
+impl std::fmt::Display for WorkspaceBootstrapRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Authentication(error) => write!(
+                formatter,
+                "workspace bootstrap authentication failed: {error}"
+            ),
+            Self::ScopeMismatch => {
+                formatter.write_str("workspace bootstrap differs from installed anchor scope")
+            }
+            Self::NotWorkspaceOwner => {
+                formatter.write_str("workspace bootstrap signer is not workspace owner")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceBootstrapRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Authentication(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -521,6 +598,43 @@ mod tests {
             anchors.admit_expected(AdmissionKind::Evidence, wire),
             Err(AdmissionError::UnauthorizedKind { .. })
         ));
+    }
+
+    #[test]
+    fn only_the_declared_owner_can_admit_an_exact_workspace_bootstrap() {
+        let fixture = crate::test_support::fixture();
+        let key = key(13);
+        let anchors = InstitutionTrustAnchors::from_trusted_bootstrap(
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            [TrustedSigningKey::new(
+                fixture.workspace.owner.clone(),
+                key.verifying_key().to_bytes(),
+                BTreeSet::from([AdmissionKind::WorkspaceBootstrap]),
+            )
+            .expect("fixture key is valid")],
+        )
+        .expect("fixture principal is unique");
+        let wire = SignedAdmissionWire::sign(
+            AdmissionKind::WorkspaceBootstrap,
+            fixture.workspace.institution.clone(),
+            fixture.workspace.id.clone(),
+            fixture.workspace.owner.clone(),
+            WorkspaceBootstrapRequest {
+                workspace: fixture.workspace.clone(),
+            },
+            &key,
+        )
+        .expect("fixture workspace bootstrap encodes");
+        assert_eq!(
+            anchors
+                .admit_workspace_bootstrap(wire)
+                .expect("declared owner signs exact scope")
+                .payload()
+                .workspace
+                .id,
+            fixture.workspace.id,
+        );
     }
 
     #[test]

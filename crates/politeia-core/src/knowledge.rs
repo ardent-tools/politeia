@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::canonical::to_canonical_bytes;
 use crate::{
-    AdapterId, ClaimId, DelegationId, Digest, EvidenceId, InstitutionWorkspaceId, ObservationId,
-    PrincipalId,
+    AdapterId, ClaimId, DelegationId, Digest, EvidenceId, InstitutionId, InstitutionWorkspaceId,
+    ObservationId, PrincipalId, SourceCaptureId,
 };
 use crate::{
     evidence::TrustedEvidenceRegistry,
@@ -82,6 +82,10 @@ impl crate::institution::WorkspaceScoped for Observation {
 pub struct ObservationRequest {
     /// Stable identity retained across authenticated re-admission.
     pub id: ObservationId,
+    /// Exact descriptor-bounded source capture the observation derives from.
+    pub capture: SourceCaptureId,
+    /// Digest of the exact capture content manifest the observer saw.
+    pub capture_manifest_digest: Digest,
     /// The source the statement came from, as the institution names it.
     pub source: String,
     /// The exact adapter that reached the source.
@@ -94,6 +98,161 @@ pub struct ObservationRequest {
     pub observed_at: Timestamp,
     /// Evidence that establishes the source observation.
     pub evidence: EvidenceId,
+}
+
+/// Inert signed-capture payload before installed-key admission.
+///
+/// The manifest is a sorted, duplicate-free explicit selection. It describes
+/// exactly the relative members the source adapter was allowed to capture;
+/// omission is never interpreted as a wildcard.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceCaptureRequest {
+    /// Stable capture identity retained across re-admission.
+    pub id: SourceCaptureId,
+    /// Institution-named external source.
+    pub source: String,
+    /// Adapter that read the descriptor-bounded source.
+    pub adapter: AdapterId,
+    /// Subject the source snapshot concerns.
+    pub subject: Digest,
+    /// Statement digest read from the source snapshot.
+    pub statement: Digest,
+    /// Source observation time.
+    pub observed_at: Timestamp,
+    /// Bounded reconnaissance delegation under which capture happened.
+    pub reconnaissance_delegation: DelegationId,
+    /// Explicit relative members selected by the capture descriptor.
+    pub manifest: BTreeSet<String>,
+    /// Digest of the descriptor that authorized this exact capture selection.
+    pub descriptor_digest: Digest,
+    /// Digest of exact bytes/content identities of the selected members.
+    pub content_manifest_digest: Digest,
+}
+
+/// One authenticated descriptor-bounded source capture.
+#[derive(Clone, Debug)]
+pub struct SourceCapture {
+    request: SourceCaptureRequest,
+    signer: PrincipalId,
+}
+
+impl SourceCapture {
+    /// The immutable capture request that was authenticated.
+    pub fn request(&self) -> &SourceCaptureRequest {
+        &self.request
+    }
+
+    /// Principal whose installed key authenticated the capture statement.
+    pub fn signer(&self) -> &PrincipalId {
+        &self.signer
+    }
+}
+
+/// Exact signed captures for one institution workspace.
+#[derive(Clone, Debug)]
+pub struct TrustedSourceCaptureRegistry {
+    institution: InstitutionId,
+    workspace: InstitutionWorkspaceId,
+    captures: BTreeMap<SourceCaptureId, SourceCapture>,
+}
+
+impl TrustedSourceCaptureRegistry {
+    /// Admit descriptor-bounded source captures signed by installed principals.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceCaptureRefusal`] when authentication fails, a manifest
+    /// path escapes its declared root, or capture identities repeat.
+    pub fn admit_signed(
+        anchors: &InstitutionTrustAnchors,
+        statements: impl IntoIterator<Item = SignedAdmissionWire<SourceCaptureRequest>>,
+    ) -> Result<Self, SourceCaptureRefusal> {
+        let mut captures = BTreeMap::new();
+        for statement in statements {
+            let admitted = anchors
+                .admit_expected(AdmissionKind::SourceCapture, statement)
+                .map_err(SourceCaptureRefusal::Authentication)?;
+            let signer = admitted.signer().clone();
+            let request = admitted.into_payload();
+            if request.manifest.is_empty()
+                || request.manifest.iter().any(|path| !relative_member(path))
+            {
+                return Err(SourceCaptureRefusal::InvalidManifest);
+            }
+            let capture = SourceCapture { request, signer };
+            if captures
+                .insert(capture.request.id.clone(), capture)
+                .is_some()
+            {
+                return Err(SourceCaptureRefusal::DuplicateIdentity);
+            }
+        }
+        Ok(Self {
+            institution: anchors.institution().clone(),
+            workspace: anchors.workspace().clone(),
+            captures,
+        })
+    }
+
+    /// Installed institution scope of this exact capture snapshot.
+    pub fn institution(&self) -> &InstitutionId {
+        &self.institution
+    }
+
+    /// Installed workspace scope of this exact capture snapshot.
+    pub fn workspace(&self) -> &InstitutionWorkspaceId {
+        &self.workspace
+    }
+
+    /// Resolve one exact signed capture by its stable identity.
+    pub fn resolve(&self, id: &SourceCaptureId) -> Option<&SourceCapture> {
+        self.captures.get(id)
+    }
+}
+
+/// Why a source capture did not enter its trusted registry.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SourceCaptureRefusal {
+    /// Installed-key or exact-scope authentication failed.
+    Authentication(AdmissionError),
+    /// A selected manifest member was empty, absolute, or escaped its root.
+    InvalidManifest,
+    /// More than one statement used one capture identity.
+    DuplicateIdentity,
+}
+
+impl std::fmt::Display for SourceCaptureRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Authentication(error) => {
+                write!(formatter, "source capture authentication failed: {error}")
+            }
+            Self::InvalidManifest => formatter
+                .write_str("source capture manifest is not an explicit bounded relative selection"),
+            Self::DuplicateIdentity => {
+                formatter.write_str("source capture registry repeats an identity")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SourceCaptureRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Authentication(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+fn relative_member(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && path
+            .split('/')
+            .all(|member| !member.is_empty() && member != "." && member != "..")
 }
 
 /// Exact source observations admitted for one workspace.
@@ -115,6 +274,7 @@ impl TrustedObservationRegistry {
         workspace: &InstitutionWorkspace,
         anchors: &InstitutionTrustAnchors,
         evidence: &TrustedEvidenceRegistry,
+        captures: &TrustedSourceCaptureRegistry,
         statements: impl IntoIterator<Item = SignedAdmissionWire<ObservationRequest>>,
     ) -> Result<Self, ObservationAdmissionRefusal> {
         if anchors.institution() != &workspace.institution || anchors.workspace() != &workspace.id {
@@ -125,6 +285,10 @@ impl TrustedObservationRegistry {
         {
             return Err(ObservationAdmissionRefusal::ForeignEvidenceScope);
         }
+        if captures.institution() != &workspace.institution || captures.workspace() != &workspace.id
+        {
+            return Err(ObservationAdmissionRefusal::ForeignCaptureScope);
+        }
         let mut observations = BTreeMap::new();
         for statement in statements {
             let admitted = anchors
@@ -134,6 +298,19 @@ impl TrustedObservationRegistry {
             let record = evidence
                 .resolve(&request.evidence)
                 .ok_or(ObservationAdmissionRefusal::EvidenceNotAdmitted)?;
+            let capture = captures
+                .resolve(&request.capture)
+                .ok_or(ObservationAdmissionRefusal::CaptureNotAdmitted)?;
+            let captured = capture.request();
+            if captured.content_manifest_digest != request.capture_manifest_digest
+                || captured.source != request.source
+                || captured.adapter != request.adapter
+                || captured.subject != request.subject
+                || captured.statement != request.statement
+                || captured.observed_at != request.observed_at
+            {
+                return Err(ObservationAdmissionRefusal::CaptureMismatch);
+            }
             if record.subject != request.subject {
                 return Err(ObservationAdmissionRefusal::EvidenceSubjectMismatch);
             }
@@ -240,6 +417,12 @@ pub enum ObservationAdmissionRefusal {
     EvidenceProducerMismatch,
     /// Evidence came from another institution or workspace admission scope.
     ForeignEvidenceScope,
+    /// The capture registry was admitted for another institution or workspace.
+    ForeignCaptureScope,
+    /// The cited source capture was absent from trusted admission.
+    CaptureNotAdmitted,
+    /// Capture descriptor/content or source fields differ from the observation.
+    CaptureMismatch,
     /// Evidence payload bytes do not bind this exact observation statement.
     EvidencePayloadMismatch,
     /// Evidence metadata records another observation time.
@@ -272,6 +455,15 @@ impl std::fmt::Display for ObservationAdmissionRefusal {
             }
             Self::ForeignEvidenceScope => {
                 formatter.write_str("observation evidence belongs to another trust scope")
+            }
+            Self::ForeignCaptureScope => {
+                formatter.write_str("observation capture belongs to another trust scope")
+            }
+            Self::CaptureNotAdmitted => {
+                formatter.write_str("observation source capture was not admitted")
+            }
+            Self::CaptureMismatch => {
+                formatter.write_str("observation does not match its exact source capture")
             }
             Self::EvidencePayloadMismatch => {
                 formatter.write_str("evidence payload does not bind the exact observation")
@@ -309,6 +501,8 @@ impl std::error::Error for ObservationAdmissionRefusal {
 struct ObservationEvidencePayload<'a> {
     kind: &'static str,
     workspace: &'a InstitutionWorkspaceId,
+    capture: &'a SourceCaptureId,
+    capture_manifest_digest: &'a Digest,
     source: &'a str,
     adapter: &'a AdapterId,
     subject: &'a Digest,
@@ -323,6 +517,8 @@ fn observation_evidence_payload_digest(
     to_canonical_bytes(&ObservationEvidencePayload {
         kind: "observation_evidence_payload_v1",
         workspace,
+        capture: &request.capture,
+        capture_manifest_digest: &request.capture_manifest_digest,
         source: &request.source,
         adapter: &request.adapter,
         subject: &request.subject,
@@ -1044,6 +1240,41 @@ mod tests {
         ));
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "fixture capture must pass through exact signed admission"
+    )]
+    fn captures(
+        fixture: &Fixture,
+        anchors: &InstitutionTrustAnchors,
+        request: &ObservationRequest,
+    ) -> TrustedSourceCaptureRegistry {
+        TrustedSourceCaptureRegistry::admit_signed(
+            anchors,
+            [SignedAdmissionWire::sign(
+                AdmissionKind::SourceCapture,
+                fixture.workspace.institution.clone(),
+                fixture.workspace.id.clone(),
+                fixture.owner.clone(),
+                SourceCaptureRequest {
+                    id: request.capture.clone(),
+                    source: request.source.clone(),
+                    adapter: request.adapter.clone(),
+                    subject: request.subject.clone(),
+                    statement: request.statement.clone(),
+                    observed_at: request.observed_at,
+                    reconnaissance_delegation: fixture.workspace.owner_delegation.clone(),
+                    manifest: BTreeSet::from(["snapshot.json".to_string()]),
+                    descriptor_digest: Digest::blake3(b"capture descriptor"),
+                    content_manifest_digest: request.capture_manifest_digest.clone(),
+                },
+                &fixture.owner_key,
+            )
+            .expect("fixture capture encodes")],
+        )
+        .expect("fixture capture is admitted")
+    }
+
     #[test]
     fn observation_admission_binds_the_signed_producer_to_its_evidence() {
         let fixture = fixture_with_observation();
@@ -1056,7 +1287,11 @@ mod tests {
                 TrustedSigningKey::new(
                     fixture.owner.clone(),
                     fixture.owner_key.verifying_key().to_bytes(),
-                    BTreeSet::from([AdmissionKind::Evidence, AdmissionKind::Observation]),
+                    BTreeSet::from([
+                        AdmissionKind::Evidence,
+                        AdmissionKind::Observation,
+                        AdmissionKind::SourceCapture,
+                    ]),
                 )
                 .expect("fixture key is valid"),
                 TrustedSigningKey::new(
@@ -1070,6 +1305,8 @@ mod tests {
         .expect("fixture principals are distinct");
         let request = ObservationRequest {
             id: ObservationId::new(),
+            capture: SourceCaptureId::new(),
+            capture_manifest_digest: Digest::blake3(b"capture manifest"),
             source: "crm".to_string(),
             adapter: AdapterId::new(),
             subject: subject(),
@@ -1102,6 +1339,7 @@ mod tests {
             .expect("fixture evidence encodes")],
         )
         .expect("fixture evidence is admitted");
+        let captures = captures(&fixture, &anchors, &request);
         let wire = SignedAdmissionWire::sign(
             AdmissionKind::Observation,
             fixture.workspace.institution.clone(),
@@ -1116,6 +1354,7 @@ mod tests {
                 &fixture.workspace,
                 &anchors,
                 &evidence,
+                &captures,
                 [wire],
             ),
             Err(ObservationAdmissionRefusal::EvidenceProducerMismatch)
@@ -1131,13 +1370,19 @@ mod tests {
             [TrustedSigningKey::new(
                 fixture.owner.clone(),
                 fixture.owner_key.verifying_key().to_bytes(),
-                BTreeSet::from([AdmissionKind::Evidence, AdmissionKind::Observation]),
+                BTreeSet::from([
+                    AdmissionKind::Evidence,
+                    AdmissionKind::Observation,
+                    AdmissionKind::SourceCapture,
+                ]),
             )
             .expect("fixture key is valid")],
         )
         .expect("fixture principal is unique");
         let request = ObservationRequest {
             id: ObservationId::new(),
+            capture: SourceCaptureId::new(),
+            capture_manifest_digest: Digest::blake3(b"capture manifest"),
             source: "crm".to_string(),
             adapter: AdapterId::new(),
             subject: subject(),
@@ -1170,6 +1415,7 @@ mod tests {
             .expect("fixture evidence encodes")],
         )
         .expect("fixture evidence is admitted");
+        let captures = captures(&fixture, &anchors, &request);
         let wire = SignedAdmissionWire::sign(
             AdmissionKind::Observation,
             fixture.workspace.institution.clone(),
@@ -1183,6 +1429,7 @@ mod tests {
             &fixture.workspace,
             &anchors,
             &evidence,
+            &captures,
             [wire.clone()],
         )
         .expect("exact signed observation is admitted");
@@ -1190,6 +1437,7 @@ mod tests {
             &fixture.workspace,
             &anchors,
             &evidence,
+            &captures,
             [wire],
         )
         .expect("same signed observation re-admits with its persisted identity");
@@ -1211,9 +1459,10 @@ mod tests {
                 &fixture.workspace,
                 &anchors,
                 &evidence,
+                &captures,
                 [mismatched],
             ),
-            Err(ObservationAdmissionRefusal::EvidencePayloadMismatch)
+            Err(ObservationAdmissionRefusal::CaptureMismatch)
         ));
     }
 

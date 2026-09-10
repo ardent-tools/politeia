@@ -150,6 +150,10 @@ typed_id!(
     ClaimId,
     "Identity of one interpreted proposition with provenance."
 );
+typed_id!(
+    SourceCaptureId,
+    "Identity of one descriptor-bounded external source capture."
+);
 /// A content digest (blake3, lowercase hex).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
