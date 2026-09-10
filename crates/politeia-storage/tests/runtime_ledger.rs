@@ -18,7 +18,9 @@ use politeia_core::{
     AdapterId, DataClass, Delegation, DelegationId, Digest, Effect, EvidenceId, InstitutionId,
     InstitutionWorkspaceId, OperationId, OperationSpec, PolicyBundleId, PrincipalId,
     ResourceBudget, RuntimeGenerationId,
-    trust::{AdmissionKind, InstitutionTrustAnchors, SignedAdmissionWire, TrustedSigningKey},
+    trust::{
+        AdmissionKind, Admitted, InstitutionTrustAnchors, SignedAdmissionWire, TrustedSigningKey,
+    },
 };
 use politeia_policy::PolicyDecision;
 use politeia_runtime::{
@@ -26,12 +28,149 @@ use politeia_runtime::{
     PolicyDecisionPoint, RuntimeError,
 };
 use politeia_storage::{
-    ActivationCommit, AttemptStatus, PostgresAuthorizationLedger, PostgresStorage, Scope,
-    SignedRecord, StorageError, WorkspaceBootstrap,
+    ActivationCommit, AttemptStatus, EvidenceAdmission, PostgresAuthorizationLedger,
+    PostgresStorage, Scope, ScopedCommit, SignedRecord, StateMutation, StorageError,
+    WorkspaceBootstrap,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 type TestDispatcher = Dispatcher<LedgerFixturePolicy, CountingPort, PostgresAuthorizationLedger>;
+
+async fn revoke_fixture_authority(fixture: &Fixture, delegation: &Delegation) -> TestResult {
+    let record = fixture.signed_fixture_record_for(
+        AdmissionKind::Revocation,
+        serde_json::json!({"fixture_revocation": delegation.id}),
+    )?;
+    fixture
+        .storage
+        .revoke_with_record(
+            &fixture.scope,
+            &delegation.id,
+            &Digest::blake3(&politeia_core::canonical::to_canonical_bytes(delegation)?),
+            &EvidenceAdmission {
+                id: EvidenceId::new(),
+                record,
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+fn admit_fixture_authority(
+    fixture: &Fixture,
+    grant: Delegation,
+) -> TestResult<(Admitted<Delegation>, SignedAdmissionWire<Delegation>)> {
+    let wire = SignedAdmissionWire::sign(
+        AdmissionKind::Delegation,
+        fixture.scope.institution().clone(),
+        fixture.scope.workspace().clone(),
+        fixture.intent.principal.clone(),
+        grant,
+        &SigningKey::from_bytes(&[0x37; 32]),
+    )?;
+    Ok((
+        fixture
+            .anchors
+            .admit_expected(AdmissionKind::Delegation, wire.clone())?,
+        wire,
+    ))
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
+async fn delegated_commits_recheck_current_exact_authority_and_all_ancestors() -> TestResult {
+    let fixture = Fixture::new(&database_url()?, 8).await?;
+    let parent = fixture.authority.clone();
+    let mut child = parent.payload().clone();
+    child.id = DelegationId::new();
+    child.parent = Some(parent.payload().id.clone());
+    let (child, wire) = admit_fixture_authority(&fixture, child)?;
+    fixture
+        .storage
+        .admit_delegation(&fixture.scope, &child, &wire)
+        .await?;
+    let initial = fixture.storage.load_workspace(&fixture.scope).await?;
+    let mut commit = ScopedCommit {
+        scope: fixture.scope.clone(),
+        expected_revision: initial.revision,
+        model: initial.model,
+        model_kind: "fixture_delegated_change".to_owned(),
+        transition: fixture.signed_fixture_record(serde_json::json!({"change": "first"}))?,
+        state: vec![StateMutation {
+            key: "fixture.authorized".to_owned(),
+            value: fixture.signed_fixture_record(serde_json::json!({"value": "admitted"}))?,
+        }],
+        evidence: vec![],
+        outbox: vec![],
+    };
+    assert!(matches!(
+        fixture.storage.commit_authorized(&commit, &[]).await,
+        Err(StorageError::AdmissionMismatch)
+    ));
+    assert!(
+        matches!(
+            fixture
+                .storage
+                .commit_authorized(&commit, std::slice::from_ref(&child))
+                .await,
+            Err(StorageError::AdmissionMismatch)
+        ),
+        "a caller cannot omit a live ancestor from the transaction check"
+    );
+    let mut forged = parent.payload().clone();
+    forged.actions.insert("write".to_owned());
+    let (forged, _) = admit_fixture_authority(&fixture, forged)?;
+    assert!(
+        matches!(
+            fixture.storage.commit_authorized(&commit, &[forged]).await,
+            Err(StorageError::AdmissionMismatch)
+        ),
+        "a valid new signature cannot replace the already admitted grant's bytes"
+    );
+    let chain = [parent.clone(), child];
+    let accepted = fixture.storage.commit_authorized(&commit, &chain).await?;
+    assert_eq!(accepted.revision, 1);
+
+    // Reproduce stale grant snapshot A followed by workspace snapshot B after
+    // revocation. CAS alone would accept B; the in-transaction check must not.
+    revoke_fixture_authority(&fixture, parent.payload()).await?;
+    let after_revocation = fixture.storage.load_workspace(&fixture.scope).await?;
+    commit.expected_revision = after_revocation.revision;
+    commit.transition =
+        fixture.signed_fixture_record(serde_json::json!({"change": "after-revoke"}))?;
+    commit.state[0].value =
+        fixture.signed_fixture_record(serde_json::json!({"value": "forbidden"}))?;
+    assert!(
+        matches!(
+            fixture.storage.commit_authorized(&commit, &chain).await,
+            Err(StorageError::AdmissionMismatch)
+        ),
+        "a current workspace revision cannot revive a revoked ancestor"
+    );
+    let after_refusal = fixture.storage.load_workspace(&fixture.scope).await?;
+    assert_eq!(after_refusal.revision, after_revocation.revision);
+    assert_eq!(
+        after_refusal.state["fixture.authorized"].digest,
+        after_revocation.state["fixture.authorized"].digest
+    );
+
+    let mut expired = parent.payload().clone();
+    expired.id = DelegationId::new();
+    expired.expires_at = Timestamp::now() - SignedDuration::from_secs(1);
+    let (expired, wire) = admit_fixture_authority(&fixture, expired)?;
+    fixture
+        .storage
+        .admit_delegation(&fixture.scope, &expired, &wire)
+        .await?;
+    assert!(
+        matches!(
+            fixture.storage.commit_authorized(&commit, &[expired]).await,
+            Err(StorageError::AdmissionMismatch)
+        ),
+        "durable existence cannot substitute for live authority"
+    );
+    Ok(())
+}
 
 struct LedgerFixturePolicy {
     bundle: PolicyBundleId,
@@ -85,6 +224,8 @@ impl EffectPort for CountingPort {
 }
 
 struct Fixture {
+    anchors: InstitutionTrustAnchors,
+    authority: Admitted<Delegation>,
     storage: PostgresStorage,
     scope: Scope,
     intent: OperationIntent,
@@ -126,7 +267,11 @@ impl Fixture {
             [TrustedSigningKey::new(
                 owner.clone(),
                 key.verifying_key().to_bytes(),
-                BTreeSet::from([AdmissionKind::Delegation, AdmissionKind::Generation]),
+                BTreeSet::from([
+                    AdmissionKind::Delegation,
+                    AdmissionKind::Generation,
+                    AdmissionKind::Revocation,
+                ]),
             )?],
         )?;
         let delegation = Delegation {
@@ -187,6 +332,8 @@ impl Fixture {
             requires_idempotency: true,
         };
         Ok(Self {
+            anchors,
+            authority: admitted,
             storage,
             scope,
             intent: OperationIntent {
@@ -254,14 +401,23 @@ impl Fixture {
     }
 
     fn signed_fixture_record(&self, value: serde_json::Value) -> TestResult<SignedRecord> {
+        self.signed_fixture_record_for(AdmissionKind::Generation, value)
+    }
+
+    fn signed_fixture_record_for(
+        &self,
+        kind: AdmissionKind,
+        value: serde_json::Value,
+    ) -> TestResult<SignedRecord> {
         let wire = SignedAdmissionWire::sign(
-            AdmissionKind::Generation,
+            kind,
             self.scope.institution().clone(),
             self.scope.workspace().clone(),
             self.intent.principal.clone(),
             value,
             &SigningKey::from_bytes(&[0x37; 32]),
         )?;
+        self.anchors.admit_expected(kind, wire.clone())?;
         Ok(SignedRecord::from_json(
             &serde_json::to_value(&wire)?,
             wire.signer.clone(),
@@ -477,15 +633,7 @@ async fn revoke_between_reservation_and_claim_prevents_effect() -> TestResult {
     let fixture = Fixture::new(&database_url()?, 2).await?;
     let dispatcher = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
     let lease = dispatcher.authorize(&fixture.intent).await?;
-    fixture
-        .storage
-        .revoke_delegation(
-            &fixture.scope,
-            &fixture.intent.delegation_chain[0].id,
-            &Digest::blake3(b"owner-revocation"),
-            &EvidenceId::new(),
-        )
-        .await?;
+    revoke_fixture_authority(&fixture, &fixture.intent.delegation_chain[0]).await?;
     assert!(
         fixture
             .storage

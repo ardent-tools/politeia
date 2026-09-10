@@ -5,6 +5,8 @@
 
 #![deny(missing_docs)]
 
+mod authority;
+mod generation;
 mod read;
 mod revocation;
 pub use read::{PersistedDelegation, StoredPayload, WorkspaceSnapshot};
@@ -484,7 +486,34 @@ impl PostgresStorage {
     /// Atomically compare-and-swap the approved model, state, journals, and outbox.
     pub async fn commit(&self, commit: &ScopedCommit) -> Result<CommitReceipt, StorageError> {
         for attempt in 0..SERIALIZABLE_ATTEMPTS {
-            match self.commit_once(commit).await {
+            match self.commit_once(commit, None).await {
+                Err(StorageError::Database(source))
+                    if is_serialization_failure(&source) && attempt + 1 < SERIALIZABLE_ATTEMPTS => {
+                }
+                outcome => return outcome,
+            }
+        }
+        Err(StorageError::SerializationExhausted)
+    }
+
+    /// Commit a delegated change only while its exact root-to-leaf grant chain is live.
+    ///
+    /// The host admits signatures and authorizes the requested semantic change.
+    /// This boundary rechecks those exact durable grants, their ancestors, and
+    /// expiry inside the same transaction that compares and updates the workspace.
+    /// An empty chain is refused; owner-only decisions use `commit` after owner
+    /// admission. A revocation committed before this transaction cannot be hidden
+    /// by an older service snapshot.
+    pub async fn commit_authorized(
+        &self,
+        commit: &ScopedCommit,
+        authority_chain: &[Admitted<Delegation>],
+    ) -> Result<CommitReceipt, StorageError> {
+        if authority_chain.is_empty() {
+            return Err(StorageError::AdmissionMismatch);
+        }
+        for attempt in 0..SERIALIZABLE_ATTEMPTS {
+            match self.commit_once(commit, Some(authority_chain)).await {
                 Err(StorageError::Database(source))
                     if is_serialization_failure(&source) && attempt + 1 < SERIALIZABLE_ATTEMPTS => {
                 }
@@ -522,57 +551,6 @@ impl PostgresStorage {
         let inserted = client.execute(
             "INSERT INTO delegations (institution_id, workspace_id, delegation_id, delegation_digest, wire_digest, payload, signature, signer_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
             &[&scoped.institution, &scoped.workspace, &delegation.id.0, &delegation_digest.as_str(), &wire_digest.as_str(), &wire_payload, &wire.signature, &wire.signer.0],
-        ).await.map_err(StorageError::Database)?;
-        if inserted == 0 {
-            return Err(StorageError::ImmutableConflict);
-        }
-        Ok(())
-    }
-
-    /// Record a delegation revocation once with its admitted evidence identity.
-    pub async fn revoke_delegation(
-        &self,
-        scope: &Scope,
-        delegation: &DelegationId,
-        revocation_digest: &Digest,
-        evidence: &EvidenceId,
-    ) -> Result<(), StorageError> {
-        let mut client = self.client().await?;
-        let transaction = client
-            .build_transaction()
-            .isolation_level(IsolationLevel::Serializable)
-            .start()
-            .await
-            .map_err(StorageError::Database)?;
-        let scoped = scope_values(scope);
-        let admitted = transaction.query_opt(
-            "SELECT 1 FROM delegations d JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE d.institution_id = $1 AND d.workspace_id = $2 AND d.delegation_id = $3 AND w.trust_domain = $4 FOR UPDATE OF d",
-            &[&scoped.institution, &scoped.workspace, &delegation.0, &scoped.trust_domain],
-        ).await.map_err(StorageError::Database)?;
-        if admitted.is_none() {
-            return Err(StorageError::NotFound);
-        }
-        let inserted = transaction.execute(
-            "INSERT INTO delegation_revocations (institution_id, workspace_id, delegation_id, revocation_digest, evidence_record_id) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-            &[&scoped.institution, &scoped.workspace, &delegation.0, &revocation_digest.as_str(), &evidence.0],
-        ).await.map_err(StorageError::Database)?;
-        if inserted == 0 {
-            return Err(StorageError::ImmutableConflict);
-        }
-        transaction.commit().await.map_err(StorageError::Database)?;
-        Ok(())
-    }
-
-    /// Admit a signed immutable generation before activation.
-    pub async fn admit_generation(
-        &self,
-        generation: &RuntimeGeneration,
-    ) -> Result<(), StorageError> {
-        let client = self.client().await?;
-        let scoped = scope_values(&generation.scope);
-        let inserted = client.execute(
-            "INSERT INTO runtime_generations (institution_id, workspace_id, generation_digest, input_digest, artifact_digest, manifest, signature, signer_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
-            &[&scoped.institution, &scoped.workspace, &generation.generation_digest.as_str(), &generation.input_digest.as_str(), &generation.artifact_digest.as_str(), &generation.manifest.payload(), &generation.manifest.signature(), &generation.manifest.signer().0],
         ).await.map_err(StorageError::Database)?;
         if inserted == 0 {
             return Err(StorageError::ImmutableConflict);
@@ -620,6 +598,31 @@ impl PostgresStorage {
         &self,
         activation: &ActivationCommit,
     ) -> Result<CommitReceipt, StorageError> {
+        self.activate_generation_once(activation, None).await
+    }
+
+    /// Activate only while every host-admitted authorization chain is still live.
+    ///
+    /// Each vector names one full root-to-leaf chain. Independent assurance
+    /// grants therefore remain independent chains, and an omitted ancestor
+    /// cannot be mistaken for a direct owner grant.
+    pub async fn activate_generation_authorized(
+        &self,
+        activation: &ActivationCommit,
+        authority_chains: &[Vec<Admitted<Delegation>>],
+    ) -> Result<CommitReceipt, StorageError> {
+        if authority_chains.is_empty() || authority_chains.iter().any(Vec::is_empty) {
+            return Err(StorageError::AdmissionMismatch);
+        }
+        self.activate_generation_once(activation, Some(authority_chains))
+            .await
+    }
+
+    async fn activate_generation_once(
+        &self,
+        activation: &ActivationCommit,
+        authority_chains: Option<&[Vec<Admitted<Delegation>>]>,
+    ) -> Result<CommitReceipt, StorageError> {
         let mut client = self.client().await?;
         let transaction = client
             .build_transaction()
@@ -646,6 +649,11 @@ impl PostgresStorage {
         ).await.map_err(StorageError::Database)?;
         if updated != 1 {
             return Err(StorageError::RevisionConflict);
+        }
+        if let Some(chains) = authority_chains {
+            for chain in chains {
+                authority::check_authority_chain(&transaction, &activation.scope, chain).await?;
+            }
         }
         let previous = transaction.query_opt(
             "SELECT transition_digest FROM transition_journal WHERE institution_id = $1 AND workspace_id = $2 ORDER BY sequence DESC LIMIT 1 FOR KEY SHARE",
@@ -831,7 +839,11 @@ impl PostgresStorage {
         Ok(client)
     }
 
-    async fn commit_once(&self, commit: &ScopedCommit) -> Result<CommitReceipt, StorageError> {
+    async fn commit_once(
+        &self,
+        commit: &ScopedCommit,
+        authority_chain: Option<&[Admitted<Delegation>]>,
+    ) -> Result<CommitReceipt, StorageError> {
         let mut client = self.client().await?;
         let transaction = client
             .build_transaction()
@@ -850,6 +862,9 @@ impl PostgresStorage {
         ).await.map_err(StorageError::Database)?;
         if updated != 1 {
             return Err(StorageError::RevisionConflict);
+        }
+        if let Some(chain) = authority_chain {
+            authority::check_authority_chain(&transaction, &commit.scope, chain).await?;
         }
         transaction.execute(
             "INSERT INTO workspace_revisions (institution_id, workspace_id, revision, record_kind, content_digest, payload, signature, signer_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
