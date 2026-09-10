@@ -34,6 +34,10 @@ use politeia_core::{
 };
 use politeia_evidence::assurance::{ActivationProof, ControlRun};
 use politeiad::config::{HostTrustConfiguration, InstalledTrustAnchor};
+use politeiad::{
+    learning::KnowledgeCurrency,
+    service_learning::{LearningRequest, LearningSourceRequest},
+};
 
 /// The two intentionally disjoint reference institutions exercised by the package.
 #[derive(Clone, Copy, Debug)]
@@ -140,6 +144,8 @@ pub(crate) struct CaptureDocuments {
     pub(crate) document: serde_json::Value,
     /// Authenticated capture shape used to derive the bootstrap's exact grant resources.
     capture: SourceCaptureRequest,
+    /// Evidence identity persisted with the source capture.
+    evidence: EvidenceId,
     /// Observation identity a later candidate may cite.
     observation: ObservationRequest,
 }
@@ -150,6 +156,14 @@ pub(crate) struct CandidateDocuments {
     pub(crate) candidate: SignedAdmissionWire<CandidateClaimRequest>,
     /// Owner-signed exact candidate approval wire.
     pub(crate) approval: SignedAdmissionWire<FactApprovalRequest>,
+}
+
+/// Owner-signed approved content ready for the daemon's learning ingress.
+pub(crate) struct LearningSourceDocuments {
+    /// JSON supplied through the commissioning socket after candidate approval.
+    pub(crate) document: serde_json::Value,
+    /// Durable source identity for later context, feedback, and correction input.
+    pub(crate) source: EvidenceId,
 }
 
 /// Durable commissioning evidence selected by the host before publication.
@@ -274,6 +288,7 @@ impl ReferenceFixture {
                     AdmissionKind::Delegation,
                     AdmissionKind::Generation,
                     AdmissionKind::Revocation,
+                    AdmissionKind::LearningSource,
                 ],
             ),
             anchor(
@@ -544,6 +559,7 @@ impl ReferenceFixture {
                 "reconnaissance": scope,
             }),
             capture: capture.payload.clone(),
+            evidence: evidence.payload.id.clone(),
             observation: observation.payload,
         }
     }
@@ -559,7 +575,8 @@ impl ReferenceFixture {
             workspace: self.host_trust.workspace.id.clone(),
             subject: capture.observation.subject.clone(),
             proposition: Digest::blake3(
-                format!("{} public runbook approved", self.kind.directory()).as_bytes(),
+                &fs::read(&self.source_document)
+                    .expect("approved public source content remains readable"),
             ),
             supported_by: BTreeMap::from([(
                 capture.observation.source.clone(),
@@ -600,6 +617,62 @@ impl ReferenceFixture {
                 self.identities.owner_key(),
             )
             .expect("owner signs exact candidate approval"),
+        }
+    }
+
+    /// Bind the exact owner-approved fact to public content for later learning.
+    ///
+    /// This may be sent only after the candidate and its owner approval have
+    /// been durably admitted by the daemon. The service repeats each lookup,
+    /// signature check, and content/proposition equality check before commit.
+    pub(crate) fn learning_source_documents(
+        &self,
+        capture: &CaptureDocuments,
+        candidate: &CandidateDocuments,
+    ) -> LearningSourceDocuments {
+        // A learning source is an approved view of already-admitted capture
+        // evidence. Its stable identity is therefore the admitted evidence
+        // identity, which is also required in its durable evidence provenance.
+        let source = capture.evidence.clone();
+        let content = fs::read(&self.source_document)
+            .expect("owner-approved public content remains readable");
+        let approval_digest = politeiad::service_learning::durable_signed_wire_digest(
+            &candidate.approval,
+        )
+        .expect("approval wire canonically encodes for durable storage");
+        let request = LearningSourceRequest {
+            id: source.clone(),
+            claim: candidate.candidate.payload.id.clone(),
+            approval_digest,
+            subject: candidate.candidate.payload.subject.clone(),
+            proposition: candidate.candidate.payload.proposition.clone(),
+            content,
+            evidence: BTreeSet::from([source.clone()]),
+            observations: BTreeSet::from([capture.observation.id.clone()]),
+            captures: BTreeSet::from([capture.capture.id.clone()]),
+            adapter: self.adapter.clone(),
+            currency: KnowledgeCurrency::Canonical,
+            data_classes: BTreeSet::from([DataClass::Internal]),
+            audiences: BTreeSet::from(["commissioning".to_owned()]),
+            sinks: BTreeSet::from(["package-acceptance".to_owned()]),
+            trust_domain: self.host_trust.workspace.trust_domain.clone(),
+            relevance: 100,
+        };
+        let signed = SignedAdmissionWire::sign(
+            AdmissionKind::LearningSource,
+            self.host_trust.workspace.institution.clone(),
+            self.host_trust.workspace.id.clone(),
+            self.identities.owner.clone(),
+            request,
+            self.identities.owner_key(),
+        )
+        .expect("owner signs approved learning source");
+        LearningSourceDocuments {
+            document: serde_json::json!({
+                "kind": "learning",
+                "request": LearningRequest::RegisterSource { source: signed },
+            }),
+            source,
         }
     }
 

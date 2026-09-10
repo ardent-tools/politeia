@@ -383,6 +383,10 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         software_candidate.approval.payload.candidate_digest,
         analytics_candidate.approval.payload.candidate_digest
     );
+    let software_learning =
+        software.learning_source_documents(&software_capture_documents, &software_candidate);
+    let analytics_learning =
+        analytics.learning_source_documents(&analytics_capture_documents, &analytics_candidate);
     let software_approval = write_request(
         &software,
         "software-candidate-approval.json",
@@ -429,6 +433,39 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         )?["approved"],
         serde_json::Value::Bool(true)
     );
+    let software_learning_request = write_request(
+        &software,
+        "software-learning-source.json",
+        &software_learning.document,
+    )?;
+    let analytics_learning_request = write_request(
+        &analytics,
+        "analytics-learning-source.json",
+        &analytics_learning.document,
+    )?;
+    require_coordinated(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &software_socket,
+                &software_learning_request,
+            ],
+        )?,
+        "software owner learning source registration",
+    )?;
+    require_coordinated(
+        run(
+            &database_url,
+            &[
+                Path::new("commissioning"),
+                &analytics_socket,
+                &analytics_learning_request,
+            ],
+        )?,
+        "analytics owner learning source registration",
+    )?;
+    assert_ne!(software_learning.source, analytics_learning.source);
     let software_status = await_status(&database_url, &software)?;
     let analytics_status = await_status(&database_url, &analytics)?;
     stop(software_daemon)?;
