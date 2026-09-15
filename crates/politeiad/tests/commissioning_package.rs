@@ -30,8 +30,9 @@ mod lifecycle;
 use std::{
     error::Error,
     fs,
-    path::Path,
-    process::{Child, Command, Output},
+    io::{self, Read},
+    path::{Path, PathBuf},
+    process::{Child, Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -43,6 +44,7 @@ use politeiad::service_generation::CommissioningReceipt;
 use politeiad::transport::{LocalOutcome, LocalResponse};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct CommissionedGeneration {
     generation: Digest,
@@ -84,9 +86,114 @@ fn command(database_url: &str, arguments: &[&Path]) -> Command {
 }
 
 fn run(database_url: &str, arguments: &[&Path]) -> TestResult<Output> {
-    let output = command(database_url, arguments).output()?;
-    evidence::record_process(arguments, &output)?;
-    Ok(output)
+    RunningChild::spawn(database_url, arguments, Instant::now() + REQUEST_TIMEOUT)?
+        .wait_with_output()
+}
+
+type OutputReader = thread::JoinHandle<io::Result<Vec<u8>>>;
+
+/// Own the CLI and drain both pipes while enforcing its request deadline.
+/// Early fixture failure kills and reaps the child before joining its readers.
+struct RunningChild {
+    child: Child,
+    arguments: Vec<PathBuf>,
+    deadline: Instant,
+    request_id: uuid::Uuid,
+    stdout: Option<OutputReader>,
+    stderr: Option<OutputReader>,
+}
+
+impl RunningChild {
+    fn spawn(database_url: &str, arguments: &[&Path], deadline: Instant) -> TestResult<Self> {
+        let mut command = command(database_url, arguments);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut process = Self {
+            child: command.spawn()?,
+            arguments: arguments.iter().map(|path| path.to_path_buf()).collect(),
+            deadline,
+            request_id: uuid::Uuid::now_v7(),
+            stdout: None,
+            stderr: None,
+        };
+        process.stdout = Some(read_output(
+            process
+                .child
+                .stdout
+                .take()
+                .ok_or("CLI stdout was not piped")?,
+        )?);
+        process.stderr = Some(read_output(
+            process
+                .child
+                .stderr
+                .take()
+                .ok_or("CLI stderr was not piped")?,
+        )?);
+        evidence::record_process_started(arguments, process.request_id, process.child.id())?;
+        Ok(process)
+    }
+
+    fn wait_with_output(mut self) -> TestResult<Output> {
+        let arguments: Vec<_> = self.arguments.iter().map(PathBuf::as_path).collect();
+        let status = loop {
+            if let Some(status) = self.child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= self.deadline {
+                evidence::record_observation(
+                    "process_deadline_exceeded",
+                    &serde_json::json!({
+                        "request_id": self.request_id,
+                        "process_id": self.child.id(),
+                    }),
+                )?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("CLI request {arguments:?} exceeded its process deadline"),
+                )
+                .into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let output = Output {
+            status,
+            stdout: join_output(self.stdout.take())?,
+            stderr: join_output(self.stderr.take())?,
+        };
+        evidence::record_process(&arguments, self.request_id, &output)?;
+        Ok(output)
+    }
+}
+
+impl Drop for RunningChild {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        for reader in [self.stdout.take(), self.stderr.take()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = reader.join();
+        }
+    }
+}
+
+fn read_output(mut pipe: impl Read + Send + 'static) -> io::Result<OutputReader> {
+    thread::Builder::new().spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn join_output(reader: Option<OutputReader>) -> TestResult<Vec<u8>> {
+    Ok(reader
+        .ok_or("CLI output reader was already consumed")?
+        .join()
+        .map_err(|_| "CLI output reader panicked")??)
 }
 
 fn require_success(output: Output, phase: &str) -> TestResult<String> {
@@ -171,7 +278,8 @@ fn await_status(database_url: &str, fixture: &ReferenceFixture) -> TestResult<Lo
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last_error = String::new();
     while Instant::now() < deadline {
-        let output = run(database_url, &[Path::new("status"), &socket])?;
+        let output = RunningChild::spawn(database_url, &[Path::new("status"), &socket], deadline)?
+            .wait_with_output()?;
         if output.status.success() {
             return Ok(serde_json::from_slice(&output.stdout)?);
         }
@@ -184,6 +292,47 @@ fn await_status(database_url: &str, fixture: &ReferenceFixture) -> TestResult<Lo
 fn stop(mut daemon: Daemon) -> TestResult {
     daemon.0.kill()?;
     daemon.0.wait()?;
+    Ok(())
+}
+
+#[test]
+fn unanswered_cli_request_reaches_its_deadline_and_closes() -> TestResult {
+    let fixture = ReferenceFixture::new(
+        ReferenceInstitutionKind::SoftwareDevelopment,
+        Path::new(daemon_binary()),
+    );
+    let socket = fixture.root.join("unanswered.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket)?;
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut process = RunningChild::spawn("", &[Path::new("status"), &socket], deadline)?;
+    let stream = loop {
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err("fixture CLI did not connect to the unanswered socket".into());
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    let mut reader = io::BufReader::new(stream);
+    let mut request = String::new();
+    io::BufRead::read_line(&mut reader, &mut request)?;
+    let _: politeiad::transport::LocalRequest = serde_json::from_str(&request)?;
+    assert!(process.child.try_wait()?.is_none());
+    process.deadline = Instant::now();
+    let error = process
+        .wait_with_output()
+        .expect_err("a connected client with no response must exceed its deadline");
+    assert_eq!(
+        error.downcast_ref::<io::Error>().map(io::Error::kind),
+        Some(io::ErrorKind::TimedOut)
+    );
+    assert_eq!(reader.read_to_end(&mut Vec::new())?, 0);
     Ok(())
 }
 

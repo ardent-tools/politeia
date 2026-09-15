@@ -190,7 +190,28 @@ pub(super) fn record_observation(label: &str, observation: &Value) -> TestResult
     Ok(())
 }
 
-pub(super) fn record_process(arguments: &[&Path], output: &Output) -> TestResult {
+pub(super) fn record_process_started(
+    arguments: &[&Path],
+    request_id: uuid::Uuid,
+    process_id: u32,
+) -> TestResult {
+    record_observation(
+        "process_started",
+        &json!({
+            "request_id": request_id,
+            "process_id": process_id,
+            "command": arguments.first().map(|path| path.to_string_lossy()),
+            "request_document": arguments.last().and_then(|path| path.file_name()).map(|name| name.to_string_lossy()),
+            "started_at": jiff::Timestamp::now(),
+        }),
+    )
+}
+
+pub(super) fn record_process(
+    arguments: &[&Path],
+    request_id: uuid::Uuid,
+    output: &Output,
+) -> TestResult {
     let request = arguments
         .last()
         .filter(|path| {
@@ -206,6 +227,7 @@ pub(super) fn record_process(arguments: &[&Path], output: &Output) -> TestResult
     record_observation(
         "process_response",
         &json!({
+            "request_id": request_id,
             "command": arguments.first().map(|path| path.to_string_lossy()),
             "request_document": arguments.last().and_then(|path| path.file_name()).map(|name| name.to_string_lossy()),
             "request": request,

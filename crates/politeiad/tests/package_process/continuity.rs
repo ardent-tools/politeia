@@ -9,8 +9,7 @@
 use std::{
     collections::BTreeSet,
     error::Error,
-    path::{Path, PathBuf},
-    process::{Child, Output, Stdio},
+    path::Path,
     thread,
     time::{Duration, Instant},
 };
@@ -27,8 +26,9 @@ use uuid::Uuid;
 
 use super::evidence;
 use super::{
-    Daemon, OperationalFixture, ReferenceFixture, TestResult, await_status, command,
-    require_coordinated, require_refusal, run, serve, stop, submit_commissioning, write_request,
+    Daemon, OperationalFixture, REQUEST_TIMEOUT, ReferenceFixture, RunningChild, TestResult,
+    await_status, require_coordinated, require_refusal, run, serve, stop, submit_commissioning,
+    write_request,
 };
 
 const BARRIER_TABLE: &str = "politeia_test_completion_barriers";
@@ -225,46 +225,15 @@ fn spawn_operate(
     fixture: &ReferenceFixture,
     request: &Path,
 ) -> TestResult<RunningChild> {
-    let arguments = vec![
-        PathBuf::from("operate"),
-        fixture.prefix().join("run/politeiad.sock"),
-        request.to_path_buf(),
-    ];
-    let argument_refs: Vec<_> = arguments.iter().map(PathBuf::as_path).collect();
-    let mut command = command(database_url, &argument_refs);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    Ok(RunningChild {
-        child: Some(command.spawn()?),
-        arguments,
-    })
-}
-
-/// A CLI child that is killed and reaped when an assertion returns early.
-struct RunningChild {
-    child: Option<Child>,
-    arguments: Vec<PathBuf>,
-}
-
-impl RunningChild {
-    fn wait_with_output(mut self) -> TestResult<Output> {
-        let child = self
-            .child
-            .take()
-            .ok_or("operation child was already consumed")?;
-        let output = child.wait_with_output()?;
-        let arguments: Vec<_> = self.arguments.iter().map(PathBuf::as_path).collect();
-        evidence::record_process(&arguments, &output)?;
-        Ok(output)
-    }
-}
-
-impl Drop for RunningChild {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
+    RunningChild::spawn(
+        database_url,
+        &[
+            Path::new("operate"),
+            &fixture.prefix().join("run/politeiad.sock"),
+            request,
+        ],
+        Instant::now() + REQUEST_TIMEOUT,
+    )
 }
 
 /// Create a new owner grant and a new signed request for one semantic manifest
