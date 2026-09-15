@@ -271,13 +271,36 @@ fn published_urn(path: &str) -> anyhow::Result<String> {
     Ok(format!("urn:politeia:{stem}:v1"))
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum Command {
+    Help,
+    Derive,
+    Check,
+}
+
+fn parse_command_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Command> {
+    let mut args = args.into_iter();
+    let Some(command) = args.next() else {
+        return Ok(Command::Help);
+    };
+    let parsed = match command.as_str() {
+        "help" => Command::Help,
+        "derive" => Command::Derive,
+        "check" => Command::Check,
+        _ => anyhow::bail!("unknown xtask command {command:?}; expected derive, check, or help"),
+    };
+    if let Some(unexpected) = args.next() {
+        anyhow::bail!("unexpected argument {unexpected:?} after xtask command {command:?}");
+    }
+    Ok(parsed)
+}
+
 fn main() -> anyhow::Result<()> {
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "help".into());
-    match arg.as_str() {
-        "derive" => derive(),
-        "check" => check(),
-        _ => {
-            println!("usage: cargo run -p xtask -- [derive|check]");
+    match parse_command_args(std::env::args().skip(1))? {
+        Command::Derive => derive(),
+        Command::Check => check(),
+        Command::Help => {
+            println!("usage: cargo run -p xtask -- [derive|check|help]");
             Ok(())
         }
     }
@@ -1181,6 +1204,37 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join(SPEC_DIR)
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the CLI must retain its documented no-argument and explicit help forms"
+    )]
+    fn help_is_available_without_arguments_or_explicitly() {
+        assert_eq!(
+            parse_command_args(std::iter::empty::<String>()).expect("no command selects help"),
+            Command::Help
+        );
+        assert_eq!(
+            parse_command_args(["help".to_owned()]).expect("explicit help is accepted"),
+            Command::Help
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "the CI command's former trailing shell tokens must be rejected"
+    )]
+    fn derive_rejects_trailing_shell_tokens() {
+        let error = parse_command_args(
+            ["derive", "&&", "git", "diff", "--exit-code"]
+                .into_iter()
+                .map(String::from),
+        )
+        .expect_err("derive accepts exactly one command argument");
+        assert!(error.to_string().contains("unexpected argument \"&&\""));
     }
 
     #[test]
