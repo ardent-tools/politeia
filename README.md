@@ -86,7 +86,7 @@ The executable acceptance harness constructs the software-development and analyt
 ```sh
 mkdir -p .kanon-artifacts
 cargo test --no-run --locked --message-format=json --jobs 8 \
-  -p politeia-storage --lib --test runtime_ledger \
+  -p politeia-storage \
   > .kanon-artifacts/postgres-storage-build.json
 cargo test --no-run --locked --message-format=json --jobs 8 \
   -p politeiad --test commissioning_package \
