@@ -1434,17 +1434,54 @@ async fn revoke_between_reservation_and_claim_prevents_effect() -> TestResult {
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
 async fn expired_reservation_releases_budget_for_a_different_replay_key() -> TestResult {
-    let fixture = Fixture::new(&database_url()?, 1).await?;
-    let dispatcher =
-        fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_millis(10))?;
-    let expired = dispatcher.authorize(&fixture.intent).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let url = database_url()?;
+    let fixture = Fixture::new(&url, 1).await?;
+    let dispatcher = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
+    let expired = dispatcher
+        .authorize(&fixture.intent)
+        .await
+        .map_err(|error| format!("initial reservation admission failed: {error}"))?;
     let mut fresh = fixture.intent.clone();
     fresh.idempotency_key = Some("different-key-after-expiry".to_owned());
-    let dispatcher = fixture.dispatcher(fixture.storage.clone(), SignedDuration::from_secs(30))?;
-    let lease = dispatcher.authorize(&fresh).await?;
-    assert!(dispatcher.execute(&expired).await.is_err());
-    dispatcher.execute(&lease).await?;
+    let blocked = dispatcher.authorize(&fresh).await;
+    assert!(
+        blocked.is_err(),
+        "a live reservation must retain the entire finite budget; got {blocked:?}"
+    );
+
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let expired_rows = client
+        .execute(
+            "UPDATE operation_attempts SET expires_at = clock_timestamp() - INTERVAL '1 second' WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND status = 'reserved'",
+            &[
+                &fixture.scope.institution().0,
+                &fixture.scope.workspace().0,
+                &expired.reservation_id().0,
+            ],
+        )
+        .await
+        .map_err(|error| format!("expire the unclaimed reservation: {error}"))?;
+    assert_eq!(
+        expired_rows, 1,
+        "the fixture must expire exactly its still-unclaimed reservation"
+    );
+
+    let lease = dispatcher
+        .authorize(&fresh)
+        .await
+        .map_err(|error| format!("fresh admission after reservation expiry failed: {error}"))?;
+    let stale_execution = dispatcher.execute(&expired).await;
+    assert!(
+        stale_execution.is_err(),
+        "the expired reservation must not reach the effect port; got {stale_execution:?}"
+    );
+    dispatcher
+        .execute(&lease)
+        .await
+        .map_err(|error| format!("fresh reservation execution failed: {error}"))?;
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
     let foreign = Scope::new(
         InstitutionId::new(),
