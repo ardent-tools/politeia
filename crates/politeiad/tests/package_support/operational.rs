@@ -601,7 +601,7 @@ impl OperationalFixture {
     pub(crate) fn detector_calibration_evidence(
         &self,
         fixture: &ReferenceFixture,
-        report: PublicDetectorCalibration,
+        report: &PublicDetectorCalibration,
     ) -> DetectorCalibrationEvidenceSubmission {
         let report_digest = report.digest().expect("daemon report digests");
         let evidence_id = EvidenceId::new();
@@ -680,6 +680,10 @@ impl OperationalFixture {
         qualifications
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fixture vector construction keeps the independently signed candidate, operation, resource, label, and observation axes explicit"
+    )]
     fn qualification_vector(
         &self,
         fixture: &ReferenceFixture,

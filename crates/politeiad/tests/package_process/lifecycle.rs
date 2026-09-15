@@ -48,7 +48,7 @@ pub(crate) fn activate(
     let producer = validate(database_url, fixture, generation, &control, "producer")?;
     let mut assurance =
         fixture.lifecycle_assurance(&producer, &calibration, &authorities, started_at);
-    assurance.qualifications = qualifications.clone();
+    assurance.qualifications.clone_from(&qualifications);
     assert_eq!(producer.known_good_result, ControlResult::Clean);
     assert_eq!(producer.planted_violation_result, ControlResult::Violation);
     assert!(producer.coverage.is_complete());
@@ -116,7 +116,7 @@ pub(crate) fn activate(
             GenerationTransitionAction::Rollback => GenerationTransitionAction::Activate,
         };
         let mut missing_transition =
-            fixture.activation_request(kind, &generation, revision, active.as_ref(), &assurance);
+            fixture.activation_request(kind, generation, revision, active.as_ref(), &assurance);
         missing_transition["request"]
             .as_object_mut()
             .ok_or("activation request is an object")?
@@ -230,7 +230,7 @@ pub(crate) fn activate(
                 database_url,
                 fixture,
                 "lifecycle-non-clean.json",
-                &fixture.activation_request(kind, &generation, revision, active.as_ref(), &altered),
+                &fixture.activation_request(kind, generation, revision, active.as_ref(), &altered),
                 "signed lifecycle assurance differs from freshly calibrated artifact validation",
             )?;
         }
@@ -248,7 +248,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-substituted-grant.json",
-            &fixture.activation_request(kind, &generation, revision, active.as_ref(), &wrong_grant),
+            &fixture.activation_request(kind, generation, revision, active.as_ref(), &wrong_grant),
             "control run authorization digest differs from its admitted direct grant",
         )?;
         let mut dangling = assurance.clone();
@@ -265,7 +265,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-dangling-evidence.json",
-            &fixture.activation_request(kind, &generation, revision, active.as_ref(), &dangling),
+            &fixture.activation_request(kind, generation, revision, active.as_ref(), &dangling),
             "activation proof lacks exact verifier-signed lifecycle calibration evidence",
         )?;
         refuse(
@@ -274,7 +274,7 @@ pub(crate) fn activate(
             "lifecycle-stale-revision.json",
             &fixture.activation_request(
                 kind,
-                &generation,
+                generation,
                 revision - 1,
                 active.as_ref(),
                 &assurance,
@@ -348,7 +348,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-self-verification.json",
-            &fixture.activation_request(kind, &generation, revision, active.as_ref(), &self_proof),
+            &fixture.activation_request(kind, generation, revision, active.as_ref(), &self_proof),
             "the control producer also signed its activation proof",
         )?;
     }
@@ -361,7 +361,7 @@ pub(crate) fn activate(
         database_url,
         fixture,
         &format!("{kind}-generation.json"),
-        &fixture.activation_request(kind, &generation, revision, active.as_ref(), &assurance),
+        &fixture.activation_request(kind, generation, revision, active.as_ref(), &assurance),
     )?;
     assert_eq!(
         status_value(database_url, fixture)?["active_generation"],
@@ -412,7 +412,7 @@ fn qualify_candidate(
     let report: politeia_policy::operational::PublicDetectorCalibration =
         serde_json::from_value(result["report"].clone())?;
     let detector = report.control.clone();
-    let qualification = operations.detector_calibration_evidence(fixture, report);
+    let qualification = operations.detector_calibration_evidence(fixture, &report);
     submit_commissioning(
         database_url,
         fixture,
