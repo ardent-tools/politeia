@@ -22,14 +22,15 @@ use politeia_core::{
     Effect, EffectLeaseId, OperationId, OperationSpec, PolicyBundleId, PrincipalId, ResourceBudget,
     RuntimeGenerationId,
 };
-use politeia_policy::PolicyDecision;
+use politeia_policy::{DecisionPurpose, PolicyDecision};
 
 mod dispatcher;
 mod ledger;
 pub mod routing;
 
 pub use ledger::{
-    AuthorizationLedger, BudgetScope, InMemoryAuthorizationLedger, ReservationRequest,
+    AuthorizationLedger, BudgetScope, EffectOverlap, EffectReservation, EffectSubject,
+    EffectTarget, InMemoryAuthorizationLedger, ReservationRequest,
 };
 
 /// Failures of the dispatch boundary. All deny-shaped variants fail closed.
@@ -37,8 +38,10 @@ pub use ledger::{
 #[non_exhaustive]
 pub enum RuntimeError {
     /// The policy decision denied the operation.
-    #[snafu(display("operation denied"))]
+    #[snafu(display("operation denied: {}", reasons.join("; ")))]
     Denied {
+        /// Exact normalized policy reasons that produced the denial.
+        reasons: Vec<String>,
         /// Source location where the denial surfaced.
         #[snafu(implicit)]
         location: snafu::Location,
@@ -109,6 +112,10 @@ pub enum RuntimeError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+    /// A productive effect potentially overlaps a prior claimed attempt whose
+    /// outcome has not been resolved by evidence.
+    #[snafu(display("unresolved overlapping effect subject"))]
+    AmbiguousEffect,
     /// The immutable lease claims could not be encoded for exact binding.
     #[snafu(display("failed to encode effect lease claims"))]
     LeaseEncoding {
@@ -144,6 +151,13 @@ pub enum RuntimeError {
         /// is erased here while the public outer error remains matchable.
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// A planted qualification vector reached execution after an unexpected allow.
+    #[snafu(display("planted qualification vector cannot be claimed or executed"))]
+    QualificationViolationExecution {
+        /// Source location where the fail-closed fence rejected execution.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
     /// The registered effect port failed after authorization was claimed.
     #[snafu(display("effect invocation failed: {source}"))]
     EffectInvocation {
@@ -168,6 +182,10 @@ fn replay_detected() -> RuntimeError {
 pub struct OperationIntent {
     /// The requesting principal.
     pub principal: PrincipalId,
+    /// Digest of the exact authenticated semantic input that selected this
+    /// operation. It prevents a transport envelope from being authenticated
+    /// separately yet omitted from the policy-bound intent.
+    pub input_digest: Digest,
     /// The complete root-to-leaf delegation chain under which the request proceeds.
     pub delegation_chain: Vec<Delegation>,
     /// The operation contract being invoked.
@@ -209,11 +227,13 @@ struct LeaseClaims {
     id: EffectLeaseId,
     reservation_id: BudgetReservationId,
     principal: PrincipalId,
+    input_digest: Digest,
     delegation_chain: Vec<Delegation>,
     operation: OperationSpec,
     resources: BTreeSet<String>,
     budget: ResourceBudget,
     idempotency_key: Option<String>,
+    effect: EffectReservation,
     execution: Option<routing::ExecutionAssignment>,
     decision: PolicyDecision,
     runtime: RuntimeGenerationId,
@@ -221,6 +241,8 @@ struct LeaseClaims {
     audience: BTreeSet<String>,
     expires_at: Timestamp,
     replay_domain: String,
+    #[serde(skip_serializing_if = "DecisionPurpose::is_operational")]
+    purpose: DecisionPurpose,
 }
 
 /// An unforgeable, single-use authorization to produce effects.
@@ -263,6 +285,10 @@ impl EffectLease {
     pub fn principal(&self) -> &PrincipalId {
         &self.claims.principal
     }
+    /// Digest of the exact authenticated semantic input bound into the intent.
+    pub fn input_digest(&self) -> &Digest {
+        &self.claims.input_digest
+    }
     /// The exact root-to-leaf delegation identities bound to the lease.
     pub fn delegation_chain(&self) -> &[Delegation] {
         &self.claims.delegation_chain
@@ -290,6 +316,13 @@ impl EffectLease {
     /// Stable operation key bound to the lease, when idempotency is required.
     pub fn idempotency_key(&self) -> Option<&str> {
         self.claims.idempotency_key.as_deref()
+    }
+    /// Canonical productive effect subject, absent for a read-only operation.
+    pub fn effect_subject(&self) -> Option<&EffectSubject> {
+        match &self.claims.effect {
+            EffectReservation::ReadOnly => None,
+            EffectReservation::Mutating(subject) => Some(subject),
+        }
     }
     /// Exact resource selection and routing receipt bound to the lease.
     pub fn execution(&self) -> Option<&routing::ExecutionAssignment> {
@@ -327,6 +360,10 @@ impl EffectLease {
     pub fn replay_domain(&self) -> &str {
         &self.claims.replay_domain
     }
+    /// Exact admitted purpose carried from policy evaluation.
+    pub fn purpose(&self) -> &DecisionPurpose {
+        &self.claims.purpose
+    }
 
     /// True when the lease has expired at `now`.
     pub fn is_expired(&self, now: Timestamp) -> bool {
@@ -347,6 +384,9 @@ impl EffectLease {
     }
 
     fn replay_key(&self) -> ReplayKey {
+        if let Some(qualification) = self.claims.purpose.qualification_purpose() {
+            return ReplayKey::QualificationIntent(qualification.intent().clone());
+        }
         match (
             self.claims.operation.requires_idempotency,
             self.claims.idempotency_key.as_ref(),
@@ -376,15 +416,58 @@ impl EffectLease {
         Ok(ReservationRequest::new(
             self.claims.reservation_id.clone(),
             Digest::blake3(&replay_key),
-            self.claims.operation.requires_idempotency,
+            self.claims.operation.requires_idempotency
+                || self.claims.purpose.qualification_purpose().is_some(),
+            self.claims.effect.clone(),
             self.claims.replay_domain.clone(),
             budget_scopes,
             self.claims.budget.clone(),
             self.claims.decision.intent_digest.clone(),
             self.claims.expires_at,
             self.claims_digest.clone(),
+            self.claims.runtime.clone(),
+            self.claims.purpose.clone(),
         ))
     }
+}
+
+#[derive(Serialize)]
+struct EffectSubjectIdentity<'a> {
+    target: &'a EffectTarget,
+    operation: &'a OperationSpec,
+    resources: &'a BTreeSet<String>,
+    input_digest: &'a Digest,
+}
+
+fn effect_reservation(
+    intent: &OperationIntent,
+    adapter: &AdapterId,
+    audience: &str,
+) -> Result<EffectReservation, RuntimeError> {
+    if !intent.operation.effects.iter().any(Effect::mutates) {
+        return Ok(EffectReservation::ReadOnly);
+    }
+    ensure!(
+        !audience.is_empty() && audience.trim() == audience,
+        InvalidConfigurationSnafu {
+            reason: "effect port audience is not a concrete canonical target"
+        }
+    );
+    let target = EffectTarget::new(adapter.clone(), audience.to_string());
+    let overlap = EffectOverlap::new(target, &intent.resources);
+    let identity = Digest::of(
+        DigestDomain::EffectSubject,
+        &EffectSubjectIdentity {
+            target: overlap.target(),
+            operation: &intent.operation,
+            resources: &intent.resources,
+            input_digest: &intent.input_digest,
+        },
+    )
+    .context(LeaseEncodingSnafu)?;
+    Ok(EffectReservation::Mutating(EffectSubject::new(
+        identity, overlap,
+    )))
 }
 
 /// A move-only invocation capability constructed only by [`Dispatcher`].
@@ -453,6 +536,7 @@ pub trait EffectPort: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 enum ReplayKey {
     Lease(EffectLeaseId),
+    QualificationIntent(Digest),
     Operation {
         principal: PrincipalId,
         operation: OperationId,
@@ -481,6 +565,7 @@ pub struct DispatcherConfig {
     runtime: RuntimeGenerationId,
     replay_domain: String,
     max_lease_ttl: SignedDuration,
+    authorization_deadline: Option<Timestamp>,
     trusted_delegations: BTreeMap<DelegationId, Delegation>,
     trusted_operations: BTreeMap<OperationId, OperationSpec>,
     trusted_execution_assignments:
@@ -609,10 +694,23 @@ impl DispatcherConfig {
             runtime,
             replay_domain,
             max_lease_ttl,
+            authorization_deadline: None,
             trusted_delegations: delegations,
             trusted_operations: operations,
             trusted_execution_assignments: BTreeMap::new(),
         })
+    }
+
+    /// Narrow all leases to one absolute authorization deadline.
+    ///
+    /// Repeated calls retain the earliest deadline, so a later caller cannot
+    /// extend authority already installed by an earlier admission boundary.
+    /// The dispatcher refuses authorization at or after the resulting instant.
+    pub fn set_authorization_deadline(&mut self, deadline: Timestamp) {
+        self.authorization_deadline = Some(
+            self.authorization_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
     }
 
     /// Admit exact selected routing receipts into trusted bootstrap.

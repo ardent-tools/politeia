@@ -33,6 +33,29 @@ violation must traverse the intended mediation path and produce the promised ref
 with a known-good control. Unit detector tests prove local logic; they do not prove that the host
 invokes the detector, preserves its signal, or honors its result.
 
+Before first activation, the institution owner may authorize qualification of an
+exact, verified inactive generation. The grant binds the policy, binding, control,
+population, and both signed vector intents. Qualification uses the operational
+dispatcher, ledger, and effect port. It may omit only the target binding's missing
+activation prerequisite; every other applicable obligation still holds. Its
+authority cannot authorize ordinary execution, arbitrary inputs, or a change to
+the active generation.
+
+The retained report records the actual control invocations, the known-good
+receipt, and the planted violation's attributable denial. A rule reproduction or
+caller-authored outcome is insufficient. An independently authorized verifier
+admits evidence bound to that retained report. Activation and rollback require
+the complete set of blocking-control proofs selected by the candidate policy;
+the owner transition binds that set with its other assurance inputs. Missing or
+mismatched evidence leaves the active pointer unchanged.
+
+An activation proof identifies the detector version, configuration, policy,
+calibration population, and mediation path. Bindings that reference that same
+detector reuse its proof within its declared supported scopes. The qualification
+grant remains binding-specific; it confines the exceptional exercise and does
+not create a separate activation identity. Each subsequent operation still
+requires its own exact control run through the declared path.
+
 `ControlResult` uses the exact states `clean`, `violation`, `not_run`, `unavailable`, `unevaluable`,
 `unexpectedly_empty`, `not_applicable`, and `unresolved`. A state in which nothing meaningful was
 checked may not contribute to a clean assurance summary.

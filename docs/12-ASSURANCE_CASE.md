@@ -40,10 +40,9 @@ The bounded first proof owns these stable claims. Their detailed tests live in `
 | `POL-K` | Client commissioning and operation have no required dependency on commissioner-controlled or otherwise institution-external infrastructure. | `01-ANTI_SCOPE.md`, `15-SUPPLY_CHAIN.md` |
 | `POL-L` | Disconnecting a vendor-hosted control plane does not disable the current generation or authorized local update path. | `09-PERSISTENCE.md`, `15-SUPPLY_CHAIN.md`, `20-ENGINEERING_HANDOFF.md` |
 
-## Follow-on semantic claims
+## Refining semantic claims
 
-These claims refine later phase acceptance. Registering them does not expand or prove the bounded
-`POL-A` through `POL-L` first slice.
+The first commissioning package also exercises `POL-N` through `POL-Q`: the institutional learning loop requires complete source membership, real control results, preserved corrections, and authorized context. `POL-M` owns broader disconnected delivery; direct durable admission and ambiguous-effect safety are already required by the first package. Registering any claim does not prove it.
 
 | ID | Claim | Normative owner |
 |---|---|---|

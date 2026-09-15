@@ -1,6 +1,7 @@
 use std::any::type_name;
+use std::collections::BTreeSet;
 
-use politeia_core::PrincipalId;
+use politeia_core::{Digest, PolicyBundleId};
 use politeia_policy::hardening::{BindingAuthority, HardeningLadder, HardeningState};
 use politeia_policy::{
     ClauseKind, Consequence, DetectorSpec, EvidenceClass, NormativeClause, PolicyBinding, Waiver,
@@ -57,8 +58,12 @@ fn detector_spec_rejects_unknown_fields() {
     assert_closed_record(&DetectorSpec {
         id: "detector:approval-receipt".to_string(),
         evidence_class: EvidenceClass::Substance,
+        control_version: "1.0.0".to_string(),
+        configuration_digest: Digest::blake3(b"configuration"),
+        mediation_path: "dispatcher:authorize".to_string(),
+        supported_scopes: BTreeSet::from(["institution:production".to_string()]),
+        calibration_population: Digest::blake3(b"adversarial population"),
         known_blind_spots: vec!["revocation after observation".to_string()],
-        adversarially_calibrated: true,
     });
 }
 
@@ -119,13 +124,22 @@ fn a_binding_cannot_arrive_at_enforcement_off_the_wire() {
 }
 
 #[test]
+#[expect(
+    clippy::expect_used,
+    reason = "wire fixture timestamp must fail immediately if malformed"
+)]
 fn waiver_rejects_unknown_fields() {
     assert_closed_record(&Waiver {
         id: "waiver:maintenance-window".to_string(),
         binding_id: "binding:approved-change".to_string(),
+        policy: PolicyBundleId::new(),
+        policy_digest: Digest::blake3(b"policy"),
+        subject: Digest::blake3(b"subject"),
+        population: Digest::blake3(b"population"),
         scope: "institution:maintenance".to_string(),
         reason: "owner-approved maintenance".to_string(),
-        issuer: PrincipalId::new(),
-        expires_at_rfc3339: "2026-08-21T00:00:00Z".to_string(),
+        expires_at: "2026-08-21T00:00:00Z"
+            .parse()
+            .expect("fixture timestamp is valid"),
     });
 }

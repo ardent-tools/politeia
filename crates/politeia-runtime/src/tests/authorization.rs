@@ -22,6 +22,113 @@ async fn expired_delegation_fails_closed() {
         "an expired delegation must fail closed"
     );
 }
+
+#[tokio::test]
+async fn absolute_authorization_deadline_rejects_delayed_authorize() {
+    for offset in [SignedDuration::ZERO, SignedDuration::from_secs(1)] {
+        let mut fixture = fixture();
+        let deadline = fixture.now + SignedDuration::from_mins(10);
+        fixture
+            .dispatcher
+            .config
+            .set_authorization_deadline(deadline);
+        fixture
+            .dispatcher
+            .ledger
+            .set_observed_at(deadline + offset)
+            .await;
+
+        let result = fixture.dispatcher.authorize(&fixture.intent).await;
+        assert!(
+            matches!(result, Err(RuntimeError::LeaseExpired { .. })),
+            "authority must be unusable at and after its absolute deadline"
+        );
+        assert_eq!(fixture.dispatcher.port.call_count(), 0);
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "the fixed fixture provides a valid lease for expiry inspection"
+)]
+async fn repeated_authorization_deadline_setter_cannot_widen() {
+    let mut fixture = fixture();
+    let earlier = fixture.now + SignedDuration::from_mins(10);
+    let later = fixture.now + SignedDuration::from_mins(20);
+    fixture.dispatcher.config.set_authorization_deadline(later);
+    fixture
+        .dispatcher
+        .config
+        .set_authorization_deadline(earlier);
+    fixture.dispatcher.config.set_authorization_deadline(later);
+
+    let lease = fixture
+        .dispatcher
+        .authorize(&fixture.intent)
+        .await
+        .expect("the deadline is still in the future");
+    assert_eq!(lease.expires_at(), earlier);
+}
+
+struct DeadlineAdvancingPolicy {
+    inner: AllowAll,
+    ledger: InMemoryAuthorizationLedger,
+    deadline: Timestamp,
+}
+
+impl PolicyDecisionPoint for DeadlineAdvancingPolicy {
+    type Error = TestError;
+
+    async fn decide(&self, intent: &OperationIntent) -> Result<PolicyDecision, Self::Error> {
+        self.ledger.set_observed_at(self.deadline).await;
+        self.inner.decide(intent).await
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "the focused delayed-policy fixture reuses exact trusted values"
+)]
+async fn deadline_crossed_during_policy_evaluation_is_refused_by_reservation() {
+    let fixture = fixture();
+    let deadline = fixture.now + SignedDuration::from_mins(10);
+    let ledger = InMemoryAuthorizationLedger::at(fixture.now);
+    let mut config = DispatcherConfig::new(
+        fixture.dispatcher.config.policy_bundle.clone(),
+        fixture.dispatcher.config.policy_digest.clone(),
+        fixture.dispatcher.config.runtime.clone(),
+        fixture.dispatcher.config.replay_domain.clone(),
+        fixture.dispatcher.config.max_lease_ttl,
+        fixture.intent.delegation_chain.clone(),
+        [fixture.intent.operation.clone()],
+    )
+    .expect("the delayed-policy dispatcher configuration is valid");
+    config.set_authorization_deadline(deadline);
+    let dispatcher = Dispatcher::new(
+        DeadlineAdvancingPolicy {
+            inner: AllowAll {
+                bundle: fixture.dispatcher.config.policy_bundle.clone(),
+                policy_digest: fixture.dispatcher.config.policy_digest.clone(),
+                fault: None,
+            },
+            ledger: ledger.clone(),
+            deadline,
+        },
+        TestPort::new(fixture.dispatcher.adapter.clone(), "effect-port:fs"),
+        ledger,
+        config,
+    );
+
+    let result = dispatcher.authorize(&fixture.intent).await;
+    assert!(
+        matches!(result, Err(RuntimeError::LeaseExpired { .. })),
+        "a policy evaluation cannot turn an elapsed absolute deadline into a fresh TTL"
+    );
+    assert_eq!(dispatcher.port.call_count(), 0);
+}
+
 #[tokio::test]
 #[expect(
     clippy::expect_used,
@@ -109,6 +216,8 @@ async fn mismatched_or_denied_policy_receipts_fail_before_lease_minting() {
         DecisionFault::PolicyDigest,
         DecisionFault::IntentDigest,
         DecisionFault::Deny,
+        DecisionFault::ControlRuns,
+        DecisionFault::Reasons,
     ] {
         let mut fixture = fixture();
         fixture.dispatcher.policy.fault = Some(fault);
@@ -293,12 +402,15 @@ async fn a_substituted_claims_digest_is_refused_at_the_ledger() {
         reservation.reservation_id().clone(),
         reservation.replay_key().clone(),
         reservation.retains_replay(),
+        reservation.effect().clone(),
         reservation.replay_domain().to_string(),
         reservation.budget_scopes().to_vec(),
         reservation.requested_budget().clone(),
         reservation.intent_digest().clone(),
         reservation.expires_at(),
         Digest::blake3(b"claims this lease was never issued for"),
+        reservation.runtime_generation().clone(),
+        reservation.purpose().clone(),
     );
 
     assert!(

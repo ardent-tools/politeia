@@ -70,6 +70,18 @@ jobs:
     name: rust
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: politeia
+          POSTGRES_PASSWORD: politeia_ci_fixture
+          POSTGRES_DB: politeia_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U politeia -d politeia_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,6 +107,33 @@ jobs:
       - run: cargo check --workspace --all-targets --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Prepare exact PostgreSQL acceptance executables
+        shell: bash
+        run: |
+          python3 -B -m unittest discover -s bin -p test_check_postgres.py
+          mkdir -p .kanon-artifacts
+          cargo test --no-run --locked --message-format=json --jobs 8 \
+            -p politeia-storage \
+            > .kanon-artifacts/postgres-storage-build.json
+          cargo test --no-run --locked --message-format=json --jobs 8 \
+            -p politeiad --test commissioning_package \
+            > .kanon-artifacts/postgres-package-build.json
+      - id: package
+        name: Prove durable admission and daemon package against PostgreSQL
+        env:
+          POLITEIA_STORAGE_TEST_DATABASE_URL: postgresql://politeia:politeia_ci_fixture@127.0.0.1:5432/politeia_test
+          POLITEIA_STORAGE_ARTIFACTS_JSON: .kanon-artifacts/postgres-storage-build.json
+          POLITEIA_PACKAGE_ARTIFACTS_JSON: .kanon-artifacts/postgres-package-build.json
+          POLITEIA_ACCEPTANCE_ARTIFACT_DIR: ${{ runner.temp }}/politeia-package
+        run: python3 bin/check-postgres.py
+      - name: Retain executable package observations
+        if: always() && steps.package.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: politeia-package-${{ github.sha }}
+          path: ${{ runner.temp }}/politeia-package
+          if-no-files-found: ${{ steps.package.outcome == 'success' && 'error' || 'warn' }}
+          retention-days: 30
       - id: derive-schemas
         name: Derive public projections
         shell: bash

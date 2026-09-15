@@ -1,6 +1,12 @@
 {
   "$comment": "Authoritative pre-release v1 projection, derived from the Rust types by cargo run -p xtask -- derive. Do not hand-edit.",
   "$defs": {
+    "AdapterId": {
+      "description": "Identity of an adapter bridging the semantic protocol to an external system.",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
     "ApprovedCommissioningSubject": {
       "description": "Typed owner-approved subjects required to complete commissioning.",
       "oneOf": [
@@ -485,6 +491,11 @@
           "type": "string"
         },
         {
+          "const": "read_institutional_context",
+          "description": "Read approved institutional context through the coordinator.",
+          "type": "string"
+        },
+        {
           "const": "write_external_system",
           "description": "Write to an external system.",
           "type": "string"
@@ -508,7 +519,6 @@
       "type": "string"
     },
     "EvidenceRecord": {
-      "additionalProperties": false,
       "description": "A provenance-bearing evidence record admitted for an exact subject.",
       "properties": {
         "id": {
@@ -555,6 +565,80 @@
         "payload_digest",
         "observed_at",
         "independence"
+      ],
+      "type": "object"
+    },
+    "HistoricalObservationProvenance": {
+      "additionalProperties": false,
+      "description": "Complete, validated provenance for one retained reconnaissance observation.\n\nIts fields remain private so callers cannot manufacture this value without\nre-admitting the capture, observation, evidence, grant, and scope through\n[`Self::from_trusted`].",
+      "properties": {
+        "capture": {
+          "$ref": "#/$defs/SourceCaptureRequest"
+        },
+        "capture_signer": {
+          "$ref": "#/$defs/PrincipalId"
+        },
+        "evidence": {
+          "$ref": "#/$defs/EvidenceRecord"
+        },
+        "grant": {
+          "$ref": "#/$defs/HistoricalReconnaissanceGrantRecord"
+        },
+        "observation": {
+          "$ref": "#/$defs/Observation"
+        }
+      },
+      "required": [
+        "evidence",
+        "observation",
+        "capture",
+        "capture_signer",
+        "grant"
+      ],
+      "type": "object"
+    },
+    "HistoricalReconnaissanceGrantRecord": {
+      "additionalProperties": false,
+      "description": "One historical reconnaissance grant retained with a sourced observation.\n\nIt is distinct from the current commissioner grant: the latter authorizes\ncommissioning, while this record proves the earlier read was authorized at\nthe instant it occurred.",
+      "properties": {
+        "delegation": {
+          "$ref": "#/$defs/Delegation",
+          "description": "Complete original read-only delegation."
+        },
+        "institution": {
+          "$ref": "#/$defs/InstitutionId",
+          "description": "Institution in which the read occurred."
+        },
+        "revoked_at": {
+          "description": "Trusted revocation time, when later recorded.",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/ReconnaissanceScope",
+          "description": "Exact scope checked before the historical source access."
+        },
+        "valid_from": {
+          "description": "Earliest trusted instant at which this delegation was admitted.",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "workspace": {
+          "$ref": "#/$defs/InstitutionWorkspaceId",
+          "description": "Workspace in which the read occurred."
+        }
+      },
+      "required": [
+        "institution",
+        "workspace",
+        "valid_from",
+        "scope",
+        "delegation"
       ],
       "type": "object"
     },
@@ -630,6 +714,72 @@
         }
       ]
     },
+    "Observation": {
+      "description": "A sourced statement about reality.\n\nEvery field answers \"how do you know\", and none of them is the statement's\nmeaning: an observation records that a named source, reached through an\nexact adapter, said a particular thing at a particular time. What it is\ntaken to mean is a [`CandidateClaim`].",
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/AdapterId",
+          "description": "The exact adapter that reached the source."
+        },
+        "capture": {
+          "$ref": "#/$defs/SourceCaptureId",
+          "description": "Exact descriptor-bounded capture from which this observation was admitted."
+        },
+        "capture_manifest_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the exact bounded manifest captured before this observation."
+        },
+        "evidence": {
+          "$ref": "#/$defs/EvidenceId",
+          "description": "The admitted evidence record backing it."
+        },
+        "id": {
+          "$ref": "#/$defs/ObservationId",
+          "description": "This observation's identity."
+        },
+        "observed_at": {
+          "description": "Trusted time the observation was admitted.",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "source": {
+          "description": "The source the statement came from, as the institution names it.",
+          "type": "string"
+        },
+        "statement": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the statement itself."
+        },
+        "subject": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the subject the statement is about."
+        },
+        "workspace": {
+          "$ref": "#/$defs/InstitutionWorkspaceId",
+          "description": "The workspace that owns the observation."
+        }
+      },
+      "required": [
+        "id",
+        "capture",
+        "capture_manifest_digest",
+        "workspace",
+        "source",
+        "adapter",
+        "subject",
+        "statement",
+        "observed_at",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "ObservationId": {
+      "description": "Identity of one sourced statement about reality.",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
     "PolicyBundleId": {
       "description": "Identity of an immutable policy bundle.",
       "format": "uuid",
@@ -641,6 +791,50 @@
       "format": "uuid",
       "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "type": "string"
+    },
+    "ReconnaissanceScope": {
+      "additionalProperties": false,
+      "description": "What one reconnaissance pass is permitted to look at.\n\nIt names no institution or workspace of its own. The\n[`InstitutionBoundary`](crate::institution::InstitutionBoundary) it is\nadmitted against owns that, so a scope cannot be pointed at one institution\nwhile its observations are checked against another.",
+      "properties": {
+        "adapters": {
+          "description": "The exact adapters it may reach them through.",
+          "items": {
+            "$ref": "#/$defs/AdapterId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "commissioner": {
+          "$ref": "#/$defs/PrincipalId",
+          "description": "The commissioner performing the pass."
+        },
+        "delegation": {
+          "$ref": "#/$defs/DelegationId",
+          "description": "The exact delegation carrying its authority."
+        },
+        "expires_at": {
+          "description": "When the pass stops being permitted.",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "sources": {
+          "description": "The sources it may reach, as the institution names them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "commissioner",
+        "delegation",
+        "sources",
+        "adapters",
+        "expires_at"
+      ],
+      "type": "object"
     },
     "ReproducibilityContract": {
       "description": "Reproducibility posture for a runtime generation.",
@@ -755,6 +949,82 @@
         }
       },
       "type": "object"
+    },
+    "SourceCaptureId": {
+      "description": "Identity of one descriptor-bounded external source capture.",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "SourceCaptureRequest": {
+      "additionalProperties": false,
+      "description": "Inert signed-capture payload before installed-key admission.\n\nThe manifest is a sorted, duplicate-free explicit selection. It describes\nexactly the relative members the source adapter was allowed to capture;\nomission is never interpreted as a wildcard.",
+      "properties": {
+        "adapter": {
+          "$ref": "#/$defs/AdapterId",
+          "description": "Adapter that read the descriptor-bounded source."
+        },
+        "content_manifest_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of exact bytes/content identities of the selected members."
+        },
+        "descriptor_digest": {
+          "$ref": "#/$defs/Digest",
+          "description": "Digest of the descriptor that authorized this exact capture selection."
+        },
+        "id": {
+          "$ref": "#/$defs/SourceCaptureId",
+          "description": "Stable capture identity retained across re-admission."
+        },
+        "manifest": {
+          "description": "Explicit relative members selected by the capture descriptor.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "observed_at": {
+          "description": "Source observation time.",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$",
+          "type": "string"
+        },
+        "reconnaissance": {
+          "$ref": "#/$defs/ReconnaissanceScope",
+          "description": "Exact read-only scope checked before this source was accessed."
+        },
+        "reconnaissance_delegation": {
+          "$ref": "#/$defs/DelegationId",
+          "description": "Bounded reconnaissance delegation under which capture happened."
+        },
+        "source": {
+          "description": "Institution-named external source.",
+          "type": "string"
+        },
+        "statement": {
+          "$ref": "#/$defs/Digest",
+          "description": "Statement digest read from the source snapshot."
+        },
+        "subject": {
+          "$ref": "#/$defs/Digest",
+          "description": "Subject the source snapshot concerns."
+        }
+      },
+      "required": [
+        "id",
+        "source",
+        "adapter",
+        "subject",
+        "statement",
+        "observed_at",
+        "reconnaissance_delegation",
+        "reconnaissance",
+        "manifest",
+        "descriptor_digest",
+        "content_manifest_digest"
+      ],
+      "type": "object"
     }
   },
   "$id": "urn:politeia:commissioning-record:v1",
@@ -781,6 +1051,12 @@
     },
     "commissioner_grant_digest": {
       "$ref": "#/$defs/Digest"
+    },
+    "historical_observations": {
+      "items": {
+        "$ref": "#/$defs/HistoricalObservationProvenance"
+      },
+      "type": "array"
     },
     "id": {
       "$ref": "#/$defs/CommissioningRecordId"
@@ -829,6 +1105,7 @@
     "commissioner_grant",
     "commissioner_grant_digest",
     "observations",
+    "historical_observations",
     "observation_set_digest",
     "approvals",
     "policy_bundle",

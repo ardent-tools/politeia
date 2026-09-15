@@ -1,149 +1,409 @@
-//! Evaluating policy bindings into one normalized decision.
+//! Normalize admitted control results into one policy decision.
 //!
-//! A binding says *where a clause applies, which detectors produce admissible
-//! evidence, and what consequence follows*. Evaluation is turning a set of them
-//! into a single answer about one operation, and the whole difficulty is that
-//! the answer must not be more permissive than any of its inputs.
-//!
-//! Three rules from the corpus shape it, and each is a way a permissive answer
-//! gets manufactured out of stricter parts:
-//!
-//! - `AGENTS.md`: *do not make a heuristic blocking without explicit detector
-//!   assurance and calibration.* A binding whose evidence is a guess may advise;
-//!   it may not deny.
-//! - `docs/06-POLICY_COMPILER.md`: *blocking authority is a property of the
-//!   binding, not inherent in the detector.* A binding may apply only what its
-//!   hardening rung authorises, which [`BindingAuthority`] already guarantees.
-//! - `AGENTS.md`: *do not widen delegation or policy through defaults.* A
-//!   binding naming a detector nobody declared is unevaluable, and unevaluable
-//!   fails closed rather than falling through to permitted.
+//! A binding contributes a consequence only when one of its declared controls
+//! reports [`ControlResult::Violation`]. Absence and every unresolved control
+//! state remain typed refusals. Blocking additionally requires separately
+//! signed, directly delegated activation evidence for the exact control.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use jiff::Timestamp;
-use politeia_core::{Digest, PolicyBundleId, PrincipalId};
+use politeia_core::{Digest, InstitutionId, InstitutionWorkspaceId, PolicyBundleId, PrincipalId};
+use politeia_evidence::assurance::{
+    AuthorizedControlRun, ControlResult, Coverage, VerifiedActivation,
+};
 
 use crate::hardening::HardeningState;
-use crate::{Consequence, DetectorSpec, EvidenceClass, PolicyBinding, PolicyDecision, Waiver};
+use crate::waiver::DelegatedWaiver;
+use crate::{DetectorSpec, EvidenceClass, PolicyBinding, PolicyDecision};
 
-/// One operation, as policy sees it.
+/// One exact operation and population, as policy sees them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvaluationSubject {
-    /// The policy bundle in force.
+    /// Institution whose policy is being evaluated.
+    pub institution: InstitutionId,
+    /// Institution workspace whose admitted material may contribute.
+    pub workspace: InstitutionWorkspaceId,
+    /// Policy bundle in force.
     pub bundle: PolicyBundleId,
     /// Digest of the exact bundle bytes.
     pub policy_digest: Digest,
     /// Digest of the normalized operation intent.
     pub intent_digest: Digest,
-    /// The principal the operation is for.
+    /// Digest of the exact subject controls must judge.
+    pub subject: Digest,
+    /// Digest of the exact intended observation population.
+    pub population: Digest,
+    /// Principal the operation is for.
     pub principal: PrincipalId,
-    /// The scopes the operation touches.
+    /// Scopes the operation touches.
     pub scopes: BTreeSet<String>,
-    /// When the decision is being made.
+    /// Trusted instant for authority and freshness checks.
     pub at: Timestamp,
 }
 
-/// Why a binding could not be evaluated.
+/// Admitted evidence available to one evaluation.
 ///
-/// Every one of these fails closed. `AGENTS.md` forbids widening policy through
-/// defaults, and an input nobody can interpret is exactly where a default would
-/// otherwise be supplied.
+/// WHY this borrows authorized wrappers: the evaluator cannot accidentally
+/// accept a deserialized run, a signer-selected kind, or a bare delegation.
+pub struct EvaluationEvidence<'set, 'admission> {
+    control_runs: &'set [AuthorizedControlRun<'admission>],
+    activations: &'set [VerifiedActivation<'admission>],
+    waivers: &'set [DelegatedWaiver<'admission>],
+}
+
+impl<'set, 'admission> EvaluationEvidence<'set, 'admission> {
+    /// Assemble the authorized evidence considered by one evaluation.
+    pub fn new(
+        control_runs: &'set [AuthorizedControlRun<'admission>],
+        activations: &'set [VerifiedActivation<'admission>],
+        waivers: &'set [DelegatedWaiver<'admission>],
+    ) -> Self {
+        Self {
+            control_runs,
+            activations,
+            waivers,
+        }
+    }
+
+    pub(crate) fn control_runs(&self) -> &[AuthorizedControlRun<'admission>] {
+        self.control_runs
+    }
+
+    pub(crate) fn activations(&self) -> &[VerifiedActivation<'admission>] {
+        self.activations
+    }
+
+    pub(crate) fn waivers(&self) -> &[DelegatedWaiver<'admission>] {
+        self.waivers
+    }
+}
+
+/// Binding and detector identities attached to one refusal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlRef {
+    /// Binding being evaluated.
+    pub binding: String,
+    /// Detector required by that binding.
+    pub detector: String,
+}
+
+impl ControlRef {
+    fn new(binding: &PolicyBinding, detector: &str) -> Self {
+        Self {
+            binding: binding.id.clone(),
+            detector: detector.to_string(),
+        }
+    }
+}
+
+/// Identity axis on which evidence disagreed with an evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EvidenceAxis {
+    /// Institution identity.
+    Institution,
+    /// Workspace identity.
+    Workspace,
+    /// Trusted authority-resolution instant.
+    AuthorityTime,
+    /// Producer independence from the operation actor.
+    ProducerIndependence,
+    /// Control version.
+    ControlVersion,
+    /// Control configuration digest.
+    Configuration,
+    /// Exact admitted input digest.
+    Input,
+    /// Exact subject digest.
+    Subject,
+    /// Policy bundle identity.
+    PolicyBundle,
+    /// Exact policy digest.
+    PolicyDigest,
+    /// Exact population digest.
+    Population,
+    /// Mediation path.
+    MediationPath,
+    /// Binding scope.
+    Scope,
+}
+
+/// Why the complete policy set could not be evaluated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Unevaluable {
-    /// The binding names a detector the bundle does not declare.
-    UnknownDetector {
-        /// The binding.
-        binding: String,
-        /// The detector it named.
-        detector: String,
-    },
-    /// The binding names no detector at all.
-    ///
-    /// A binding with no evidence source produces no evidence, and a
-    /// consequence resting on none is an assertion rather than a finding.
+    /// The bundle does not declare a named detector.
+    UnknownDetector(ControlRef),
+    /// A binding has no evidence-producing detector.
     NoDetector {
-        /// The binding.
+        /// Binding identity.
         binding: String,
     },
-    /// The binding would block on evidence that is a guess.
-    ///
-    /// The detector's evidence class is heuristic, or it has not been
-    /// calibrated against adversarial fixtures, and the binding's consequence
-    /// blocks. It may advise instead; it may not deny.
-    HeuristicBlocking {
-        /// The binding.
-        binding: String,
-        /// The detector whose assurance is insufficient.
-        detector: String,
+    /// The detector does not support the binding scope.
+    UnsupportedScope(ControlRef),
+    /// No admitted authorized run exists.
+    MissingControlRun(ControlRef),
+    /// More than one run claims the same evaluation.
+    DuplicateControlRun(ControlRef),
+    /// A run is bound to another exact axis.
+    ControlBindingMismatch {
+        /// Control being evaluated.
+        control: ControlRef,
+        /// Axis that differed.
+        axis: EvidenceAxis,
     },
+    /// The control explicitly did not run.
+    ControlNotRun(ControlRef),
+    /// The control was unavailable.
+    ControlUnavailable(ControlRef),
+    /// The control ran but could not decide.
+    ControlUnevaluable(ControlRef),
+    /// The control observed an unexpectedly empty source.
+    ControlUnexpectedlyEmpty(ControlRef),
+    /// The control claimed not to apply to an applicable binding.
+    ControlNotApplicable(ControlRef),
+    /// The control outcome remains unresolved.
+    ControlUnresolved(ControlRef),
+    /// A future result state is unsupported until explicitly handled.
+    UnsupportedControlResult(ControlRef),
+    /// Coverage named an empty intended population.
+    EmptyPopulation(ControlRef),
+    /// Coverage observed none of a nonempty intended population.
+    UnobservedPopulation(ControlRef),
+    /// Coverage counts are impossible.
+    InvalidCoverage {
+        /// Control being evaluated.
+        control: ControlRef,
+        /// Observed member count.
+        observed: u64,
+        /// Intended member count.
+        population: u64,
+    },
+    /// A clean run did not observe its complete population.
+    PartialCleanCoverage {
+        /// Control being evaluated.
+        control: ControlRef,
+        /// Observed member count.
+        observed: u64,
+        /// Intended member count.
+        population: u64,
+    },
+    /// A blocking binding rests on heuristic evidence.
+    HeuristicBlocking(ControlRef),
+    /// A blocking control has no verified activation proof.
+    MissingActivationProof(ControlRef),
+    /// More than one activation proof claims the control.
+    DuplicateActivationProof(ControlRef),
+    /// An activation proof is bound to another exact axis.
+    ActivationBindingMismatch {
+        /// Control being evaluated.
+        control: ControlRef,
+        /// Axis that differed.
+        axis: EvidenceAxis,
+    },
+    /// The control producer also signed its activation proof.
+    SelfAttestedActivation(ControlRef),
+    /// The activation proof postdates the evaluated run.
+    ActivationAfterRun(ControlRef),
+    /// Multiple exact waivers compete for one finding.
+    DuplicateWaiver {
+        /// Binding identity.
+        binding: String,
+    },
+    /// A waiver for this binding is stale or differently scoped.
+    WaiverBindingMismatch {
+        /// Binding identity.
+        binding: String,
+        /// Axis that differed.
+        axis: EvidenceAxis,
+    },
+    /// A selected qualification target did not name an applicable blocking control.
+    UnusedQualificationTarget(ControlRef),
+    /// The completed decision could not be sealed to its canonical wire bytes.
+    DecisionEncoding,
 }
 
 impl std::fmt::Display for Unevaluable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Unevaluable::UnknownDetector { binding, detector } => write!(
+            Self::UnknownDetector(control) => write!(
                 formatter,
-                "binding {binding} names detector {detector}, which the bundle does not declare"
+                "{} names undeclared {}",
+                control.binding, control.detector
             ),
-            Unevaluable::NoDetector { binding } => {
+            Self::NoDetector { binding } => {
                 write!(formatter, "binding {binding} names no detector")
             }
-            Unevaluable::HeuristicBlocking { binding, detector } => write!(
+            Self::UnsupportedScope(control) => write!(
                 formatter,
-                "binding {binding} blocks on {detector}, whose evidence is heuristic or uncalibrated"
+                "{} does not support {} scope",
+                control.detector, control.binding
             ),
+            Self::MissingControlRun(control) => write!(
+                formatter,
+                "{} has no admitted run for {}",
+                control.binding, control.detector
+            ),
+            Self::DuplicateControlRun(control) => write!(
+                formatter,
+                "{} has multiple runs for {}",
+                control.binding, control.detector
+            ),
+            Self::ControlBindingMismatch { control, axis } => write!(
+                formatter,
+                "{} run for {} mismatches {axis:?}",
+                control.detector, control.binding
+            ),
+            Self::ControlNotRun(control) => write!(
+                formatter,
+                "{} for {} did not run",
+                control.detector, control.binding
+            ),
+            Self::ControlUnavailable(control) => write!(
+                formatter,
+                "{} for {} was unavailable",
+                control.detector, control.binding
+            ),
+            Self::ControlUnevaluable(control) => write!(
+                formatter,
+                "{} for {} could not decide",
+                control.detector, control.binding
+            ),
+            Self::ControlUnexpectedlyEmpty(control) => write!(
+                formatter,
+                "{} for {} observed an unexpectedly empty source",
+                control.detector, control.binding
+            ),
+            Self::ControlNotApplicable(control) => write!(
+                formatter,
+                "{} claimed not to apply to {}",
+                control.detector, control.binding
+            ),
+            Self::ControlUnresolved(control) => write!(
+                formatter,
+                "{} for {} remains unresolved",
+                control.detector, control.binding
+            ),
+            Self::UnsupportedControlResult(control) => write!(
+                formatter,
+                "{} for {} returned an unsupported state",
+                control.detector, control.binding
+            ),
+            Self::EmptyPopulation(control) => write!(
+                formatter,
+                "{} for {} names an empty population",
+                control.detector, control.binding
+            ),
+            Self::UnobservedPopulation(control) => write!(
+                formatter,
+                "{} for {} observed none of its population",
+                control.detector, control.binding
+            ),
+            Self::InvalidCoverage {
+                control,
+                observed,
+                population,
+            } => write!(
+                formatter,
+                "{} for {} observed {observed} of an impossible {population}",
+                control.detector, control.binding
+            ),
+            Self::PartialCleanCoverage {
+                control,
+                observed,
+                population,
+            } => write!(
+                formatter,
+                "{} for {} claimed clean after observing {observed} of {population}",
+                control.detector, control.binding
+            ),
+            Self::HeuristicBlocking(control) => write!(
+                formatter,
+                "{} blocks on heuristic {}",
+                control.binding, control.detector
+            ),
+            Self::MissingActivationProof(control) => write!(
+                formatter,
+                "{} has no verified activation for {}",
+                control.binding, control.detector
+            ),
+            Self::DuplicateActivationProof(control) => write!(
+                formatter,
+                "{} has multiple activations for {}",
+                control.binding, control.detector
+            ),
+            Self::ActivationBindingMismatch { control, axis } => write!(
+                formatter,
+                "{} activation for {} mismatches {axis:?}",
+                control.detector, control.binding
+            ),
+            Self::SelfAttestedActivation(control) => write!(
+                formatter,
+                "{} producer also vouched for {} activation",
+                control.detector, control.binding
+            ),
+            Self::ActivationAfterRun(control) => write!(
+                formatter,
+                "{} activation for {} postdates its run",
+                control.detector, control.binding
+            ),
+            Self::DuplicateWaiver { binding } => {
+                write!(formatter, "binding {binding} has multiple exact waivers")
+            }
+            Self::WaiverBindingMismatch { binding, axis } => {
+                write!(formatter, "waiver for {binding} mismatches {axis:?}")
+            }
+            Self::UnusedQualificationTarget(control) => write!(
+                formatter,
+                "qualification target {} on {} was not applicable",
+                control.detector, control.binding
+            ),
+            Self::DecisionEncoding => {
+                formatter.write_str("policy decision could not be encoded canonically")
+            }
         }
     }
 }
 
 impl std::error::Error for Unevaluable {}
 
-/// Whether a waiver excuses a binding for this subject.
-fn waives(waiver: &Waiver, binding: &PolicyBinding, subject: &EvaluationSubject) -> bool {
-    // Parsed rather than compared as text: `2026-08-21T00:00:00Z` and
-    // `2026-08-21T00:00:00.000Z` are one instant and two strings, and a string
-    // comparison would silently treat an unexpired waiver as expired or the
-    // reverse depending on which spelling was stored.
-    let Ok(expires_at) = waiver.expires_at_rfc3339.parse::<Timestamp>() else {
-        return false;
-    };
-    waiver.binding_id == binding.id
-        && subject.scopes.contains(&waiver.scope)
-        && subject.at < expires_at
-}
-
-/// Whether a detector's evidence is strong enough to block on.
-fn may_block(detector: &DetectorSpec) -> bool {
-    match detector.evidence_class {
-        EvidenceClass::Substance | EvidenceClass::FormalProof => true,
-        EvidenceClass::StructuralProxy | EvidenceClass::LexicalProxy => {
-            detector.adversarially_calibrated
-        }
-        EvidenceClass::Heuristic => false,
-    }
-}
-
-/// Evaluate every applicable binding into one decision.
+/// Evaluate every applicable binding from admitted control results.
 ///
 /// # Errors
 ///
-/// Returns the first [`Unevaluable`] input. Nothing is decided from a partial
-/// evaluation: a decision assembled from the bindings that happened to be
-/// interpretable is more permissive than the policy it claims to apply, and
-/// says nothing about the ones it skipped.
-///
-/// Time: O(b·d log n) for b bindings of d detectors against n declared.
-/// Space: O(b).
+/// Returns the first [`Unevaluable`] input. No decision is assembled from a
+/// subset of the applicable bindings.
 pub fn evaluate(
     subject: &EvaluationSubject,
     bindings: &[PolicyBinding],
     detectors: &BTreeMap<String, DetectorSpec>,
-    waivers: &[Waiver],
+    evidence: &EvaluationEvidence<'_, '_>,
 ) -> Result<PolicyDecision, Unevaluable> {
-    let mut contributing = Vec::new();
+    evaluate_with_qualification_target(subject, bindings, detectors, evidence, None)
+}
+
+pub(crate) struct QualificationEvaluation<'target> {
+    pub(crate) binding: &'target str,
+    pub(crate) detector: &'target str,
+    pub(crate) result: ControlResult,
+    pub(crate) coverage: Coverage,
+}
+
+pub(crate) fn evaluate_with_qualification_target(
+    subject: &EvaluationSubject,
+    bindings: &[PolicyBinding],
+    detectors: &BTreeMap<String, DetectorSpec>,
+    evidence: &EvaluationEvidence<'_, '_>,
+    qualification_target: Option<QualificationEvaluation<'_>>,
+) -> Result<PolicyDecision, Unevaluable> {
+    let mut binding_ids = Vec::new();
+    let mut control_run_ids = BTreeSet::new();
+    let mut activation_ids = BTreeSet::new();
+    let mut waiver_ids = BTreeSet::new();
     let mut reasons = Vec::new();
     let mut allowed = true;
+    let mut used_qualification_target = false;
 
     for binding in bindings {
         if !subject.scopes.contains(&binding.scope) {
@@ -154,417 +414,346 @@ pub fn evaluate(
                 binding: binding.id.clone(),
             });
         }
-
+        binding_ids.push(binding.id.clone());
         let consequence = binding.authority.consequence();
-        let blocks = consequence >= Consequence::RequireReview;
+        let blocks = binding.is_blocking();
+        let mut violation = false;
+
         for detector_id in &binding.detector_ids {
-            let Some(detector) = detectors.get(detector_id) else {
-                return Err(Unevaluable::UnknownDetector {
-                    binding: binding.id.clone(),
-                    detector: detector_id.clone(),
-                });
-            };
-            if blocks && !may_block(detector) {
-                return Err(Unevaluable::HeuristicBlocking {
-                    binding: binding.id.clone(),
-                    detector: detector_id.clone(),
-                });
+            let control_ref = ControlRef::new(binding, detector_id);
+            let detector = detectors
+                .get(detector_id)
+                .ok_or_else(|| Unevaluable::UnknownDetector(control_ref.clone()))?;
+            if !detector.supported_scopes.contains(&binding.scope) {
+                return Err(Unevaluable::UnsupportedScope(control_ref));
+            }
+            if blocks && matches!(detector.evidence_class, EvidenceClass::Heuristic) {
+                return Err(Unevaluable::HeuristicBlocking(control_ref));
+            }
+
+            if let Some(target) = qualification_target
+                .as_ref()
+                .filter(|target| binding.id == target.binding && detector_id == target.detector)
+            {
+                used_qualification_target = true;
+                violation |= normalize_control_result(
+                    binding,
+                    detector_id,
+                    target.result,
+                    &target.coverage,
+                )?;
+                continue;
+            }
+
+            let run = one_run(evidence.control_runs, binding, detector_id)?;
+            validate_run(subject, binding, detector_id, detector, run)?;
+            control_run_ids.insert(run.run().id.clone());
+            violation |= normalize_result(binding, detector_id, run)?;
+
+            if blocks {
+                let activation = one_activation(evidence.activations, binding, detector_id)?;
+                validate_activation(subject, binding, detector_id, detector, run, activation)?;
+                activation_ids.insert(activation.proof().id.clone());
             }
         }
 
-        contributing.push(binding.id.clone());
-        if let Some(waiver) = waivers
-            .iter()
-            .find(|waiver| waives(waiver, binding, subject))
-        {
+        if !violation {
+            reasons.push(format!("{} clean", binding.id));
+            continue;
+        }
+        if let Some(waiver) = exact_waiver(evidence.waivers, subject, binding)? {
+            waiver_ids.insert(waiver.waiver().id.clone());
             reasons.push(format!(
-                "{} waived by {}: {}",
-                binding.id, waiver.id, waiver.reason
+                "{} violation waived by {}: {}",
+                binding.id,
+                waiver.waiver().id,
+                waiver.waiver().reason
             ));
             continue;
         }
         if blocks {
             allowed = false;
-            reasons.push(format!("{} applies {consequence:?}", binding.id));
+            reasons.push(format!("{} violation applies {consequence:?}", binding.id));
         } else {
-            reasons.push(format!("{} records {consequence:?}", binding.id));
+            reasons.push(format!("{} violation records {consequence:?}", binding.id));
         }
     }
 
-    Ok(PolicyDecision {
-        bundle: subject.bundle.clone(),
-        policy_digest: subject.policy_digest.clone(),
-        intent_digest: subject.intent_digest.clone(),
-        principal: subject.principal.clone(),
+    if let Some(target) = qualification_target {
+        if !used_qualification_target {
+            return Err(Unevaluable::UnusedQualificationTarget(ControlRef {
+                binding: target.binding.to_string(),
+                detector: target.detector.to_string(),
+            }));
+        }
+    }
+
+    PolicyDecision::operational(
+        subject.bundle.clone(),
+        subject.policy_digest.clone(),
+        subject.intent_digest.clone(),
+        subject.subject.clone(),
+        subject.population.clone(),
+        subject.principal.clone(),
         allowed,
-        binding_ids: contributing,
+        binding_ids,
+        control_run_ids.into_iter().collect(),
+        activation_ids.into_iter().collect(),
+        waiver_ids.into_iter().collect(),
         reasons,
-    })
+    )
+    .map_err(|_| Unevaluable::DecisionEncoding)
+}
+
+fn one_run<'set, 'admission>(
+    runs: &'set [AuthorizedControlRun<'admission>],
+    binding: &PolicyBinding,
+    detector: &str,
+) -> Result<&'set AuthorizedControlRun<'admission>, Unevaluable> {
+    let control_ref = ControlRef::new(binding, detector);
+    let mut matching = runs.iter().filter(|run| run.run().control == detector);
+    let run = matching
+        .next()
+        .ok_or_else(|| Unevaluable::MissingControlRun(control_ref.clone()))?;
+    if matching.next().is_some() {
+        return Err(Unevaluable::DuplicateControlRun(control_ref));
+    }
+    Ok(run)
+}
+
+pub(crate) fn validate_run(
+    subject: &EvaluationSubject,
+    binding: &PolicyBinding,
+    detector_id: &str,
+    detector: &DetectorSpec,
+    admitted: &AuthorizedControlRun<'_>,
+) -> Result<(), Unevaluable> {
+    let run = admitted.run();
+    let mismatch = |axis| Unevaluable::ControlBindingMismatch {
+        control: ControlRef::new(binding, detector_id),
+        axis,
+    };
+    if admitted.institution() != &subject.institution {
+        return Err(mismatch(EvidenceAxis::Institution));
+    }
+    if admitted.workspace() != &subject.workspace {
+        return Err(mismatch(EvidenceAxis::Workspace));
+    }
+    if admitted.valid_at() != subject.at {
+        return Err(mismatch(EvidenceAxis::AuthorityTime));
+    }
+    if admitted.producer() == &subject.principal {
+        return Err(mismatch(EvidenceAxis::ProducerIndependence));
+    }
+    if run.control_version != detector.control_version {
+        return Err(mismatch(EvidenceAxis::ControlVersion));
+    }
+    if run.configuration_digest != detector.configuration_digest {
+        return Err(mismatch(EvidenceAxis::Configuration));
+    }
+    if run.input_digest != subject.intent_digest {
+        return Err(mismatch(EvidenceAxis::Input));
+    }
+    if run.subject != subject.subject {
+        return Err(mismatch(EvidenceAxis::Subject));
+    }
+    if run.policy != subject.bundle {
+        return Err(mismatch(EvidenceAxis::PolicyBundle));
+    }
+    if run.policy_digest != subject.policy_digest {
+        return Err(mismatch(EvidenceAxis::PolicyDigest));
+    }
+    if run.population != subject.population {
+        return Err(mismatch(EvidenceAxis::Population));
+    }
+    if run.mediation_path != detector.mediation_path {
+        return Err(mismatch(EvidenceAxis::MediationPath));
+    }
+    Ok(())
+}
+
+fn normalize_result(
+    binding: &PolicyBinding,
+    detector: &str,
+    admitted: &AuthorizedControlRun<'_>,
+) -> Result<bool, Unevaluable> {
+    let run = admitted.run();
+    normalize_control_result(binding, detector, run.result, &run.coverage)
+}
+
+fn normalize_control_result(
+    binding: &PolicyBinding,
+    detector: &str,
+    result: ControlResult,
+    coverage: &Coverage,
+) -> Result<bool, Unevaluable> {
+    let control_ref = || ControlRef::new(binding, detector);
+    match result {
+        ControlResult::NotRun => return Err(Unevaluable::ControlNotRun(control_ref())),
+        ControlResult::Unavailable => {
+            return Err(Unevaluable::ControlUnavailable(control_ref()));
+        }
+        ControlResult::Unevaluable => {
+            return Err(Unevaluable::ControlUnevaluable(control_ref()));
+        }
+        ControlResult::UnexpectedlyEmpty => {
+            return Err(Unevaluable::ControlUnexpectedlyEmpty(control_ref()));
+        }
+        ControlResult::NotApplicable => {
+            return Err(Unevaluable::ControlNotApplicable(control_ref()));
+        }
+        ControlResult::Unresolved => {
+            return Err(Unevaluable::ControlUnresolved(control_ref()));
+        }
+        ControlResult::Clean | ControlResult::Violation => {}
+        _ => return Err(Unevaluable::UnsupportedControlResult(control_ref())),
+    }
+    if coverage.population == 0 {
+        return Err(Unevaluable::EmptyPopulation(control_ref()));
+    }
+    if coverage.observed == 0 {
+        return Err(Unevaluable::UnobservedPopulation(control_ref()));
+    }
+    if coverage.observed > coverage.population {
+        return Err(Unevaluable::InvalidCoverage {
+            control: control_ref(),
+            observed: coverage.observed,
+            population: coverage.population,
+        });
+    }
+    if result == ControlResult::Clean && !coverage.is_complete() {
+        return Err(Unevaluable::PartialCleanCoverage {
+            control: control_ref(),
+            observed: coverage.observed,
+            population: coverage.population,
+        });
+    }
+    Ok(result == ControlResult::Violation)
+}
+
+fn one_activation<'set, 'admission>(
+    activations: &'set [VerifiedActivation<'admission>],
+    binding: &PolicyBinding,
+    detector: &str,
+) -> Result<&'set VerifiedActivation<'admission>, Unevaluable> {
+    let control_ref = ControlRef::new(binding, detector);
+    let mut matching = activations
+        .iter()
+        .filter(|activation| activation.proof().control == detector);
+    let activation = matching
+        .next()
+        .ok_or_else(|| Unevaluable::MissingActivationProof(control_ref.clone()))?;
+    if matching.next().is_some() {
+        return Err(Unevaluable::DuplicateActivationProof(control_ref));
+    }
+    Ok(activation)
+}
+
+fn validate_activation(
+    subject: &EvaluationSubject,
+    binding: &PolicyBinding,
+    detector_id: &str,
+    detector: &DetectorSpec,
+    run: &AuthorizedControlRun<'_>,
+    activation: &VerifiedActivation<'_>,
+) -> Result<(), Unevaluable> {
+    let proof = activation.proof();
+    let mismatch = |axis| Unevaluable::ActivationBindingMismatch {
+        control: ControlRef::new(binding, detector_id),
+        axis,
+    };
+    if activation.institution() != &subject.institution {
+        return Err(mismatch(EvidenceAxis::Institution));
+    }
+    if activation.workspace() != &subject.workspace {
+        return Err(mismatch(EvidenceAxis::Workspace));
+    }
+    if activation.valid_at() != subject.at {
+        return Err(mismatch(EvidenceAxis::AuthorityTime));
+    }
+    if activation.verifier() == run.producer() || activation.verifier() == &subject.principal {
+        return Err(Unevaluable::SelfAttestedActivation(ControlRef::new(
+            binding,
+            detector_id,
+        )));
+    }
+    if proof.proved_at > run.run().started_at {
+        return Err(Unevaluable::ActivationAfterRun(ControlRef::new(
+            binding,
+            detector_id,
+        )));
+    }
+    if proof.control_version != detector.control_version {
+        return Err(mismatch(EvidenceAxis::ControlVersion));
+    }
+    if proof.configuration_digest != detector.configuration_digest {
+        return Err(mismatch(EvidenceAxis::Configuration));
+    }
+    if proof.policy != subject.bundle {
+        return Err(mismatch(EvidenceAxis::PolicyBundle));
+    }
+    if proof.policy_digest != subject.policy_digest {
+        return Err(mismatch(EvidenceAxis::PolicyDigest));
+    }
+    if proof.population != detector.calibration_population {
+        return Err(mismatch(EvidenceAxis::Population));
+    }
+    if proof.mediation_path != detector.mediation_path {
+        return Err(mismatch(EvidenceAxis::MediationPath));
+    }
+    Ok(())
+}
+
+fn exact_waiver<'set, 'admission>(
+    waivers: &'set [DelegatedWaiver<'admission>],
+    subject: &EvaluationSubject,
+    binding: &PolicyBinding,
+) -> Result<Option<&'set DelegatedWaiver<'admission>>, Unevaluable> {
+    let matching: Vec<_> = waivers
+        .iter()
+        .filter(|waiver| waiver.waiver().binding_id == binding.id)
+        .collect();
+    if matching.len() > 1 {
+        return Err(Unevaluable::DuplicateWaiver {
+            binding: binding.id.clone(),
+        });
+    }
+    let Some(waiver) = matching.first().copied() else {
+        return Ok(None);
+    };
+    let signed = waiver.waiver();
+    let mismatch = |axis| Unevaluable::WaiverBindingMismatch {
+        binding: binding.id.clone(),
+        axis,
+    };
+    if waiver.institution() != &subject.institution {
+        return Err(mismatch(EvidenceAxis::Institution));
+    }
+    if waiver.workspace() != &subject.workspace {
+        return Err(mismatch(EvidenceAxis::Workspace));
+    }
+    if waiver.valid_at() != subject.at {
+        return Err(mismatch(EvidenceAxis::AuthorityTime));
+    }
+    if signed.policy != subject.bundle {
+        return Err(mismatch(EvidenceAxis::PolicyBundle));
+    }
+    if signed.policy_digest != subject.policy_digest {
+        return Err(mismatch(EvidenceAxis::PolicyDigest));
+    }
+    if signed.subject != subject.subject {
+        return Err(mismatch(EvidenceAxis::Subject));
+    }
+    if signed.population != subject.population {
+        return Err(mismatch(EvidenceAxis::Population));
+    }
+    if signed.scope != binding.scope || !subject.scopes.contains(&signed.scope) {
+        return Err(mismatch(EvidenceAxis::Scope));
+    }
+    Ok(Some(waiver))
 }
 
 /// The rung a binding must have climbed before it may block at all.
-///
-/// Exposed so a caller can ask the question the evaluator answers implicitly:
-/// [`BindingAuthority`](crate::hardening::BindingAuthority) already refuses to
-/// pair a blocking consequence with a rung that does not authorise it, so by
-/// the time a binding exists this is settled. It is here for the reader who
-/// wants to know which rung that is without reading the ladder.
 pub const fn blocking_requires_at_least() -> HardeningState {
     HardeningState::Enforced
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hardening::{BindingAuthority, HardeningLadder};
-
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture whose fixed timestamp cannot parse is a broken test, not a finding"
-    )]
-    fn now() -> Timestamp {
-        "2026-08-21T00:00:00Z"
-            .parse()
-            .expect("the fixture timestamp is valid RFC 3339")
-    }
-
-    const SCOPE: &str = "institution:production";
-
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture that cannot climb its own ladder is a broken test"
-    )]
-    fn authority(consequence: Consequence) -> BindingAuthority {
-        use crate::hardening::HardeningState;
-        let mut ladder = HardeningLadder::new();
-        for rung in [
-            HardeningState::Observed,
-            HardeningState::Proposed,
-            HardeningState::Approved,
-            HardeningState::Shadow,
-            HardeningState::Calibrated,
-            HardeningState::Advisory,
-            HardeningState::Enforced,
-        ] {
-            ladder.advance(rung).expect("the full climb is legal");
-        }
-        BindingAuthority::new(ladder, consequence).expect("an enforced binding may apply any")
-    }
-
-    fn binding(id: &str, consequence: Consequence, detectors: &[&str]) -> PolicyBinding {
-        PolicyBinding {
-            id: id.to_string(),
-            clause_id: "clause:approved-change".to_string(),
-            detector_ids: detectors.iter().map(|d| (*d).to_string()).collect(),
-            scope: SCOPE.to_string(),
-            authority: authority(consequence),
-        }
-    }
-
-    fn detector(id: &str, class: EvidenceClass, calibrated: bool) -> DetectorSpec {
-        DetectorSpec {
-            id: id.to_string(),
-            evidence_class: class,
-            known_blind_spots: Vec::new(),
-            adversarially_calibrated: calibrated,
-        }
-    }
-
-    fn declared(specs: &[DetectorSpec]) -> BTreeMap<String, DetectorSpec> {
-        specs
-            .iter()
-            .map(|spec| (spec.id.clone(), spec.clone()))
-            .collect()
-    }
-
-    fn subject() -> EvaluationSubject {
-        EvaluationSubject {
-            bundle: PolicyBundleId::new(),
-            policy_digest: Digest::blake3(b"policy"),
-            intent_digest: Digest::blake3(b"intent"),
-            principal: PrincipalId::new(),
-            scopes: BTreeSet::from([SCOPE.to_string()]),
-            at: now(),
-        }
-    }
-
-    fn waiver(id: &str, binding_id: &str, scope: &str, expires: &str) -> Waiver {
-        Waiver {
-            id: id.to_string(),
-            binding_id: binding_id.to_string(),
-            scope: scope.to_string(),
-            reason: "owner-approved maintenance".to_string(),
-            issuer: PrincipalId::new(),
-            expires_at_rfc3339: expires.to_string(),
-        }
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture that does not evaluate is a broken test, not a finding"
-    )]
-    #[test]
-    fn a_blocking_binding_denies_and_an_advisory_one_does_not() {
-        let substance = detector("detector:receipt", EvidenceClass::Substance, true);
-        let specs = declared(&[substance]);
-
-        let denied = evaluate(
-            &subject(),
-            &[binding("b:deny", Consequence::Deny, &["detector:receipt"])],
-            &specs,
-            &[],
-        )
-        .expect("the fixture evaluates");
-        assert!(!denied.allowed);
-        assert_eq!(denied.binding_ids, vec!["b:deny".to_string()]);
-
-        let advised = evaluate(
-            &subject(),
-            &[binding(
-                "b:advise",
-                Consequence::Advisory,
-                &["detector:receipt"],
-            )],
-            &specs,
-            &[],
-        )
-        .expect("the fixture evaluates");
-        assert!(advised.allowed, "advice does not deny");
-        assert_eq!(
-            advised.binding_ids,
-            vec!["b:advise".to_string()],
-            "an advisory binding still contributed to the decision"
-        );
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture that does not evaluate is a broken test, not a finding"
-    )]
-    #[test]
-    fn a_binding_outside_the_subjects_scope_does_not_contribute() {
-        let specs = declared(&[detector("detector:receipt", EvidenceClass::Substance, true)]);
-        let mut elsewhere = binding("b:elsewhere", Consequence::Deny, &["detector:receipt"]);
-        elsewhere.scope = "institution:staging".to_string();
-
-        let decision = evaluate(&subject(), &[elsewhere], &specs, &[]).expect("evaluates");
-        assert!(decision.allowed);
-        assert!(decision.binding_ids.is_empty());
-    }
-
-    #[test]
-    fn a_heuristic_detector_may_advise_but_not_block() {
-        // `AGENTS.md`: do not make a heuristic blocking without explicit
-        // detector assurance and calibration. The binding is otherwise
-        // well-formed and fully climbed -- what it lacks is evidence worth
-        // blocking on.
-        let specs = declared(&[detector("detector:guess", EvidenceClass::Heuristic, true)]);
-
-        assert_eq!(
-            evaluate(
-                &subject(),
-                &[binding("b:guess", Consequence::Deny, &["detector:guess"])],
-                &specs,
-                &[],
-            ),
-            Err(Unevaluable::HeuristicBlocking {
-                binding: "b:guess".to_string(),
-                detector: "detector:guess".to_string(),
-            })
-        );
-        assert!(
-            evaluate(
-                &subject(),
-                &[binding(
-                    "b:guess",
-                    Consequence::Advisory,
-                    &["detector:guess"]
-                )],
-                &specs,
-                &[],
-            )
-            .is_ok(),
-            "the same detector may advise"
-        );
-    }
-
-    #[test]
-    fn a_proxy_must_be_calibrated_before_it_may_block() {
-        // A structural proxy is not a guess and not the property itself. What
-        // makes it admissible for blocking is having been run against
-        // adversarial fixtures, which is exactly what the flag records.
-        for (calibrated, blocks) in [(false, false), (true, true)] {
-            let specs = declared(&[detector(
-                "detector:proxy",
-                EvidenceClass::StructuralProxy,
-                calibrated,
-            )]);
-            let result = evaluate(
-                &subject(),
-                &[binding("b:proxy", Consequence::Deny, &["detector:proxy"])],
-                &specs,
-                &[],
-            );
-            assert_eq!(
-                result.is_ok(),
-                blocks,
-                "calibrated={calibrated} should block={blocks}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_binding_naming_an_undeclared_detector_fails_closed() {
-        assert_eq!(
-            evaluate(
-                &subject(),
-                &[binding(
-                    "b:orphan",
-                    Consequence::Advisory,
-                    &["detector:absent"]
-                )],
-                &BTreeMap::new(),
-                &[],
-            ),
-            Err(Unevaluable::UnknownDetector {
-                binding: "b:orphan".to_string(),
-                detector: "detector:absent".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn a_binding_with_no_detector_fails_closed() {
-        // A consequence resting on no evidence source is an assertion rather
-        // than a finding.
-        assert_eq!(
-            evaluate(
-                &subject(),
-                &[binding("b:bare", Consequence::Advisory, &[])],
-                &BTreeMap::new(),
-                &[],
-            ),
-            Err(Unevaluable::NoDetector {
-                binding: "b:bare".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn nothing_is_decided_from_a_partial_evaluation() {
-        // The permissive-answer-from-stricter-parts failure. One evaluable
-        // denying binding and one unevaluable binding: returning the first
-        // alone would be a decision that ignored an input it could not read.
-        let specs = declared(&[detector("detector:receipt", EvidenceClass::Substance, true)]);
-        let result = evaluate(
-            &subject(),
-            &[
-                binding("b:deny", Consequence::Deny, &["detector:receipt"]),
-                binding("b:orphan", Consequence::Advisory, &["detector:absent"]),
-            ],
-            &specs,
-            &[],
-        );
-        assert!(
-            matches!(result, Err(Unevaluable::UnknownDetector { .. })),
-            "an unevaluable input must abort the whole decision, got {result:?}"
-        );
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture that does not evaluate is a broken test, not a finding"
-    )]
-    #[test]
-    fn a_live_waiver_excuses_and_an_expired_one_does_not() {
-        let specs = declared(&[detector("detector:receipt", EvidenceClass::Substance, true)]);
-        let bindings = [binding("b:deny", Consequence::Deny, &["detector:receipt"])];
-
-        let live = evaluate(
-            &subject(),
-            &bindings,
-            &specs,
-            &[waiver("w:1", "b:deny", SCOPE, "2026-08-22T00:00:00Z")],
-        )
-        .expect("evaluates");
-        assert!(live.allowed, "a live waiver excuses the binding");
-
-        let expired = evaluate(
-            &subject(),
-            &bindings,
-            &specs,
-            &[waiver("w:1", "b:deny", SCOPE, "2026-08-20T00:00:00Z")],
-        )
-        .expect("evaluates");
-        assert!(!expired.allowed, "an expired waiver excuses nothing");
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture that does not evaluate is a broken test, not a finding"
-    )]
-    #[test]
-    fn a_waiver_for_another_scope_or_an_unreadable_expiry_excuses_nothing() {
-        let specs = declared(&[detector("detector:receipt", EvidenceClass::Substance, true)]);
-        let bindings = [binding("b:deny", Consequence::Deny, &["detector:receipt"])];
-
-        for bad in [
-            waiver(
-                "w:scope",
-                "b:deny",
-                "institution:staging",
-                "2026-08-22T00:00:00Z",
-            ),
-            waiver("w:unreadable", "b:deny", SCOPE, "next Tuesday"),
-        ] {
-            let decision = evaluate(&subject(), &bindings, &specs, std::slice::from_ref(&bad))
-                .expect("evaluates");
-            assert!(!decision.allowed, "{} must not excuse the binding", bad.id);
-        }
-    }
-
-    #[expect(
-        clippy::expect_used,
-        reason = "a fixture that does not evaluate is a broken test, not a finding"
-    )]
-    #[test]
-    fn an_expiry_is_compared_as_an_instant_rather_than_as_text() {
-        // `2026-08-22T00:00:00Z` and `2026-08-22T00:00:00.000Z` are one instant
-        // and two strings. Comparing text would make a waiver live or expired
-        // depending on which spelling was stored.
-        let specs = declared(&[detector("detector:receipt", EvidenceClass::Substance, true)]);
-        let bindings = [binding("b:deny", Consequence::Deny, &["detector:receipt"])];
-
-        for spelling in ["2026-08-22T00:00:00Z", "2026-08-22T00:00:00.000Z"] {
-            let decision = evaluate(
-                &subject(),
-                &bindings,
-                &specs,
-                &[waiver("w:1", "b:deny", SCOPE, spelling)],
-            )
-            .expect("evaluates");
-            assert!(decision.allowed, "{spelling} names a live instant");
-        }
-    }
-
-    #[test]
-    fn every_unevaluable_variant_names_the_test_that_reaches_it() {
-        let reached_by = |reason: &Unevaluable| -> &'static str {
-            match reason {
-                Unevaluable::UnknownDetector { .. } => {
-                    "a_binding_naming_an_undeclared_detector_fails_closed"
-                }
-                Unevaluable::NoDetector { .. } => "a_binding_with_no_detector_fails_closed",
-                Unevaluable::HeuristicBlocking { .. } => {
-                    "a_heuristic_detector_may_advise_but_not_block"
-                }
-            }
-        };
-        assert_eq!(
-            reached_by(&Unevaluable::NoDetector {
-                binding: String::new()
-            }),
-            "a_binding_with_no_detector_fails_closed"
-        );
-    }
 }

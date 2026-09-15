@@ -26,8 +26,9 @@ Treat this repository as a specification-first greenfield system.
 - Define the generation manifest, canonical specialization inputs, and reproducibility contract.
 - Define execution-resource requirements, routing decisions, escalation, and their binding into authorization.
 - Assign every `POL-A` through `POL-L` assurance claim a mechanism, evidence owner, adversarial test, residual risk, and falsifier.
-- Assign `POL-M` through `POL-Q` to their named owning phase; do not claim them from prose or pull
-  them into the first commissioning proof merely because their contracts are documented.
+- Include `POL-N` through `POL-Q` in the complete commissioning and learning package, per ADR 0021.
+  Preserve the broader disconnected-delivery owner for `POL-M`; direct durable ambiguity and replay
+  integrity already belong to the first package. Claim registration alone supplies no proof.
 
 ## Do not do yet
 
@@ -43,6 +44,6 @@ Treat this repository as a specification-first greenfield system.
 
 ## Exit criteria for starter phase
 
-Politeia is sufficient to commission Politeia: the team can demonstrate the bounded first vertical slice under adversarial tests, produce artifact-bound receipts for `POL-A` through `POL-L`, and explain every trusted component required to make the demonstration valid.
+Politeia is sufficient to commission Politeia: the team can install and demonstrate the complete package through its public Rust API, administrative CLI, local service, and PostgreSQL in two separate synthetic reference institutions. Adversarial evidence covers `POL-A` through `POL-L` and `POL-N` through `POL-Q`, including broad approved knowledge, authorized context, feedback and approved corrections. Every trusted component and each residual limitation is explained. Isolated unit fixtures cannot establish clean installation, process restart, key custody, network independence, or replacement-maintainer ownership.
 
 A replacement maintainer can use only the public source, preserved client-owned workspace, and newly delegated client authority to derive and release the next generation. Revoking the original commissioner does not interrupt the current operational generation, and no commissioner- or vendor-owned control plane is required for continued operation or an authorized local update.

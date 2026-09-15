@@ -3,164 +3,273 @@
   "claims": [
     {
       "exercised_by": [
-        "one_bounded_path_runs_end_to_end"
+        "one_bounded_path_runs_end_to_end",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "a commissioning run from the public distribution that cannot complete without an artifact absent from it",
       "id": "POL-A",
       "mechanisms": [
-        "politeia_core::reconnaissance",
-        "politeia_core::knowledge"
+        "politeiad::service",
+        "politeiad::service_generation",
+        "politeiad::tests::commissioning_package"
       ],
-      "residual_risk": "the tree can show no code path requires private infrastructure; it cannot show that no operational step does",
-      "still_needs": "a real deployment commissioned and handed off from the public distribution; no in-memory test can show the absence of private infrastructure",
+      "residual_risk": "the package runs synthetic Linux CLI/daemon installations against real PostgreSQL; real-institution key custody and network perimeter remain outside its harness",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "a commissioning step silently requires a tool, credential, or service only the commissioner holds, discovered when a client attempts it alone"
     },
     {
       "exercised_by": [
         "foreign_material_is_refused_at_every_hop",
         "private_material_does_not_reach_a_commissioner_machine_by_default",
-        "an_entry_names_its_value_rather_than_holding_it"
+        "an_entry_names_its_value_rather_than_holding_it",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "material of a non-public class observed at a sink the workspace never declared",
       "id": "POL-B",
       "mechanisms": [
         "politeia_core::institution::InstitutionBoundary",
-        "politeia_core::outbox",
-        "politeia_core::state"
+        "politeia_storage::PostgresStorage",
+        "politeiad::tests::commissioning_package"
       ],
-      "residual_risk": "the boundary governs what the code sends; it does not govern what an operator copies out of band",
-      "still_needs": "deployment evidence that the trust domain holds in a real environment, which a process-local boundary cannot demonstrate",
+      "residual_risk": "the package uses two synthetic Linux installations and PostgreSQL, not a real institution's key custody, network perimeter, or operator behavior",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "material reaches a sink nobody classified, or a default admits what no decision did"
     },
     {
       "exercised_by": [
-        "handoff_requires_admitted_client_evidence_after_revocation"
+        "handoff_requires_admitted_client_evidence_after_revocation",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "an operational generation that stops serving after its commissioner is revoked",
       "id": "POL-C",
       "mechanisms": [
-        "politeia_evidence::HandoffReceipt"
+        "politeia_evidence::HandoffReceipt",
+        "politeiad::service_revocation",
+        "politeiad::tests::package_process::handoff"
       ],
-      "residual_risk": "revocation is forward-only over records; nothing here holds a live process open across one",
-      "still_needs": "a revocation performed against a running generation, showing it keeps running",
+      "residual_risk": "the package checks signed revocation and replacement over a synthetic installation; it does not keep a production generation open across a real operator handoff",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "revocation implemented as deletion, taking the running generation down with the authority that created it"
     },
     {
       "exercised_by": [
         "identical_inputs_produce_identical_identity_and_bytes",
-        "declared_fields_may_vary_and_others_may_not"
+        "declared_fields_may_vary_and_others_may_not",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "two derivations from identical inputs producing different bytes with no declaration covering the difference",
       "id": "POL-D",
       "mechanisms": [
         "politeia_core::generation::RuntimeGeneration",
-        "politeia_core::activation"
+        "politeiad::service_generation",
+        "politeiad::artifacts"
       ],
-      "residual_risk": "identity is a function of inputs here; the specializer is a digest rather than something this repository builds",
-      "still_needs": "a specializer that builds an artifact; the kernel proves identity is a function of inputs, not that a build is",
+      "residual_risk": "the package signs, derives, verifies, reproduces, activates, and rolls back approved executable inputs; it does not independently rebuild a compiler or specializer",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "a build varies in a field nobody declared and is activated because the variance was never compared"
     },
     {
       "exercised_by": [
         "hard_filtering_precedes_ordered_locality_and_cost_preferences",
-        "hard_locality_rejects_a_cheaper_remote_resource"
+        "hard_locality_rejects_a_cheaper_remote_resource",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "a routing decision selecting a resource that fails a hard constraint",
       "id": "POL-E",
       "mechanisms": [
-        "politeia_runtime::routing"
+        "politeia_runtime::routing",
+        "politeiad::service_operation::admit_operational_submission",
+        "politeiad::tests::package_support::operational"
       ],
-      "residual_risk": "tested over fixture resources; no real capability evidence is admitted yet",
-      "still_needs": "two real execution resources with evidence-backed capability profiles",
+      "residual_risk": "the package admits a local deterministic resource and rejects a cheaper ineligible remote fixture; it does not qualify arbitrary external providers",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "a cheaper resource is selected because the ordering ran before the filter"
     },
     {
       "exercised_by": [
-        "the_commissioner_rule_applies_to_locality_rather_than_to_a_named_sink"
+        "the_commissioner_rule_applies_to_locality_rather_than_to_a_named_sink",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "an assignment or crossing reaching a locality the policy forbids for that data class",
       "id": "POL-F",
       "mechanisms": [
-        "politeia_core::ExecutionLocality",
-        "politeia_core::outbox"
+        "politeia_runtime::Dispatcher",
+        "politeia_storage::PostgresAuthorizationLedger",
+        "politeiad::service_operation"
       ],
-      "residual_risk": "the outbox governs egress and routing governs assignment; nothing yet joins them on one operation",
-      "still_needs": "an inference boundary that exists to be forbidden",
+      "residual_risk": "the package mediates its bounded local operation and outbox through PostgreSQL; it is not arbitrary model or provider qualification proof",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "locality is treated as a preference in a case where policy did not permit every candidate locality"
     },
     {
       "exercised_by": [
         "deterministic_requirement_never_selects_an_available_model",
-        "missing_hard_capability_escalates_instead_of_selecting_closest"
+        "missing_hard_capability_escalates_instead_of_selecting_closest",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "a fully deterministic requirement satisfied by a model while a verified tool was eligible",
       "id": "POL-G",
       "mechanisms": [
-        "politeia_runtime::routing"
+        "politeia_runtime::routing",
+        "politeiad::service_operation::OperationalExecutionRegistry",
+        "politeiad::tests::package_support::operational"
       ],
-      "residual_risk": "proven over declared requirements; no real deterministic tool is registered to prefer",
-      "still_needs": "a deterministic tool and an available model to prefer it over",
+      "residual_risk": "the package selects an installed local deterministic tool over a cheaper ineligible remote fixture; it does not prove arbitrary model/provider qualification",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "a model is available and cheaper, and a deterministic requirement quietly degrades to a preference"
     },
     {
       "exercised_by": [
-        "a_proxy_must_be_calibrated_before_it_may_block",
-        "a_self_reported_verification_cannot_be_attested",
-        "self_verified_or_stale_capability_evidence_is_ineligible"
+        "missing_or_self_attested_activation_cannot_support_blocking",
+        "stale_subject_and_calibration_population_fail_closed",
+        "verifier_cannot_attest_its_own_work",
+        "self_verified_or_stale_capability_evidence_is_ineligible",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "a binding blocking on an uncalibrated proxy, or a calibration widening a delegation",
       "id": "POL-H",
       "mechanisms": [
-        "politeia_policy::hardening",
-        "politeia_policy::evaluate"
+        "politeia_policy::operational",
+        "politeia_evidence::assurance",
+        "politeiad::service_operation::admit_operational_submission"
       ],
-      "residual_risk": "calibration is a declared boolean; nothing here verifies the adversarial fixtures behind it",
-      "still_needs": "calibration performed against real adversarial fixtures rather than declared",
+      "residual_risk": "the package preserves signed control, activation, and calibration evidence around a public detector; it does not establish arbitrary detector or provider qualification",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "calibration is read as assurance, letting a heuristic acquire blocking authority"
     },
     {
       "exercised_by": [
         "foreign_material_is_refused_at_every_hop",
-        "cross_client_workspace_substitution_is_rejected"
+        "cross_client_workspace_substitution_is_rejected",
+        "two_institution_installations_start_disjoint_daemons"
       ],
       "falsifier": "a generation whose inputs digest covers material from another workspace",
       "id": "POL-I",
       "mechanisms": [
-        "politeia_core::institution::InstitutionBoundary"
+        "politeia_core::institution::InstitutionBoundary",
+        "politeiad::transport",
+        "politeiad::tests::commissioning_package"
       ],
-      "residual_risk": "enforced over typed records; a filesystem or build cache sits outside what these types see",
-      "still_needs": "two institutions built from one public core, showing neither is an input to the other",
+      "residual_risk": "two synthetic Linux CLI/daemon installations exercise disjoint workspaces; real-institution key custody and network separation remain outside the harness",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "a shared fixture, cache, or default carries one client's material into another's build"
     },
     {
-      "exercised_by": [],
+      "exercised_by": [
+        "two_institution_installations_start_disjoint_daemons"
+      ],
       "falsifier": "a recommissioning that cannot complete without the original commissioner's accounts or systems",
       "id": "POL-J",
       "mechanisms": [
-        "politeia_evidence::HandoffReceipt"
+        "politeia_evidence::HandoffReceipt",
+        "politeiad::tests::package_process::handoff"
       ],
-      "residual_risk": "nothing in the tree bears on this claim",
-      "still_needs": "a replacement maintainer recommissioning from preserved inputs; nothing in the tree bears on this yet",
+      "residual_risk": "the synthetic replacement path proves preserved signed inputs can be re-admitted; it does not prove a real maintainer's accounts, custody, or operating procedures",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "an implicit dependency on the original commissioner's identity, invisible until they are gone"
     },
     {
-      "exercised_by": [],
+      "exercised_by": [
+        "two_institution_installations_start_disjoint_daemons"
+      ],
       "falsifier": "an operation that fails when institution-external infrastructure is unreachable",
       "id": "POL-K",
-      "mechanisms": [],
-      "residual_risk": "an absence cannot be shown by a type; only a deployment can fail to need something",
-      "still_needs": "a deployment proving no required external dependency; an absence cannot be shown by a type",
+      "mechanisms": [
+        "politeiad::transport",
+        "politeiad::service_operation",
+        "politeiad::tests::commissioning_package"
+      ],
+      "residual_risk": "the package uses synthetic local Linux CLI/daemon and PostgreSQL dependencies; it cannot establish the absence of every deployment dependency",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "a hosted service becomes load-bearing by convenience rather than by decision"
     },
     {
-      "exercised_by": [],
+      "exercised_by": [
+        "two_institution_installations_start_disjoint_daemons"
+      ],
       "falsifier": "a generation that stops serving, or an authorized local update that fails, while disconnected",
       "id": "POL-L",
-      "mechanisms": [],
-      "residual_risk": "no control plane exists to disconnect",
-      "still_needs": "a control plane to disconnect",
+      "mechanisms": [
+        "politeiad::service_generation",
+        "politeiad::service_operation::ActiveOperationalRegistry",
+        "politeia_storage::PostgresStorage"
+      ],
+      "residual_risk": "the package serves an activated local generation from retained artifacts and PostgreSQL; a real institution's control-plane and network-failure acceptance remains unexercised",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
       "threat": "activation or policy refresh reaches out at run time, making the control plane load-bearing"
+    },
+    {
+      "exercised_by": [],
+      "falsifier": "an overlapping disconnected effect is retried or marked not executed without an exact target-side receipt",
+      "id": "POL-M",
+      "mechanisms": [],
+      "residual_risk": "the first package has no disconnected-delivery witness; its durable admission and ambiguous-effect protections do not discharge this broader claim",
+      "still_needs": "the separate disconnected-delivery proof package, then a fresh assurance record binding exact source, workspace, policy, generation, harness, and evidence identities",
+      "threat": "a disconnected overlapping effect is treated as not executed or replayed without target-side outcome evidence"
+    },
+    {
+      "exercised_by": [
+        "snapshot_captures_only_explicit_members",
+        "two_institution_installations_start_disjoint_daemons"
+      ],
+      "falsifier": "a selected context output whose source identity is absent from the authoritative membership/manifest closure",
+      "id": "POL-N",
+      "mechanisms": [
+        "politeiad::source",
+        "politeiad::service_learning",
+        "politeiad::tests::package_process::learning"
+      ],
+      "residual_risk": "the package checks bounded synthetic source membership and selected-source output identity; it does not independently rebuild a compiler or specializer",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
+      "threat": "an eligible source object is omitted, or a selected member is projected without its attributable capture and observation closure"
+    },
+    {
+      "exercised_by": [
+        "missing_or_self_attested_activation_cannot_support_blocking",
+        "two_institution_installations_start_disjoint_daemons"
+      ],
+      "falsifier": "an enforced clean decision supported by a control result other than clean with artifact-bound activation and coverage",
+      "id": "POL-O",
+      "mechanisms": [
+        "politeia_evidence::assurance",
+        "politeia_policy::operational",
+        "politeiad::service_operation"
+      ],
+      "residual_risk": "the package carries real signed detector and activation records through its synthetic local mediation path; arbitrary detector/provider qualification remains unproven",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
+      "threat": "a forged, stale, uncovered, or non-clean control result is treated as clean enforcement evidence"
+    },
+    {
+      "exercised_by": [
+        "correction_view_preserves_original_digest_and_surfaces_ambiguity",
+        "two_institution_installations_start_disjoint_daemons"
+      ],
+      "falsifier": "a supersession whose prior bytes/digest disappear or whose current projection cannot be reproduced from admitted relations",
+      "id": "POL-P",
+      "mechanisms": [
+        "politeia_evidence::assessment",
+        "politeiad::service_learning::correction_view",
+        "politeiad::tests::package_process::learning"
+      ],
+      "residual_risk": "the package owner-approves a broad context correction and preserves the former source bytes; real-institution authority custody remains outside the harness",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
+      "threat": "a correction overwrites original approved bytes, or lets an unapproved relation silently become current"
+    },
+    {
+      "exercised_by": [
+        "two_institution_installations_start_disjoint_daemons"
+      ],
+      "falsifier": "a highly relevant unauthorized or archived source displaces an eligible current source for a current-state request",
+      "id": "POL-Q",
+      "mechanisms": [
+        "politeiad::service_learning::ContextDisclosurePort",
+        "politeia_runtime::Dispatcher",
+        "politeia_storage::PostgresAuthorizationLedger"
+      ],
+      "residual_risk": "the package exercises owner-approved broad context and correction through signed requests and a real PostgreSQL ledger; its institution and source material are synthetic",
+      "still_needs": "a fresh passing package assurance record binding exact source, workspace, policy, generation, harness, and evidence identities; deployment acceptance for a real institution",
+      "threat": "relevance ranking admits unauthorized, stale, or archival source content before policy and current-state eligibility decide the population"
     }
   ],
-  "not_an_assurance_record": "docs/12-ASSURANCE_CASE.md requires an assurance record to bind the exact identities applicable to its claim, and states that a document, a test name, a green CI run, or an actor's self-certification is not itself proof. This register is a document naming test names. It records what exists to be exercised and what each claim still needs; it proves nothing."
+  "not_an_assurance_record": "docs/12-ASSURANCE_CASE.md requires an assurance record to bind the exact identities applicable to its claim, and states that a document, a test name, a green CI run, or an actor's self-certification is not itself proof. This register is a document naming test names. A cited name only acknowledges an executable witness exists; it does not report that any current run passes. It records what exists to be exercised and what each claim still needs; it proves nothing."
 }

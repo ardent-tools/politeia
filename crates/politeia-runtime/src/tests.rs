@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use jiff::SignedDuration;
 use politeia_core::{
     CapabilityProfileId, CapabilityVerificationId, DataClass, DelegationId, EvidenceId,
-    ExecutionResourceId, OperationId, ResourceBudget, RoutingDecisionId,
-    institution::TrustDomainId,
+    ExecutionResourceId, InstitutionId, InstitutionWorkspaceId, OperationId, ResourceBudget,
+    RoutingDecisionId, institution::TrustDomainId,
 };
 
 use super::routing::{
@@ -13,6 +13,7 @@ use super::routing::{
     SoftPreference,
 };
 use super::*;
+use politeia_policy::evaluate::{EvaluationEvidence, EvaluationSubject, evaluate};
 
 #[derive(Debug)]
 struct TestError;
@@ -38,6 +39,8 @@ enum DecisionFault {
     PolicyDigest,
     IntentDigest,
     Deny,
+    ControlRuns,
+    Reasons,
 }
 
 impl PolicyDecisionPoint for AllowAll {
@@ -54,15 +57,25 @@ impl PolicyDecisionPoint for AllowAll {
         let intent_digest = intent
             .digest()
             .expect("the typed fixture intent must always encode");
-        let mut decision = PolicyDecision {
+        let subject = EvaluationSubject {
+            institution: InstitutionId::new(),
+            workspace: InstitutionWorkspaceId::new(),
             bundle: self.bundle.clone(),
             policy_digest: self.policy_digest.clone(),
-            intent_digest,
+            intent_digest: intent_digest.clone(),
+            subject: intent_digest.clone(),
+            population: Digest::blake3(b"fixture policy population"),
             principal: intent.principal.clone(),
-            allowed: true,
-            binding_ids: vec!["fixture.allow".to_string()],
-            reasons: vec!["synthetic fixture policy".to_string()],
+            scopes: BTreeSet::new(),
+            at: Timestamp::now(),
         };
+        let mut decision = evaluate(
+            &subject,
+            &[],
+            &BTreeMap::new(),
+            &EvaluationEvidence::new(&[], &[], &[]),
+        )
+        .expect("the canonical empty fixture policy must evaluate");
         match self.fault {
             Some(DecisionFault::Principal) => decision.principal = PrincipalId::new(),
             Some(DecisionFault::Bundle) => decision.bundle = PolicyBundleId::new(),
@@ -73,6 +86,8 @@ impl PolicyDecisionPoint for AllowAll {
                 decision.intent_digest = Digest::blake3(b"wrong intent");
             }
             Some(DecisionFault::Deny) => decision.allowed = false,
+            Some(DecisionFault::ControlRuns) => decision.control_runs.push(EvidenceId::new()),
+            Some(DecisionFault::Reasons) => decision.reasons.push("mutated reason".to_string()),
             None => {}
         }
         std::future::ready(Ok(decision))
@@ -258,6 +273,7 @@ fn fixture() -> Fixture {
     let adapter = AdapterId::new();
     let intent = OperationIntent {
         principal: principal.clone(),
+        input_digest: Digest::blake3(b"fixture-input"),
         delegation_chain: vec![delegation(
             principal,
             now + SignedDuration::from_hours(1),

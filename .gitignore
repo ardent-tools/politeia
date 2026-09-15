@@ -1,4 +1,5 @@
 /target
+/.kanon-artifacts/
 /.idea
 /.vscode
 *.log

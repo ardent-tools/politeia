@@ -6,7 +6,9 @@ Provide a harness-independent institutional control plane for human and machine 
 
 The control plane makes the organization's operating model explicit enough that machine workers can discover what matters, obtain only the authority they need, act through mediated effects, provide evidence for consequential transitions, and improve the institution's machine-readable projections without silently changing its constitutional commitments.
 
-Politeia enters through institutional friction: repeated corrections, uncertain ownership, incompatible procedures, costly coordination, and work whose correctness depends too heavily on individual judgment. It turns that friction into provenance-bearing observations, approved structure, and enforceable contracts.
+Politeia learns an institution through authorized discovery of its work, knowledge, responsibilities, systems, and commitments. Repeated corrections, uncertain ownership, incompatible procedures, and costly coordination supply useful observations. Knowledge may be approved before a specific operation needs it; a fact does not need to justify an immediate effect to belong in the institutional model.
+
+The institutional model can be broad while each reconnaissance grant, context projection, and effect remains narrow. Observations become candidate claims with explicit conflict and missing information. Authenticated approval establishes institutional truth; context, discovery, policy, and verification derive from that truth. Work then produces evidence and feedback from which proposed corrections can be reviewed and approved. This learning loop is a first-delivery requirement, and it never supplies its own authority.
 
 ## Success criteria
 

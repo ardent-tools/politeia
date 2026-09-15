@@ -40,6 +40,7 @@ const GENERATED_EFFECTS: &[Effect] = &[
     Effect::ReadSecret,
     Effect::WriteSecret,
     Effect::ReadExternalSystem,
+    Effect::ReadInstitutionalContext,
     Effect::WriteExternalSystem,
     Effect::CreateArtifact,
 ];

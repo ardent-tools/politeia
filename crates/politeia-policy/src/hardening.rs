@@ -24,10 +24,9 @@ use crate::Consequence;
 /// A rung of the progressive-hardening ladder.
 ///
 /// The ladder describes a *binding's* authority, not a detector's quality.
-/// `Calibrated` here means the binding has been calibrated in shadow; a
-/// detector's own calibration is [`crate::DetectorSpec`]'s
-/// `adversarially_calibrated`, which is a different fact about a different
-/// subject and deliberately no longer shares the word.
+/// `Calibrated` here means the binding has been calibrated in shadow; evidence
+/// that an exact detector configuration can fire is carried separately by an
+/// admitted [`politeia_evidence::assurance::ActivationProof`].
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]

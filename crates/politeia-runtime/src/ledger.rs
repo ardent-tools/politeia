@@ -1,13 +1,156 @@
 //! Shared authorization reservation and replay state.
 
-use std::{collections::BTreeMap, future::Future, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    sync::Arc,
+};
 
 use jiff::Timestamp;
-use politeia_core::{BudgetReservationId, DelegationId, Digest, ResourceBudget};
-use serde::Serialize;
+use politeia_core::{
+    AdapterId, BudgetReservationId, DelegationId, Digest, ResourceBudget, RuntimeGenerationId,
+};
+use politeia_policy::DecisionPurpose;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use super::{RuntimeError, lease_expired, replay_detected};
+
+/// Concrete effect-port identity used when comparing productive effects.
+///
+/// The adapter and audience are both supplied by the installed effect port.
+/// They name the bounded runtime target; constructing this value grants no
+/// authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectTarget {
+    adapter: AdapterId,
+    audience: String,
+}
+
+impl EffectTarget {
+    pub(crate) fn new(adapter: AdapterId, audience: String) -> Self {
+        Self { adapter, audience }
+    }
+
+    /// Adapter implementing the concrete effect port.
+    pub fn adapter(&self) -> &AdapterId {
+        &self.adapter
+    }
+
+    /// Concrete audience implemented by the effect port.
+    pub fn audience(&self) -> &str {
+        &self.audience
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "resources", rename_all = "snake_case")]
+enum ResourceOverlapScope {
+    Named(BTreeSet<String>),
+    Unknown,
+}
+
+/// Conservative overlap projection for a productive effect.
+///
+/// Operation identity and effect parameters are deliberately absent. Two
+/// writes through the same target potentially overlap when their exact,
+/// registered resource identities intersect. An empty or non-concrete resource
+/// set is unknown and therefore overlaps every resource on that target. The
+/// runtime does not infer filesystem aliases or equivalence outside the
+/// resource identities declared by the installed port contract.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectOverlap {
+    target: EffectTarget,
+    resources: ResourceOverlapScope,
+}
+
+impl EffectOverlap {
+    pub(crate) fn new(target: EffectTarget, resources: &BTreeSet<String>) -> Self {
+        let concrete = !resources.is_empty()
+            && resources
+                .iter()
+                .all(|resource| !resource.is_empty() && resource.trim() == resource);
+        Self {
+            target,
+            resources: if concrete {
+                ResourceOverlapScope::Named(resources.clone())
+            } else {
+                ResourceOverlapScope::Unknown
+            },
+        }
+    }
+
+    /// Concrete port target used by the conservative overlap relation.
+    pub fn target(&self) -> &EffectTarget {
+        &self.target
+    }
+
+    /// True when neither subject proves it addresses disjoint resources.
+    pub fn potentially_overlaps(&self, other: &Self) -> bool {
+        if self.target != other.target {
+            return false;
+        }
+        match (&self.resources, &other.resources) {
+            (ResourceOverlapScope::Named(left), ResourceOverlapScope::Named(right)) => {
+                !left.is_disjoint(right)
+            }
+            (ResourceOverlapScope::Unknown, _) | (_, ResourceOverlapScope::Unknown) => true,
+        }
+    }
+}
+
+/// Canonical identity and conservative overlap projection of one effect.
+///
+/// The identity binds the full resolved operation and authenticated input. The
+/// overlap projection intentionally carries less information so a fresh
+/// operation, key, or parameter encoding cannot make an unresolved write look
+/// disjoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectSubject {
+    identity: Digest,
+    overlap: EffectOverlap,
+}
+
+impl EffectSubject {
+    pub(crate) fn new(identity: Digest, overlap: EffectOverlap) -> Self {
+        Self { identity, overlap }
+    }
+
+    /// Domain-separated exact effect-subject identity.
+    pub fn identity(&self) -> &Digest {
+        &self.identity
+    }
+
+    /// Conservative relation used to guard unresolved productive effects.
+    pub fn overlap(&self) -> &EffectOverlap {
+        &self.overlap
+    }
+}
+
+/// Effect classification recorded atomically with an authorization reservation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "subject", rename_all = "snake_case")]
+pub enum EffectReservation {
+    /// The operation declares no externally productive effect.
+    ReadOnly,
+    /// The operation may mutate external state and carries its canonical subject.
+    Mutating(EffectSubject),
+}
+
+impl EffectReservation {
+    /// True when this reservation may conflict with an unresolved claimed effect.
+    pub fn potentially_overlaps(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Mutating(left), Self::Mutating(right)) => {
+                left.overlap().potentially_overlaps(right.overlap())
+            }
+            (Self::ReadOnly, _) | (_, Self::ReadOnly) => false,
+        }
+    }
+}
 
 /// One delegation budget account participating in a reservation.
 ///
@@ -62,12 +205,16 @@ pub struct ReservationRequest {
     reservation_id: BudgetReservationId,
     replay_key: Digest,
     retain_replay: bool,
+    effect: EffectReservation,
     replay_domain: String,
     budget_scopes: Vec<BudgetScope>,
     requested_budget: ResourceBudget,
     intent_digest: Digest,
     expires_at: Timestamp,
     claims_digest: Digest,
+    runtime_generation: RuntimeGenerationId,
+    #[serde(skip_serializing_if = "DecisionPurpose::is_operational")]
+    purpose: DecisionPurpose,
 }
 
 impl ReservationRequest {
@@ -79,23 +226,29 @@ impl ReservationRequest {
         reservation_id: BudgetReservationId,
         replay_key: Digest,
         retain_replay: bool,
+        effect: EffectReservation,
         replay_domain: String,
         budget_scopes: Vec<BudgetScope>,
         requested_budget: ResourceBudget,
         intent_digest: Digest,
         expires_at: Timestamp,
         claims_digest: Digest,
+        runtime_generation: RuntimeGenerationId,
+        purpose: DecisionPurpose,
     ) -> Self {
         Self {
             reservation_id,
             replay_key,
             retain_replay,
+            effect,
             replay_domain,
             budget_scopes,
             requested_budget,
             intent_digest,
             expires_at,
             claims_digest,
+            runtime_generation,
+            purpose,
         }
     }
 
@@ -112,6 +265,11 @@ impl ReservationRequest {
     /// Whether a claimed semantic idempotency key must be retained durably.
     pub fn retains_replay(&self) -> bool {
         self.retain_replay
+    }
+
+    /// Read-only classification or canonical productive effect subject.
+    pub fn effect(&self) -> &EffectReservation {
+        &self.effect
     }
 
     /// The isolation domain for replay and budget accounts.
@@ -142,6 +300,16 @@ impl ReservationRequest {
     /// Digest of all immutable lease claims.
     pub fn claims_digest(&self) -> &Digest {
         &self.claims_digest
+    }
+
+    /// Exact runtime generation that must still govern admission at claim time.
+    pub fn runtime_generation(&self) -> &RuntimeGenerationId {
+        &self.runtime_generation
+    }
+
+    /// Exact admitted purpose copied from the policy decision into the lease.
+    pub fn purpose(&self) -> &DecisionPurpose {
+        &self.purpose
     }
 }
 
@@ -238,6 +406,8 @@ struct LedgerState {
     observed_at: Option<Timestamp>,
     accounts: BTreeMap<AccountKey, Account>,
     pending: BTreeMap<BudgetReservationId, ReservationRequest>,
+    claimed: BTreeMap<BudgetReservationId, EffectReservation>,
+    completion_evidence: BTreeMap<BudgetReservationId, Digest>,
     replay: BTreeMap<Digest, Option<Timestamp>>,
 }
 
@@ -314,6 +484,45 @@ impl InMemoryAuthorizationLedger {
         }
         Ok(total)
     }
+
+    fn ensure_no_unresolved_overlap(
+        state: &LedgerState,
+        effect: &EffectReservation,
+    ) -> Result<(), RuntimeError> {
+        if state
+            .claimed
+            .values()
+            .any(|claimed| effect.potentially_overlaps(claimed))
+        {
+            return Err(RuntimeError::AmbiguousEffect);
+        }
+        Ok(())
+    }
+
+    /// Record specific outcome evidence and close one claimed in-memory attempt.
+    ///
+    /// This explicit transition mirrors durable PostgreSQL completion. A port
+    /// return does not call it automatically: the caller supplies the digest of
+    /// the concrete outcome evidence that resolves the attempt.
+    pub async fn record_completion(
+        &self,
+        reservation_id: &BudgetReservationId,
+        outcome_evidence: Digest,
+    ) -> Result<(), RuntimeError> {
+        let mut state = self.state.lock().await;
+        if !state.claimed.contains_key(reservation_id)
+            || state.completion_evidence.contains_key(reservation_id)
+        {
+            return Err(RuntimeError::ReservationMismatch {
+                reason: "claimed reservation is missing or already completed",
+            });
+        }
+        state.claimed.remove(reservation_id);
+        state
+            .completion_evidence
+            .insert(reservation_id.clone(), outcome_evidence);
+        Ok(())
+    }
 }
 
 impl AuthorizationLedger for InMemoryAuthorizationLedger {
@@ -326,6 +535,11 @@ impl AuthorizationLedger for InMemoryAuthorizationLedger {
         let mut state = self.state.lock().await;
         let now = Self::now(&state);
         Self::prune(&mut state, now);
+        if !request.purpose.is_operational() {
+            return Err(RuntimeError::ReservationMismatch {
+                reason: "ordinary ledger cannot admit candidate qualification",
+            });
+        }
         if request.expires_at <= now {
             return Err(lease_expired());
         }
@@ -352,6 +566,7 @@ impl AuthorizationLedger for InMemoryAuthorizationLedger {
         {
             return Err(replay_detected());
         }
+        Self::ensure_no_unresolved_overlap(&state, &request.effect)?;
 
         let requested = BudgetTotals::from_finite(&request.requested_budget).ok_or(
             RuntimeError::BudgetUnavailable {
@@ -415,6 +630,11 @@ impl AuthorizationLedger for InMemoryAuthorizationLedger {
     async fn claim(&self, request: &ReservationRequest) -> Result<(), RuntimeError> {
         let mut state = self.state.lock().await;
         let now = Self::now(&state);
+        if !request.purpose.is_operational() {
+            return Err(RuntimeError::ReservationMismatch {
+                reason: "ordinary ledger cannot claim candidate qualification",
+            });
+        }
         if request.expires_at <= now {
             Self::prune(&mut state, now);
             return Err(lease_expired());
@@ -433,6 +653,7 @@ impl AuthorizationLedger for InMemoryAuthorizationLedger {
                 reason: "pending reservation does not match the lease",
             });
         }
+        Self::ensure_no_unresolved_overlap(&state, &request.effect)?;
 
         let requested = BudgetTotals::from_finite(&request.requested_budget).ok_or(
             RuntimeError::BudgetUnavailable {
@@ -458,6 +679,11 @@ impl AuthorizationLedger for InMemoryAuthorizationLedger {
             )?;
         }
         state.pending.remove(&request.reservation_id);
+        if matches!(request.effect(), EffectReservation::Mutating(_)) {
+            state
+                .claimed
+                .insert(request.reservation_id.clone(), request.effect.clone());
+        }
         state.replay.insert(
             request.replay_key.clone(),
             (!request.retain_replay).then_some(request.expires_at),

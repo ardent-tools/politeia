@@ -12,6 +12,7 @@ The semantic kernel is the trusted computing base for institutional work.
 - policy-decision normalization;
 - complete mediation through the authorized dispatcher;
 - unforgeable short-lived effect leases;
+- canonical effect-subject identity and conservative overlap checks;
 - transition and evidence journal contracts;
 - exact attestation subject binding;
 - lifecycle transition validity;
@@ -52,3 +53,15 @@ A lease binds:
 - replay domain.
 
 Lease construction is private to the dispatcher/authorization boundary.
+
+For a productive direct effect, authorization binds an exact subject from the concrete
+adapter/audience port target, full resolved operation, declared resource set, and authenticated
+input identity. Admission also compares a separate conservative projection: effects through the
+same target potentially overlap when their declared resource identities intersect, even when their
+operation, parameters, key, generation, or other local identifiers differ. Empty or non-concrete
+resource scope is unknown and overlaps every resource on that target. A read-only operation and an
+attempt completed with a canonical outcome receipt do not block productive admission.
+
+Resource comparison uses the exact canonical identities exposed by the installed port contract. An
+adapter that needs path, object, or endpoint alias semantics must register canonical identities for
+them; the runtime does not infer target-specific equivalence.

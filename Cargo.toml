@@ -7,6 +7,7 @@ members = [
   "crates/politeia-runtime",
   "crates/politeia-protocol",
   "crates/politeia-sdk",
+  "crates/politeia-storage",
   "crates/politeiad",
   "xtask",
 ]
@@ -20,6 +21,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 anyhow = "1"
 blake3 = "1"
+ed25519-dalek = "2.1.1"
 jiff = { version = "0.2", features = ["serde"] }
 politeia-core = { version = "0.1.0", path = "crates/politeia-core" }
 politeia-evidence = { version = "0.1.0", path = "crates/politeia-evidence" }
@@ -32,6 +34,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 snafu = "0.9"
 uuid = { version = "1", features = ["v7", "serde"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1"] }
 
 [workspace.dependencies.tokio]
 version = "1"

@@ -19,13 +19,13 @@ Read in this order:
 
 Do **not** broaden the product before this slice proves its own contracts.
 
-Build one complete, adversarially tested vertical slice:
+Build a complete, adversarially tested commissioning package around the institutional learning loop:
 
-client-owned workspace → bounded reconnaissance grant → discovery adapter → sourced observations → candidate model → explicit conflict/uncertainty → constitutional approval → derived operational generation → execution-resource selection → semantic read operation → policy decision → authorized dispatcher → effect lease → effect port → evidence journal → independent verification → attestation bound to exact identities → handoff and commissioner revocation.
+client-owned workspace → bounded reconnaissance grant → discovery adapter → sourced observations → candidate model → explicit conflict/uncertainty → authenticated constitutional approval → authorized context and discovery → derived operational generation → execution-resource selection → semantic operation → result-backed policy decision → authorized dispatcher → effect lease → effect port → durable evidence journal → independent verification → attestation bound to exact identities → feedback and approved corrections → handoff and commissioner revocation → replacement-maintainer recommissioning.
 
-Feature breadth waits until that path is structurally honest.
+The model may represent broad institutional knowledge before a particular use is selected. Additional adapters and deployment breadth wait until that path is structurally honest. Exercise it in two separate synthetic reference institutions for software development and analytics; the fixtures make no claim about a real client deployment.
 
-The entire proof runs in a client-controlled environment from the public source distribution. The active operational generation must remain functional after the temporary commissioner authority is revoked.
+The entire proof runs in an institution-controlled environment from the public source distribution through the Rust API, administrative CLI, local service, and PostgreSQL storage. The active operational generation must remain functional after the temporary commissioner authority is revoked. Installation, immutable signed generation verification, atomic activation/rollback, durable replay protection, and replacement identity are part of this proof.
 
 ## Product identity
 

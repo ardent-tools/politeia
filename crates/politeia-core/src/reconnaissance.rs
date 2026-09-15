@@ -306,6 +306,8 @@ mod tests {
             delegation,
             observation: Observation {
                 id: ObservationId::new(),
+                capture: crate::SourceCaptureId::new(),
+                capture_manifest_digest: Digest::blake3(b"fixture capture manifest"),
                 workspace: workspace.clone(),
                 source: "crm".to_string(),
                 adapter,
@@ -366,6 +368,7 @@ mod tests {
             Effect::ReadFilesystem,
             Effect::ReadSecret,
             Effect::ReadExternalSystem,
+            Effect::ReadInstitutionalContext,
             Effect::WriteFilesystem,
             Effect::SpawnProcess,
             Effect::NetworkEgress,

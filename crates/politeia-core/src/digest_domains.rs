@@ -183,6 +183,10 @@ fn golden_vectors_pin_the_envelope_encoding() {
             "6db9737c968245077bd1e329b664fdc7064b641c63c60e6c69fcab0125e0ae0a",
         ),
         (
+            "effect_subject_v1",
+            "34f6662874a4a22d07c6a0ac09b70eea54d5bbb38bc5a41bda4170c194e47e00",
+        ),
+        (
             "execution_assignment_v1",
             "07e846e089da5434abb26cb335ec1d0e3d9ce8be0cb80d9e5ee2509fcfbc8431",
         ),
