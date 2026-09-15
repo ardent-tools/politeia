@@ -8,7 +8,7 @@ use super::{
     DispatcherConfig, EffectLease, EffectPort, InvalidDelegationSnafu,
     InvalidExecutionAssignmentSnafu, LeaseClaims, LeaseMismatchSnafu, OperationIntent,
     PolicyDecisionPoint, QualificationViolationExecutionSnafu, RuntimeError, WrongAudienceSnafu,
-    effect_reservation,
+    effect_reservation, lease_expired,
 };
 
 impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P, H, L> {
@@ -38,6 +38,13 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
     /// normalized policy decision is invalid or denied.
     pub async fn authorize(&self, intent: &OperationIntent) -> Result<EffectLease, RuntimeError> {
         let now = self.ledger.observed_at().await?;
+        if self
+            .config
+            .authorization_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return Err(lease_expired());
+        }
         let delegation = self.validate_intent(intent, now)?;
         let intent_digest = intent.digest()?;
         let decision =
@@ -111,6 +118,7 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             }
         );
         let max_expiry = now + self.config.max_lease_ttl;
+        let authorization_deadline = self.config.authorization_deadline.unwrap_or(max_expiry);
         let assignment_expiry = intent
             .execution
             .as_ref()
@@ -135,6 +143,7 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             expires_at: delegation
                 .expires_at
                 .min(max_expiry)
+                .min(authorization_deadline)
                 .min(assignment_expiry)
                 .min(purpose_expiry),
             replay_domain: self.config.replay_domain.clone(),

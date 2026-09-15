@@ -560,6 +560,7 @@ pub struct DispatcherConfig {
     runtime: RuntimeGenerationId,
     replay_domain: String,
     max_lease_ttl: SignedDuration,
+    authorization_deadline: Option<Timestamp>,
     trusted_delegations: BTreeMap<DelegationId, Delegation>,
     trusted_operations: BTreeMap<OperationId, OperationSpec>,
     trusted_execution_assignments:
@@ -688,10 +689,23 @@ impl DispatcherConfig {
             runtime,
             replay_domain,
             max_lease_ttl,
+            authorization_deadline: None,
             trusted_delegations: delegations,
             trusted_operations: operations,
             trusted_execution_assignments: BTreeMap::new(),
         })
+    }
+
+    /// Narrow all leases to one absolute authorization deadline.
+    ///
+    /// Repeated calls retain the earliest deadline, so a later caller cannot
+    /// extend authority already installed by an earlier admission boundary.
+    /// The dispatcher refuses authorization at or after the resulting instant.
+    pub fn set_authorization_deadline(&mut self, deadline: Timestamp) {
+        self.authorization_deadline = Some(
+            self.authorization_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
     }
 
     /// Admit exact selected routing receipts into trusted bootstrap.
