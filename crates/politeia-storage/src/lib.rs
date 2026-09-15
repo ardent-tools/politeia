@@ -1231,7 +1231,7 @@ enum GenerationAdmissionKind {
         workspace_revision: Option<i64>,
     },
     CandidateQualification {
-        qualification: OperationalQualification,
+        qualification: Box<OperationalQualification>,
         vector: QualificationVector,
     },
 }
@@ -1299,7 +1299,7 @@ impl PostgresAuthorizationLedger {
             scope,
             generation: GenerationAdmission {
                 kind: GenerationAdmissionKind::CandidateQualification {
-                    qualification: qualification.clone(),
+                    qualification: Box::new(qualification.clone()),
                     vector,
                 },
             },

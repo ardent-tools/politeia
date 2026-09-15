@@ -204,6 +204,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "this fixture must fail if canonical bytes no longer admit against their digest"
+    )]
     fn existing_payload_bytes_must_already_be_canonical_and_digest_exactly() {
         let canonical = br#"{"count":2,"result":"completed"}"#.to_vec();
         let digest = politeia_core::Digest::blake3(&canonical);
