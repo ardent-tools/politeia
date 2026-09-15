@@ -82,13 +82,14 @@ fn admit_fixture_authority(
 
 async fn wait_for_workspace_lock_waiters(
     observer: &tokio_postgres::Client,
+    blocker_pid: i32,
     expected: i64,
 ) -> TestResult {
     for _ in 0..100 {
         let row = observer
             .query_one(
-                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%institution_workspaces%'",
-                &[],
+                "WITH RECURSIVE waiters AS (SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) UNION SELECT a.pid FROM pg_stat_activity a JOIN waiters w ON w.pid = ANY(pg_blocking_pids(a.pid))) SELECT count(DISTINCT pid) FROM waiters",
+                &[&blocker_pid],
             )
             .await?;
         let observed: i64 = row.get(0);
@@ -951,6 +952,10 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
     tokio::spawn(async move {
         let _ = lock_connection.await;
     });
+    let blocker_pid: i32 = lock_client
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await?
+        .get(0);
     let lock = lock_client.build_transaction().start().await?;
     lock.query_one(
         "SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 FOR NO KEY UPDATE",
@@ -974,7 +979,7 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
             .commit_handoff_authorized(&blocked_handoff, &[handoff_owner])
             .await
     });
-    wait_for_workspace_lock_waiters(&observer, 1).await?;
+    wait_for_workspace_lock_waiters(&observer, blocker_pid, 1).await?;
 
     let mut concurrent_grant = commissioner_grant.clone();
     concurrent_grant.id = DelegationId::new();
@@ -988,7 +993,7 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
             .admit_delegation(&admission_scope, &concurrent_authority, &concurrent_wire)
             .await
     });
-    wait_for_workspace_lock_waiters(&observer, 2).await?;
+    wait_for_workspace_lock_waiters(&observer, blocker_pid, 2).await?;
     lock.commit().await?;
     let committed = handoff_task.await??;
     admission_task.await??;
