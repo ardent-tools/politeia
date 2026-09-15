@@ -1445,7 +1445,8 @@ async fn expired_reservation_releases_budget_for_a_different_replay_key() -> Tes
     fresh.idempotency_key = Some("different-key-after-expiry".to_owned());
     let blocked = dispatcher.authorize(&fresh).await;
     assert!(
-        blocked.is_err(),
+        matches!(&blocked, Err(RuntimeError::AuthorizationState { source })
+            if matches!(source.downcast_ref::<StorageError>(), Some(StorageError::AttemptUnavailable))),
         "a live reservation must retain the entire finite budget; got {blocked:?}"
     );
 
@@ -1475,7 +1476,8 @@ async fn expired_reservation_releases_budget_for_a_different_replay_key() -> Tes
         .map_err(|error| format!("fresh admission after reservation expiry failed: {error}"))?;
     let stale_execution = dispatcher.execute(&expired).await;
     assert!(
-        stale_execution.is_err(),
+        matches!(&stale_execution, Err(RuntimeError::AuthorizationState { source })
+            if matches!(source.downcast_ref::<StorageError>(), Some(StorageError::AttemptUnavailable))),
         "the expired reservation must not reach the effect port; got {stale_execution:?}"
     );
     dispatcher
