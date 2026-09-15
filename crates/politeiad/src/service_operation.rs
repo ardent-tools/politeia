@@ -3,32 +3,39 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::{Future, ready},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use jiff::Timestamp;
 use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::{
-    AdapterId, BudgetReservationId, CapabilityVerificationId, DataClass, Delegation, Digest,
-    Effect, EffectLeaseId, EvidenceId, ExecutionLocality, ExecutionResourceId, InstitutionId,
-    InstitutionWorkspaceId, OperationId, OperationSpec, PrincipalId, RoutingDecisionId,
-    RuntimeGenerationId,
+    AdapterId, BudgetReservationId, CapabilityVerificationId, CommissioningRecordId, DataClass,
+    Delegation, Digest, Effect, EffectLeaseId, EvidenceId, ExecutionLocality, ExecutionResourceId,
+    InstitutionId, InstitutionWorkspaceId, OperationId, OperationSpec, PrincipalId,
+    RoutingDecisionId, RuntimeGenerationId,
     evidence::{EvidenceRequest, TrustedEvidenceRegistry},
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use politeia_evidence::{
     assurance::{
-        ActivationProof, AuthorizedControlRun, ControlRun, VERIFY_POLICY_CONTROL_ACTION,
+        ActivationProof, AuthorizedControlQualification, AuthorizedControlRun,
+        ControlQualificationVectorSet, ControlRun, VERIFY_POLICY_CONTROL_ACTION,
         VerifiedActivation, policy_control_resource,
     },
     authority::{AuthorityContext, DirectGrant, institution_audience},
 };
 use politeia_policy::operational::{
-    OperationalPolicyRegistry, PublicDetectorCalibration, operation_scope,
+    DetectorQualificationDenial, DetectorQualificationObservation, OperationalPolicyRegistry,
+    PublicDetectorCalibration, QualificationNoEffectObservation, QualificationVectorInputs,
+    operation_scope,
 };
-use politeia_policy::{PolicyDecision, evaluate::EvaluationEvidence};
+use politeia_policy::{PolicyDecision, QualificationVector, evaluate::EvaluationEvidence};
 use politeia_runtime::{
     AuthorizationLedger, AuthorizedEffect, Dispatcher, DispatcherConfig, EffectPort,
-    OperationIntent, PolicyDecisionPoint,
+    OperationIntent, PolicyDecisionPoint, RuntimeError,
     routing::{
         AvailabilitySnapshot, CapabilityProfile, CapabilityVerificationRecord, ExecutionAssignment,
         ExecutionRequirement, ExecutionResource, ExecutionResourceDescriptor, Router,
@@ -36,8 +43,8 @@ use politeia_runtime::{
     },
 };
 use politeia_storage::{
-    CanonicalPayload, EvidenceAdmission, OperationOutboxMessage, PostgresAuthorizationLedger,
-    ScopedCommit,
+    CanonicalPayload, CommissioningReceipt, EvidenceAdmission, OperationOutboxMessage,
+    PostgresAuthorizationLedger, ScopedCommit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -172,14 +179,91 @@ pub struct CapabilityEvidenceSubmission {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DetectorCalibrationEvidenceSubmission {
-    /// Exact canonical policy artifact under the owner-signed workspace digest.
-    pub policy_bytes: Vec<u8>,
-    /// Actual known-good and planted-violation detector output.
-    pub calibration: PublicDetectorCalibration,
-    /// Already admitted direct owner grant for verifying this exact control.
-    pub authority: SignedAdmissionWire<Delegation>,
+    /// Digest of the service-produced, durably retained real-path report.
+    /// Transport never supplies report contents as truth.
+    pub report: Digest,
+    /// Already admitted direct owner grant for the independent verifier.
+    pub proof_authority: SignedAdmissionWire<Delegation>,
     /// Verifier-signed retained evidence for this exact calibration digest.
     pub evidence: SignedAdmissionWire<EvidenceRequest>,
+    /// Independent verifier proof over the retained exact report.
+    pub proof: SignedAdmissionWire<ActivationProof>,
+}
+
+/// One principal-signed immutable vector input for the first real-path
+/// detector exercise.
+///
+/// The caller supplies only authenticated intent, routing inputs, and
+/// independently retained capability evidence. It cannot supply a target
+/// control run, activation proof, policy outcome, or effect receipt.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DetectorQualificationVectorSubmission {
+    /// Principal-authenticated candidate operation intent.
+    pub intent: SignedAdmissionWire<OperationIntent>,
+    /// Exact availability input used to recompute routing.
+    pub availability: AvailabilitySnapshot,
+    /// Claimed routing receipt, fully recomputed by the service.
+    pub routing: RoutingDecision,
+    /// Capability evidence consumed by the candidate route.
+    pub capability_verifications: Vec<CapabilityVerificationEvidence>,
+    /// Identity reserved for the service-produced target control run.
+    pub control_run: EvidenceId,
+}
+
+/// Stage-one input for one inactive candidate's first blocking-control
+/// exercise. The daemon derives and retains every outcome.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DetectorQualificationSubmission {
+    /// Immutable published candidate generation, which must remain inactive.
+    pub candidate: Digest,
+    /// Exact blocking binding being qualified.
+    pub binding: String,
+    /// Exact detector named by that binding.
+    pub control: String,
+    /// Direct owner-rooted qualification grant for this candidate/control and
+    /// both immutable signed vectors.
+    pub qualification_authority: SignedAdmissionWire<Delegation>,
+    /// Immutable known-good vector exercise.
+    pub known_good: DetectorQualificationVectorSubmission,
+    /// Immutable planted-violation vector exercise.
+    pub planted_violation: DetectorQualificationVectorSubmission,
+}
+
+/// A retained real-path report with its independently admitted verifier proof.
+///
+/// The admitted wires stay private so callers cannot substitute a different
+/// proof after report resolution. `verified_proof` rebuilds the borrowing core
+/// view on demand rather than storing a self-referential wrapper.
+pub(crate) struct ResolvedDetectorQualification {
+    report: PublicDetectorCalibration,
+    proof: Admitted<ActivationProof>,
+    proof_authority: Admitted<Delegation>,
+    owner: PrincipalId,
+    at: Timestamp,
+}
+
+impl ResolvedDetectorQualification {
+    /// Exact service-owned real-path report resolved from durable receipt bytes.
+    pub(crate) fn report(&self) -> &PublicDetectorCalibration {
+        &self.report
+    }
+
+    /// Reconstruct the checked independent verifier proof for the resolved report.
+    pub(crate) fn verified_proof(&self) -> Result<VerifiedActivation<'_>, CoordinatorError> {
+        VerifiedActivation::admit(
+            &self.proof,
+            &self.proof_authority,
+            &AuthorityContext::new(
+                self.proof.institution().clone(),
+                self.proof.workspace().clone(),
+                self.owner.clone(),
+                self.at,
+            ),
+        )
+        .map_err(operational_refusal)
+    }
 }
 
 /// Signed assurance material accompanying one principal-authenticated operation.
@@ -818,6 +902,41 @@ pub(crate) struct AdmittedOperationalSubmission {
     authorization_expires_at: Timestamp,
 }
 
+/// Authenticated candidate-vector inputs before the target control is run.
+///
+/// This contains no caller-provided target control run, proof, decision, or
+/// outcome. The qualification policy point supplies the target observation and
+/// the dispatcher remains the sole route to the installed port.
+struct AdmittedQualificationVector {
+    registered: RegisteredOperation,
+    signed_intent: SignedAdmissionWire<OperationIntent>,
+    intent: Admitted<OperationIntent>,
+    operation_chain: Vec<Delegation>,
+    availability: AvailabilitySnapshot,
+    routing: RoutingDecision,
+    assignment: ExecutionAssignment,
+    capability_verifications: Vec<CapabilityVerificationEvidence>,
+    capability_authority_expires_at: Timestamp,
+    control_run: EvidenceId,
+    request: politeia_policy::operational::OperationalEvaluationRequest,
+}
+
+impl AdmittedQualificationVector {
+    fn intent(&self) -> &OperationIntent {
+        self.intent.payload()
+    }
+
+    fn requested_control_run(&self) -> EvidenceId {
+        self.control_run.clone()
+    }
+}
+
+/// The completion facts from the one allowed candidate effect.
+struct QualificationCompletion {
+    receipt_digest: Digest,
+    adapter: AdapterId,
+}
+
 impl AdmittedOperationalSubmission {
     /// Exact active registry from freshly reverified generation bytes.
     pub(crate) fn registry(&self) -> &ActiveOperationalRegistry {
@@ -911,6 +1030,101 @@ impl AdmittedOperationalSubmission {
 }
 
 impl PoliteiadService {
+    /// Admit one inert candidate qualification vector up to, but never
+    /// through, the selected blocking control. This deliberately does not use
+    /// `admit_operational_submission`: ordinary admission requires an active
+    /// generation and pre-existing activation evidence, neither of which may
+    /// be relaxed for a candidate.
+    async fn admit_qualification_vector(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        registry: &ActiveOperationalRegistry,
+        vector: DetectorQualificationVectorSubmission,
+        at: Timestamp,
+    ) -> Result<AdmittedQualificationVector, CoordinatorError> {
+        let signed_intent = vector.intent.clone();
+        let intent = self
+            .anchors()
+            .admit_expected(AdmissionKind::OperationIntent, vector.intent)
+            .map_err(operational_refusal)?;
+        if intent.signer() != &intent.payload().principal {
+            return Err(operational_refusal(
+                "qualification intent signer is not its requesting principal",
+            ));
+        }
+        let registered = registry
+            .execution()
+            .exact_operation(&intent.payload().operation)
+            .ok_or_else(|| {
+                operational_refusal(
+                    "qualification intent operation differs from candidate registry",
+                )
+            })?
+            .clone();
+        let capabilities = self.admit_capability_verifications(
+            durable,
+            registry.execution(),
+            &vector.capability_verifications,
+            at,
+        )?;
+        let routing = registry
+            .execution()
+            .route_with_id(
+                &registered.spec,
+                vector.routing.id.clone(),
+                &vector.availability,
+                &capabilities,
+                at,
+            )
+            .map_err(operational_refusal)?;
+        if routing != vector.routing {
+            return Err(operational_refusal(
+                "qualification routing receipt differs from deterministic candidate routing",
+            ));
+        }
+        let assignment = routing
+            .assignment()
+            .map_err(operational_refusal)?
+            .ok_or_else(|| operational_refusal("qualification routing selected no resource"))?;
+        if intent.payload().execution.as_ref() != Some(&assignment) {
+            return Err(operational_refusal(
+                "qualification intent does not bind the exact selected routing assignment",
+            ));
+        }
+        let operation_chain = self
+            .admit_durable_delegation_chain(
+                durable,
+                &intent.payload().delegation_chain,
+                intent.signer(),
+            )?
+            .into_iter()
+            .map(Admitted::into_payload)
+            .collect();
+        let intent_digest = intent.payload().digest().map_err(operational_refusal)?;
+        let request = politeia_policy::operational::OperationalEvaluationRequest {
+            institution: self.workspace().institution.clone(),
+            workspace: self.workspace().id.clone(),
+            intent_digest,
+            principal: intent.payload().principal.clone(),
+            operation: intent.payload().operation.clone(),
+            resources: intent.payload().resources.clone(),
+            at,
+        };
+        Ok(AdmittedQualificationVector {
+            registered,
+            signed_intent,
+            intent,
+            operation_chain,
+            availability: vector.availability,
+            routing,
+            assignment,
+            capability_verifications: vector.capability_verifications,
+            capability_authority_expires_at: capabilities.authority_expires_at,
+            control_run: vector.control_run,
+            request,
+        })
+    }
+
     /// Load the sole active-generation pointer, reverify the immutable bundle,
     /// and decode its exact canonical operational registries.
     pub(crate) async fn active_operational_registry(
@@ -1160,55 +1374,25 @@ impl PoliteiadService {
         submission: DetectorCalibrationEvidenceSubmission,
     ) -> Result<crate::OperationResult, CoordinatorError> {
         let durable = self.durable_snapshot().await?;
-        let now = PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone())
-            .observed_at()
-            .await
-            .map_err(operational_refusal)?;
-        let policy = OperationalPolicyRegistry::from_artifact_bytes(
-            &submission.policy_bytes,
-            &self.workspace().policy_bundle,
-            &self.workspace().policy_digest,
-        )
-        .map_err(operational_refusal)?;
-        let reproduced = policy
-            .calibrate_detector(&submission.calibration.control)
-            .map_err(operational_refusal)?;
-        if reproduced != submission.calibration {
-            return Err(operational_refusal(
-                "detector calibration differs from actual public detector output",
-            ));
-        }
+        let now = self.qualification_observed_at().await?;
+        let resolved = self
+            .resolve_detector_qualification(
+                &durable,
+                &submission.report,
+                &submission.evidence,
+                &submission.proof,
+                &submission.proof_authority,
+                now,
+            )
+            .await?;
+        let report = resolved.report().clone();
         let evidence = self
             .anchors()
             .admit_expected(AdmissionKind::Evidence, submission.evidence.clone())
             .map_err(operational_refusal)?;
-        let authority =
-            self.admit_exact_direct_authority(&durable, &submission.authority, evidence.signer())?;
-        DirectGrant::admit(
-            &authority,
-            &AuthorityContext::new(
-                self.workspace().institution.clone(),
-                self.workspace().id.clone(),
-                durable.owner.clone(),
-                now,
-            ),
-            evidence.signer(),
-            VERIFY_POLICY_CONTROL_ACTION,
-            &policy_control_resource(&submission.calibration.control),
-        )
-        .map_err(operational_refusal)?;
-        let calibration_digest = reproduced.digest().map_err(operational_refusal)?;
-        if evidence.payload().subject != calibration_digest
-            || evidence.payload().producer_delegation != authority.payload().id
-            || evidence.payload().method != DETECTOR_CALIBRATION_METHOD
-            || evidence.payload().payload_digest != calibration_digest
-            || evidence.payload().observed_at > now
-            || evidence.payload().independence
-                != politeia_core::evidence::IndependenceClass::IndependentAgent
-            || durable.evidence.contains_key(&evidence.payload().id)
-        {
+        if durable.evidence.contains_key(&evidence.payload().id) {
             return Err(operational_refusal(
-                "detector calibration evidence does not bind its public report and live verifier",
+                "detector calibration evidence is already durably admitted",
             ));
         }
         let transition = crate::service::signed_wire_record(&submission.evidence)?;
@@ -1228,20 +1412,115 @@ impl PoliteiadService {
                     }],
                     outbox: Vec::new(),
                 },
-                std::slice::from_ref(&authority),
+                std::slice::from_ref(&resolved.proof_authority),
             )
             .await
             .map_err(|error| operational_refusal(error.to_string()))?;
         Ok(crate::OperationResult::Coordinated {
             result: serde_json::json!({
-                "control": submission.calibration.control,
-                "calibration": calibration_digest,
+                "control": report.control,
+                "calibration": submission.report,
                 "evidence": evidence.payload().id,
                 "revision": receipt.revision,
                 "admitted": true,
             }),
             evidence_refs: vec![evidence.payload().id.0.to_string()],
         })
+    }
+
+    /// Resolve a service-owned real-path report and the independent verifier
+    /// material that may later support activation. Transport never supplies a
+    /// report body: the digest selects exactly one immutable daemon receipt.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "report, evidence, proof, authority, and trusted time are independent assurance axes"
+    )]
+    pub(crate) async fn resolve_detector_qualification(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        report: &Digest,
+        evidence: &SignedAdmissionWire<EvidenceRequest>,
+        proof: &SignedAdmissionWire<ActivationProof>,
+        authority: &SignedAdmissionWire<Delegation>,
+        at: Timestamp,
+    ) -> Result<ResolvedDetectorQualification, CoordinatorError> {
+        let stored = self
+            .storage()
+            .load_commissioning_receipt_by_payload_digest(self.scope(), report)
+            .await
+            .map_err(operational_refusal)?;
+        if stored.payload_digest != *report {
+            return Err(operational_refusal(
+                "retained qualification receipt digest differs from requested report",
+            ));
+        }
+        let calibration: PublicDetectorCalibration = serde_json::from_slice(&stored.payload)
+            .map_err(|error| {
+                operational_refusal(format!(
+                    "retained detector qualification report is malformed: {error}",
+                ))
+            })?;
+        let canonical = to_canonical_bytes(&calibration).map_err(operational_refusal)?;
+        if canonical != stored.payload || Digest::blake3(&canonical) != *report {
+            return Err(operational_refusal(
+                "retained detector qualification report is not exact canonical report bytes",
+            ));
+        }
+        calibration.qualification().ok_or_else(|| {
+            operational_refusal("detector qualification report lacks real-path observation")
+        })?;
+        let admitted_evidence = self
+            .anchors()
+            .admit_expected(AdmissionKind::Evidence, evidence.clone())
+            .map_err(operational_refusal)?;
+        let admitted_proof = self
+            .anchors()
+            .admit_expected(AdmissionKind::ActivationProof, proof.clone())
+            .map_err(operational_refusal)?;
+        if admitted_evidence.signer() != admitted_proof.signer()
+            || admitted_proof.payload().retained_evidence != admitted_evidence.payload().id
+        {
+            return Err(operational_refusal(
+                "detector qualification proof does not retain its independent verifier evidence",
+            ));
+        }
+        let admitted_authority =
+            self.admit_exact_direct_authority(durable, authority, admitted_proof.signer())?;
+        DirectGrant::admit(
+            &admitted_authority,
+            &AuthorityContext::new(
+                self.workspace().institution.clone(),
+                self.workspace().id.clone(),
+                durable.owner.clone(),
+                at,
+            ),
+            admitted_proof.signer(),
+            VERIFY_POLICY_CONTROL_ACTION,
+            &policy_control_resource(&calibration.control),
+        )
+        .map_err(operational_refusal)?;
+        if admitted_evidence.payload().subject != *report
+            || admitted_evidence.payload().payload_digest != *report
+            || admitted_evidence.payload().producer_delegation != admitted_authority.payload().id
+            || admitted_evidence.payload().method != DETECTOR_CALIBRATION_METHOD
+            || admitted_evidence.payload().observed_at > admitted_proof.payload().proved_at
+            || admitted_evidence.payload().observed_at > at
+            || admitted_evidence.payload().independence
+                != politeia_core::evidence::IndependenceClass::IndependentAgent
+        {
+            return Err(operational_refusal(
+                "detector qualification evidence does not bind the retained report and live independent verifier",
+            ));
+        }
+        let resolved = ResolvedDetectorQualification {
+            report: calibration,
+            proof: admitted_proof,
+            proof_authority: admitted_authority,
+            owner: durable.owner.clone(),
+            at,
+        };
+        resolved.verified_proof()?;
+        Ok(resolved)
     }
 
     /// Admit one complete active-generation submission for a typed effect port.
@@ -1329,13 +1608,15 @@ impl PoliteiadService {
             .into_iter()
             .map(Admitted::into_payload)
             .collect();
-        let policy = self.admit_operational_decision(
-            durable,
-            &registry,
-            admitted_intent.payload(),
-            &submission.assurance,
-            now,
-        )?;
+        let policy = self
+            .admit_operational_decision(
+                durable,
+                &registry,
+                admitted_intent.payload(),
+                &submission.assurance,
+                now,
+            )
+            .await?;
         let authorization_expires_at = policy
             .expires_at
             .min(admitted_capabilities.authority_expires_at);
@@ -1354,6 +1635,392 @@ impl PoliteiadService {
             admission_revision: durable.revision,
             admitted_at: now,
             authorization_expires_at,
+        })
+    }
+
+    /// Exercise one sealed candidate control through the same dispatcher and
+    /// PostgreSQL ledger as normal work. This is the only inactive-generation
+    /// path: the opaque policy capability, not transport, carries the narrow
+    /// exception through policy, lease, reservation, and claim.
+    pub(crate) async fn exercise_detector_qualification(
+        &self,
+        submission: DetectorQualificationSubmission,
+    ) -> Result<crate::OperationResult, CoordinatorError> {
+        let exercise_digest =
+            Digest::blake3(&to_canonical_bytes(&submission).map_err(operational_refusal)?);
+        let DetectorQualificationSubmission {
+            candidate,
+            binding,
+            control,
+            qualification_authority,
+            known_good,
+            planted_violation,
+        } = submission;
+        let durable = self.durable_snapshot().await?;
+        if durable.active_generation.as_ref() == Some(&candidate) {
+            return Err(operational_refusal(
+                "candidate qualification requires an inactive generation",
+            ));
+        }
+        let artifact = self.verified_generation(&candidate).await?;
+        let artifact_manifest = artifact.manifest_digest().clone();
+        let registry = self.operational_registry_for_generation(&candidate).await?;
+        let admission_at =
+            PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone())
+                .observed_at()
+                .await
+                .map_err(operational_refusal)?;
+        let known_good = self
+            .admit_qualification_vector(&durable, &registry, known_good, admission_at)
+            .await?;
+        let planted_violation = self
+            .admit_qualification_vector(&durable, &registry, planted_violation, admission_at)
+            .await?;
+        if known_good.intent().principal != planted_violation.intent().principal {
+            return Err(operational_refusal(
+                "qualification vectors name different requesting principals",
+            ));
+        }
+        let vectors = ControlQualificationVectorSet::new(
+            known_good.request.intent_digest.clone(),
+            known_good.requested_control_run(),
+            planted_violation.request.intent_digest.clone(),
+            planted_violation.requested_control_run(),
+        );
+        let authority = self.admit_exact_direct_authority(
+            &durable,
+            &qualification_authority,
+            &known_good.intent().principal,
+        )?;
+        let context = AuthorityContext::new(
+            self.workspace().institution.clone(),
+            self.workspace().id.clone(),
+            durable.owner.clone(),
+            admission_at,
+        );
+        let authorized = AuthorizedControlQualification::admit(
+            &authority,
+            &context,
+            &known_good.intent().principal,
+            registry.generation().clone(),
+            registry.policy().digest().clone(),
+            binding,
+            control.clone(),
+            registry
+                .policy()
+                .calibrate_detector(&control)
+                .map_err(operational_refusal)?
+                .population,
+            vectors,
+        )
+        .map_err(operational_refusal)?;
+        let capability = registry
+            .policy()
+            .admit_qualification(
+                registry.generation().clone(),
+                durable.active_generation.clone(),
+                durable.revision,
+                authorized.binding(),
+                authorized.control(),
+                &authorized,
+                QualificationVectorInputs::new(&known_good.request, &planted_violation.request),
+            )
+            .map_err(operational_refusal)?;
+
+        let mut good_request = known_good.request.clone();
+        good_request.at = self.qualification_observed_at().await?;
+        let good_pending = registry
+            .policy()
+            .evaluate_qualification(
+                &capability,
+                QualificationVector::KnownGood,
+                &good_request,
+                &EvaluationEvidence::new(&[], &[], &[]),
+                good_request.at,
+            )
+            .map_err(operational_refusal)?;
+        let good_decision = good_pending
+            .finish(self.qualification_observed_at().await?)
+            .map_err(operational_refusal)?;
+        let good_run = good_decision.control_run().clone();
+        let good_calls = Arc::new(AtomicU64::new(0));
+        let good_dispatcher = self.qualification_dispatcher(
+            &registry,
+            &known_good,
+            &capability,
+            QualificationVector::KnownGood,
+            good_decision.into_decision(),
+            good_calls.clone(),
+        )?;
+        let good_lease = good_dispatcher
+            .authorize(known_good.intent())
+            .await
+            .map_err(operational_refusal)?;
+        let good_manifest = good_dispatcher
+            .execute(&good_lease)
+            .await
+            .map_err(operational_refusal)?;
+        if good_calls.load(Ordering::SeqCst) != 1 {
+            return Err(operational_refusal(
+                "known-good qualification did not invoke exactly one manifest port",
+            ));
+        }
+        let good_completion = self
+            .record_qualification_completion(&registry, &known_good, &good_lease, good_manifest)
+            .await?;
+
+        let mut planted_request = planted_violation.request.clone();
+        planted_request.at = self.qualification_observed_at().await?;
+        let planted_pending = registry
+            .policy()
+            .evaluate_qualification(
+                &capability,
+                QualificationVector::PlantedViolation,
+                &planted_request,
+                &EvaluationEvidence::new(&[], &[], &[]),
+                planted_request.at,
+            )
+            .map_err(operational_refusal)?;
+        let planted_decision = planted_pending
+            .finish(self.qualification_observed_at().await?)
+            .map_err(operational_refusal)?;
+        let planted_run = planted_decision.control_run().clone();
+        let planted_calls = Arc::new(AtomicU64::new(0));
+        let planted_dispatcher = self.qualification_dispatcher(
+            &registry,
+            &planted_violation,
+            &capability,
+            QualificationVector::PlantedViolation,
+            planted_decision.into_decision(),
+            planted_calls.clone(),
+        )?;
+        match planted_dispatcher
+            .authorize(planted_violation.intent())
+            .await
+        {
+            Err(RuntimeError::Denied { .. }) => {}
+            Err(error) => {
+                return Err(operational_refusal(format!(
+                    "planted qualification vector did not reach typed policy denial: {error}",
+                )));
+            }
+            Ok(_) => {
+                return Err(operational_refusal(
+                    "planted qualification vector unexpectedly received a dispatcher lease",
+                ));
+            }
+        }
+        let planted_attempts = self
+            .storage()
+            .count_candidate_qualification_attempts(
+                self.scope(),
+                &capability,
+                QualificationVector::PlantedViolation,
+            )
+            .await
+            .map_err(operational_refusal)?;
+        let planted_port_invocations = planted_calls.load(Ordering::SeqCst);
+        if planted_attempts != 0 || planted_port_invocations != 0 {
+            return Err(operational_refusal(
+                "planted qualification vector reached durable attempt or manifest port",
+            ));
+        }
+
+        let observation = DetectorQualificationObservation {
+            artifact_manifest,
+            executable: self.running_executable_digest.clone(),
+            handler: Digest::blake3(
+                &to_canonical_bytes(&known_good.registered.handler).map_err(operational_refusal)?,
+            ),
+            resource: known_good.assignment.resource.clone(),
+            adapter: good_completion.adapter,
+            known_good_run: good_run,
+            known_good_lease: good_lease.id().clone(),
+            known_good_reservation: good_lease.reservation_id().clone(),
+            known_good_receipt: good_completion.receipt_digest.clone(),
+            planted_violation_run: planted_run,
+            planted_violation_denial: DetectorQualificationDenial::PolicyDenied,
+            planted_violation_no_effect: QualificationNoEffectObservation {
+                attempts: planted_attempts,
+                port_invocations: planted_port_invocations,
+            },
+            observed_started_at: admission_at,
+            observed_finished_at: self.qualification_observed_at().await?,
+        };
+        let report = capability
+            .qualify_calibration(
+                registry
+                    .policy()
+                    .calibrate_detector(authorized.control())
+                    .map_err(operational_refusal)?,
+                observation,
+            )
+            .map_err(operational_refusal)?;
+        let payload = to_canonical_bytes(&report).map_err(operational_refusal)?;
+        let report_digest = Digest::blake3(&payload);
+        self.storage()
+            .admit_commissioning_receipt(
+                self.scope(),
+                &CommissioningReceipt {
+                    record: CommissioningRecordId::new(),
+                    record_digest: exercise_digest,
+                    payload,
+                    payload_digest: report_digest.clone(),
+                },
+            )
+            .await
+            .map_err(operational_refusal)?;
+        Ok(crate::OperationResult::Coordinated {
+            result: serde_json::json!({
+                "report": report_digest,
+                "candidate": candidate,
+                "known_good_receipt": good_completion.receipt_digest,
+                "planted_violation": "denied",
+            }),
+            evidence_refs: Vec::new(),
+        })
+    }
+
+    async fn qualification_observed_at(&self) -> Result<Timestamp, CoordinatorError> {
+        PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone())
+            .observed_at()
+            .await
+            .map_err(operational_refusal)
+    }
+
+    fn qualification_dispatcher(
+        &self,
+        registry: &ActiveOperationalRegistry,
+        vector: &AdmittedQualificationVector,
+        capability: &politeia_policy::operational::OperationalQualification,
+        qualification_vector: QualificationVector,
+        decision: PolicyDecision,
+        invocations: Arc<AtomicU64>,
+    ) -> Result<
+        Dispatcher<
+            AdmittedOperationalDecision,
+            QualificationResourceManifestPort,
+            PostgresAuthorizationLedger,
+        >,
+        CoordinatorError,
+    > {
+        let (maximum_resources, maximum_resource_bytes) = match &vector.registered.handler {
+            InstalledOperationHandler::ResourceManifest {
+                maximum_resources,
+                maximum_resource_bytes,
+            } => (*maximum_resources, *maximum_resource_bytes),
+            _ => {
+                return Err(operational_refusal(
+                    "qualification only permits the installed resource-manifest handler",
+                ));
+            }
+        };
+        let resource = registry
+            .execution()
+            .resource(&vector.assignment.resource)
+            .ok_or_else(|| operational_refusal("qualification selected resource is absent"))?;
+        if !matches!(
+            resource.descriptor,
+            ExecutionResourceDescriptor::DeterministicTool { .. }
+        ) || resource.locality != ExecutionLocality::ClientLocal
+            || resource.trust_domain != self.workspace().trust_domain
+        {
+            return Err(operational_refusal(
+                "qualification requires a deterministic client-local manifest resource",
+            ));
+        }
+        let port = QualificationResourceManifestPort {
+            inner: ResourceManifestPort {
+                operation: vector.registered.spec.clone(),
+                resources: vector.intent().resources.clone(),
+                assignment: vector.assignment.clone(),
+                adapter: resource.adapter.clone(),
+                audience: institution_audience(&self.workspace().institution),
+                maximum_resources,
+                maximum_resource_bytes,
+            },
+            invocations,
+        };
+        let config = DispatcherConfig::new(
+            registry.policy().bundle().clone(),
+            registry.policy().digest().clone(),
+            registry.generation().clone(),
+            capability.replay_domain(qualification_vector),
+            jiff::SignedDuration::from_mins(5).min(
+                vector
+                    .capability_authority_expires_at
+                    .duration_since(vector.request.at),
+            ),
+            vector.operation_chain.clone(),
+            [vector.registered.spec.clone()],
+        )
+        .and_then(|config| config.with_trusted_routing_decisions([vector.routing.clone()]))
+        .map_err(operational_refusal)?;
+        let policy = AdmittedOperationalDecision {
+            intent: vector.request.intent_digest.clone(),
+            decision,
+            expires_at: capability
+                .expires_at()
+                .min(vector.capability_authority_expires_at),
+        };
+        let ledger = PostgresAuthorizationLedger::for_candidate_qualification(
+            self.storage().clone(),
+            self.scope().clone(),
+            capability,
+            qualification_vector,
+        )
+        .map_err(operational_refusal)?;
+        Ok(Dispatcher::new(policy, port, ledger, config))
+    }
+
+    async fn record_qualification_completion(
+        &self,
+        registry: &ActiveOperationalRegistry,
+        vector: &AdmittedQualificationVector,
+        lease: &politeia_runtime::EffectLease,
+        manifest: ResourceManifest,
+    ) -> Result<QualificationCompletion, CoordinatorError> {
+        let resource = registry
+            .execution()
+            .resource(&vector.assignment.resource)
+            .ok_or_else(|| operational_refusal("qualification completion resource is absent"))?;
+        let receipt = OperationReceipt {
+            schema: "politeia.operation-receipt.v1".to_string(),
+            id: Uuid::now_v7(),
+            institution: self.workspace().institution.clone(),
+            workspace: self.workspace().id.clone(),
+            generation: registry.generation().clone(),
+            lease: lease.id().clone(),
+            reservation: lease.reservation_id().clone(),
+            intent: vector.signed_intent.clone(),
+            decision: lease.decision().clone(),
+            routing: vector.routing.clone(),
+            availability: vector.availability.clone(),
+            capability_verifications: vector.capability_verifications.clone(),
+            assurance: Vec::new(),
+            execution: vector.assignment.clone(),
+            adapter: resource.adapter.clone(),
+            completed_at: self.qualification_observed_at().await?,
+            outcome: OperationCompletionOutcome::Succeeded { manifest },
+        };
+        let canonical =
+            CanonicalPayload::from_serializable(&receipt).map_err(operational_refusal)?;
+        self.storage()
+            .record_completion_with_outbox(
+                self.scope(),
+                lease.reservation_id(),
+                &canonical,
+                &[OperationOutboxMessage {
+                    id: Uuid::now_v7(),
+                    topic: "politeia.operation.completed.v1".to_string(),
+                    payload: canonical.clone(),
+                }],
+            )
+            .await
+            .map_err(operational_refusal)?;
+        Ok(QualificationCompletion {
+            receipt_digest: canonical.digest().clone(),
+            adapter: resource.adapter.clone(),
         })
     }
 
@@ -1522,7 +2189,7 @@ impl PoliteiadService {
     /// The adjacent service boundary must first derive `intent` from its own
     /// authenticated request. Every control and verifier grant is resolved
     /// against the supplied coherent durable snapshot at `at`.
-    pub(crate) fn admit_operational_decision(
+    pub(crate) async fn admit_operational_decision(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
         registry: &ActiveOperationalRegistry,
@@ -1593,28 +2260,29 @@ impl PoliteiadService {
                 &evidence.activation_authority,
                 activation.signer(),
             )?;
-            let calibration = registry
-                .policy()
-                .calibrate_detector(&activation.payload().control)
-                .map_err(operational_refusal)?;
-            let calibration_digest = calibration.digest().map_err(operational_refusal)?;
             let retained_wire =
                 Self::durable_evidence_wire(durable, &activation.payload().retained_evidence)?;
             let retained = self
                 .anchors()
-                .admit_expected(AdmissionKind::Evidence, retained_wire)
+                .admit_expected(AdmissionKind::Evidence, retained_wire.clone())
                 .map_err(operational_refusal)?;
-            if retained.signer() != activation.signer()
-                || retained.payload().subject != calibration_digest
-                || retained.payload().producer_delegation != activation_authority.payload().id
-                || retained.payload().method != DETECTOR_CALIBRATION_METHOD
-                || retained.payload().payload_digest != calibration_digest
-                || retained.payload().observed_at > activation.payload().proved_at
-                || retained.payload().independence
-                    != politeia_core::evidence::IndependenceClass::IndependentAgent
+            let resolved = self
+                .resolve_detector_qualification(
+                    durable,
+                    &retained.payload().subject,
+                    &retained_wire,
+                    &evidence.activation,
+                    &evidence.activation_authority,
+                    at,
+                )
+                .await?;
+            if resolved
+                .report()
+                .qualification()
+                .is_none_or(|qualification| qualification.candidate() != registry.generation())
             {
                 return Err(operational_refusal(
-                    "activation proof does not resolve its retained public calibration evidence",
+                    "activation proof report does not qualify the active runtime generation",
                 ));
             }
             let authorization = direct_grant_authorization_digest(run_authority.payload())
@@ -1884,6 +2552,35 @@ struct ResourceManifestPort {
     audience: String,
     maximum_resources: u32,
     maximum_resource_bytes: u64,
+}
+
+/// The candidate-only port wrapper counts concrete port entry. The planted
+/// vector must be denied before this counter can increment, so zero is a
+/// direct observation rather than an inferred absence of a receipt.
+struct QualificationResourceManifestPort {
+    inner: ResourceManifestPort,
+    invocations: Arc<AtomicU64>,
+}
+
+impl EffectPort for QualificationResourceManifestPort {
+    type Output = ResourceManifest;
+    type Error = ResourceManifestError;
+
+    fn adapter(&self) -> &AdapterId {
+        self.inner.adapter()
+    }
+
+    fn audience(&self) -> &str {
+        self.inner.audience()
+    }
+
+    fn execute<'lease>(
+        &'lease self,
+        invocation: AuthorizedEffect<'lease>,
+    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send + 'lease {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        self.inner.execute(invocation)
+    }
 }
 
 impl EffectPort for ResourceManifestPort {

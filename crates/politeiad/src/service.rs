@@ -46,7 +46,8 @@ use crate::{
     service_handoff::HandoffSubmission,
     service_operation::{
         CAPTURE_SOURCE_OPERATION, CapabilityEvidenceSubmission,
-        DetectorCalibrationEvidenceSubmission, InstalledOperationHandler, OperationSubmission,
+        DetectorCalibrationEvidenceSubmission, DetectorQualificationSubmission,
+        InstalledOperationHandler, OperationSubmission,
     },
 };
 
@@ -140,8 +141,14 @@ pub enum CommissioningRequest {
     /// Reproduce and retain signed activation evidence for one exact public
     /// operational detector.
     DetectorCalibrationEvidence {
-        /// Policy bytes, actual calibration report, live grant, and signed evidence.
+        /// Retain independent verifier evidence over one service-owned report.
         submission: Box<DetectorCalibrationEvidenceSubmission>,
+    },
+    /// Exercise one inactive candidate's exact blocking control through the
+    /// existing dispatcher before independent activation verification.
+    ExerciseDetectorQualification {
+        /// Signed vector inputs and grant; outcomes are daemon-derived.
+        submission: Box<DetectorQualificationSubmission>,
     },
     /// Accept custody only after complete commissioner closure and a completed
     /// active-generation continuity canary.
@@ -1096,6 +1103,9 @@ impl PoliteiadService {
             }
             CommissioningRequest::DetectorCalibrationEvidence { submission } => {
                 self.admit_detector_calibration_evidence(*submission).await
+            }
+            CommissioningRequest::ExerciseDetectorQualification { submission } => {
+                self.exercise_detector_qualification(*submission).await
             }
             CommissioningRequest::Handoff { submission } => self.accept_handoff(*submission).await,
             CommissioningRequest::AdmitDelegation { delegation } => {
