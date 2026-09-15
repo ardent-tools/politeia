@@ -49,6 +49,13 @@ the complete set of blocking-control proofs selected by the candidate policy;
 the owner transition binds that set with its other assurance inputs. Missing or
 mismatched evidence leaves the active pointer unchanged.
 
+An activation proof identifies the detector version, configuration, policy,
+calibration population, and mediation path. Bindings that reference that same
+detector reuse its proof within its declared supported scopes. The qualification
+grant remains binding-specific; it confines the exceptional exercise and does
+not create a separate activation identity. Each subsequent operation still
+requires its own exact control run through the declared path.
+
 `ControlResult` uses the exact states `clean`, `violation`, `not_run`, `unavailable`, `unevaluable`,
 `unexpectedly_empty`, `not_applicable`, and `unresolved`. A state in which nothing meaningful was
 checked may not contribute to a clean assurance summary.

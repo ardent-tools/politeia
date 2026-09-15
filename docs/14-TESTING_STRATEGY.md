@@ -82,9 +82,12 @@ The executable package must exercise process and database boundaries: race two c
   `not_applicable`, and `unresolved` independently; preserve each distinction and prove none can
   aggregate as clean. Substitute an intent, candidate, binding, or decision after qualification
   admission and require refusal before port invocation. Reject pure rule reports, fabricated or
-  unretained observations, and self-verification. Omit or duplicate a required binding/control
-  proof, including a review-requiring binding, and require activation and rollback to preserve
-  the active pointer.
+  unretained observations, and self-verification. Omit or duplicate a required detector proof,
+  including one selected by a review-requiring binding, and require activation and rollback to
+  preserve the active pointer. Reuse one detector proof across its supported binding scopes;
+  enumerate installed handlers and require each native operation to retain its applicable
+  binding and exact control run. Omit or substitute its assurance and require refusal without
+  a port invocation, reservation, completion, or outbox write.
 - `POL-P`: deliver or attest artifact `A`, append a correction and a superseding `B`, and prove
   `A`'s bytes/digest remain unchanged while the current interpretation is reproducible from the
   admitted records. Add two competing live successors and a supersession cycle; both project to an

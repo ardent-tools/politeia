@@ -340,7 +340,7 @@ pub struct OperationReceipt {
     pub institution: InstitutionId,
     /// Workspace under which the operation ran.
     pub workspace: InstitutionWorkspaceId,
-    /// Exact active generation checked again at reservation and claim.
+    /// Exact generation checked again at reservation and claim.
     pub generation: RuntimeGenerationId,
     /// Unique dispatcher lease consumed immediately before the effect.
     pub lease: EffectLeaseId,
@@ -348,7 +348,7 @@ pub struct OperationReceipt {
     pub reservation: BudgetReservationId,
     /// Original principal-signed intent wire.
     pub intent: SignedAdmissionWire<OperationIntent>,
-    /// Normalized decision returned by the active generation's policy.
+    /// Normalized policy decision consumed by the dispatcher.
     pub decision: PolicyDecision,
     /// Recomputed requirement-first routing receipt.
     pub routing: RoutingDecision,

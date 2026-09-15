@@ -53,10 +53,10 @@ use crate::{
 const ACTIVATE_CONTROL: &str = "generation:activate";
 const ROLLBACK_CONTROL: &str = "generation:rollback";
 
-/// One detector required by a candidate's blocking policy at an exact scope.
+/// One binding obligation covered by a candidate's detector activation proof.
 ///
-/// The scope is part of the identity: one detector may serve different
-/// operations, but a qualification proves one real dispatcher path only.
+/// The candidate registry validates supported scopes. Several obligations may
+/// share one detector's exact policy and mediation path, hence one proof.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateBlockingControl {
     binding: String,
@@ -117,8 +117,7 @@ mod control_set_tests {
     }
 
     #[test]
-    fn activation_requires_every_blocking_binding_control_and_keeps_scope_in_its_identity()
-    -> Result<(), String> {
+    fn activation_coverage_retains_every_blocking_binding_and_scope() -> Result<(), String> {
         let enforced = [
             HardeningState::Observed,
             HardeningState::Proposed,
@@ -900,6 +899,10 @@ impl PoliteiadService {
         at: jiff::Timestamp,
     ) -> Result<(), CoordinatorError> {
         let required = candidate_blocking_controls(registry.policy().bindings());
+        let required_controls: BTreeSet<_> = required
+            .iter()
+            .map(|obligation| obligation.control.clone())
+            .collect();
         let mut supplied = BTreeSet::new();
         for qualification in &assurance.qualifications {
             let resolved = self
@@ -913,12 +916,6 @@ impl PoliteiadService {
                 )
                 .await?;
             let report = resolved.report();
-            if report.digest().map_err(refusal)? != qualification.report {
-                return Err(CoordinatorError::Refused(
-                    "candidate control qualification report differs from its selected digest"
-                        .to_string(),
-                ));
-            }
             let real_path = registry
                 .policy()
                 .validate_detector_qualification(report)
@@ -953,23 +950,20 @@ impl PoliteiadService {
                         .to_string(),
                 ));
             }
-            let key = CandidateBlockingControl {
-                binding: real_path.binding().to_owned(),
-                scope: real_path.scope().to_owned(),
-                control: real_path.control().to_owned(),
-            };
-            if !supplied.insert(key) {
+            if !supplied.insert(real_path.control().to_owned()) {
                 return Err(CoordinatorError::Refused(
-                    "candidate control qualifications duplicate one blocking binding control"
-                        .to_string(),
+                    "candidate control qualifications duplicate one detector".to_string(),
                 ));
             }
         }
-        if supplied != required {
+        if supplied != required_controls {
             return Err(CoordinatorError::Refused(format!(
                 "candidate control qualification coverage differs: missing {:?}; unexpected {:?}",
-                required.difference(&supplied).collect::<Vec<_>>(),
-                supplied.difference(&required).collect::<Vec<_>>(),
+                required
+                    .iter()
+                    .filter(|obligation| !supplied.contains(&obligation.control))
+                    .collect::<Vec<_>>(),
+                supplied.difference(&required_controls).collect::<Vec<_>>(),
             )));
         }
         Ok(())
