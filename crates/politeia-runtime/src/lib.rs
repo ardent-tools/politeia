@@ -384,6 +384,9 @@ impl EffectLease {
     }
 
     fn replay_key(&self) -> ReplayKey {
+        if let Some(qualification) = self.claims.purpose.qualification_purpose() {
+            return ReplayKey::QualificationIntent(qualification.intent().clone());
+        }
         match (
             self.claims.operation.requires_idempotency,
             self.claims.idempotency_key.as_ref(),
@@ -413,7 +416,8 @@ impl EffectLease {
         Ok(ReservationRequest::new(
             self.claims.reservation_id.clone(),
             Digest::blake3(&replay_key),
-            self.claims.operation.requires_idempotency,
+            self.claims.operation.requires_idempotency
+                || self.claims.purpose.qualification_purpose().is_some(),
             self.claims.effect.clone(),
             self.claims.replay_domain.clone(),
             budget_scopes,
@@ -532,6 +536,7 @@ pub trait EffectPort: Send + Sync {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 enum ReplayKey {
     Lease(EffectLeaseId),
+    QualificationIntent(Digest),
     Operation {
         principal: PrincipalId,
         operation: OperationId,
