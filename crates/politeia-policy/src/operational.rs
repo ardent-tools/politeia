@@ -1715,8 +1715,12 @@ fn validate_document(document: &OperationalPolicyDocument) -> Result<(), Operati
             return Err(OperationalPolicyRefusal::AmbiguousBinding);
         }
         for detector in &binding.detector_ids {
-            if !document.detectors.contains_key(detector) {
-                return Err(OperationalPolicyRefusal::UnknownDetector);
+            let detector = document
+                .detectors
+                .get(detector)
+                .ok_or(OperationalPolicyRefusal::UnknownDetector)?;
+            if !detector.spec.supported_scopes.contains(&binding.scope) {
+                return Err(OperationalPolicyRefusal::UnsupportedDetectorScope);
             }
         }
     }
@@ -1760,6 +1764,8 @@ pub enum OperationalPolicyRefusal {
     AmbiguousBinding,
     /// A binding or submitted result names an absent detector.
     UnknownDetector,
+    /// A binding applies a detector outside that detector's declared scope.
+    UnsupportedDetectorScope,
     /// Detector map key and embedded identity differ or are empty.
     AmbiguousDetector,
     /// Public detector calibration is empty or does not exercise both outcomes.
@@ -1810,6 +1816,9 @@ impl std::fmt::Display for OperationalPolicyRefusal {
             Self::EmptyRegistry => "operational policy registry is empty",
             Self::AmbiguousBinding => "operational policy binding is ambiguous",
             Self::UnknownDetector => "operational policy detector is absent",
+            Self::UnsupportedDetectorScope => {
+                "operational policy detector does not support the binding scope"
+            }
             Self::AmbiguousDetector => "operational detector identity is ambiguous",
             Self::InvalidDetectorCalibration => "public detector calibration is invalid",
             Self::DetectorMetadataMismatch => "detector metadata differs from its public rule",
@@ -1868,5 +1877,123 @@ impl std::error::Error for OperationalPolicyRefusal {
             Self::Evaluation(source) => Some(source),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "policy-construction fixtures must fail loudly when their canonical invariants drift"
+)]
+mod tests {
+    use super::*;
+    use crate::hardening::{BindingAuthority, HardeningLadder, HardeningState};
+    use crate::{Consequence, DetectorSpec, EvidenceClass};
+
+    const DETECTOR: &str = "public-scope-detector";
+    const SUPPORTED_SCOPE: &str = "operation:accepted";
+    const UNSUPPORTED_SCOPE: &str = "operation:rejected";
+
+    fn enforced_authority() -> BindingAuthority {
+        let mut ladder = HardeningLadder::new();
+        for state in [
+            HardeningState::Observed,
+            HardeningState::Proposed,
+            HardeningState::Approved,
+            HardeningState::Shadow,
+            HardeningState::Calibrated,
+            HardeningState::Advisory,
+            HardeningState::Enforced,
+        ] {
+            ladder.advance(state).expect("fixture ladder advances");
+        }
+        BindingAuthority::new(ladder, Consequence::Deny).expect("enforced fixture binding may deny")
+    }
+
+    fn binding(scope: &str) -> PolicyBinding {
+        PolicyBinding {
+            id: format!("binding:{scope}"),
+            clause_id: "public-scope-clause".to_string(),
+            detector_ids: vec![DETECTOR.to_string()],
+            scope: scope.to_string(),
+            authority: enforced_authority(),
+        }
+    }
+
+    fn detector() -> OperationalDetector {
+        let rule = PublicDetectorRule::ResourcePrefixForbidden {
+            forbidden_prefix: "forbidden:".to_string(),
+            known_good_resources: BTreeSet::from(["public:known-good".to_string()]),
+            planted_violation_resources: BTreeSet::from(["forbidden:planted".to_string()]),
+        };
+        OperationalDetector {
+            spec: DetectorSpec {
+                id: DETECTOR.to_string(),
+                evidence_class: EvidenceClass::Substance,
+                control_version: "1.0.0".to_string(),
+                configuration_digest: rule
+                    .configuration_digest()
+                    .expect("fixture detector configuration digests"),
+                mediation_path: "dispatcher:authorize".to_string(),
+                supported_scopes: BTreeSet::from([SUPPORTED_SCOPE.to_string()]),
+                calibration_population: rule
+                    .calibration_population_digest()
+                    .expect("fixture detector population digests"),
+                known_blind_spots: Vec::new(),
+            },
+            rule,
+        }
+    }
+
+    fn detectors() -> BTreeMap<String, OperationalDetector> {
+        BTreeMap::from([(DETECTOR.to_string(), detector())])
+    }
+
+    #[test]
+    fn registry_construction_rejects_binding_outside_detector_scope() {
+        let refusal = OperationalPolicyRegistry::new(
+            PolicyBundleId::new(),
+            vec![binding(UNSUPPORTED_SCOPE)],
+            detectors(),
+        )
+        .expect_err("binding outside detector scope must not construct a registry");
+        assert!(matches!(
+            refusal,
+            OperationalPolicyRefusal::UnsupportedDetectorScope
+        ));
+    }
+
+    #[test]
+    fn artifact_decode_rechecks_detector_scope_and_admits_supported_binding() {
+        let bundle = PolicyBundleId::new();
+        let valid = OperationalPolicyRegistry::new(
+            bundle.clone(),
+            vec![binding(SUPPORTED_SCOPE)],
+            detectors(),
+        )
+        .expect("supported binding constructs a registry");
+        let valid_bytes = valid.artifact_bytes().expect("valid registry encodes");
+        assert!(
+            OperationalPolicyRegistry::from_artifact_bytes(&valid_bytes, &bundle, valid.digest(),)
+                .is_ok()
+        );
+
+        let invalid_document = OperationalPolicyDocument {
+            bundle: bundle.clone(),
+            bindings: vec![binding(UNSUPPORTED_SCOPE)],
+            detectors: detectors(),
+        };
+        let invalid_bytes =
+            to_canonical_bytes(&invalid_document).expect("invalid-scope document encodes");
+        let refusal = OperationalPolicyRegistry::from_artifact_bytes(
+            &invalid_bytes,
+            &bundle,
+            &Digest::blake3(&invalid_bytes),
+        )
+        .expect_err("artifact decode rechecks detector scope");
+        assert!(matches!(
+            refusal,
+            OperationalPolicyRefusal::UnsupportedDetectorScope
+        ));
     }
 }
