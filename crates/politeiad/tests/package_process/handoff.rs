@@ -47,7 +47,7 @@ pub(super) fn exercise(
         temporary_grants,
     )?;
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("snapshot"),
@@ -95,7 +95,7 @@ pub(super) fn exercise(
         &commissioned.publication,
     )?;
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("commissioning"),
@@ -149,7 +149,7 @@ pub(super) fn exercise(
     let unauthorized_publication =
         fixture.replacement_generation_documents(&replacement, &commissioned.receipt);
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("commissioning"),
@@ -279,7 +279,7 @@ fn refuse_handoff(
     reason: &str,
 ) -> TestResult {
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("commissioning"),
@@ -411,7 +411,7 @@ fn negative_canary(
         &prepared.authority_admission,
     )?;
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("operate"),

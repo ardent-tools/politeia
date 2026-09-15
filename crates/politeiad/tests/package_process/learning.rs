@@ -128,7 +128,7 @@ pub(crate) fn exercise(
     )?;
     assert_eq!(prior_bytes, fs::read(&fixture.source_document)?);
     require_refusal(
-        commissioning(
+        &commissioning(
             database_url,
             fixture,
             "active-context-replay.json",
@@ -197,7 +197,7 @@ pub(crate) fn exercise(
         Some(substituted.idempotency_key()),
     );
     require_refusal(
-        commissioning(
+        &commissioning(
             database_url,
             fixture,
             "active-context-input-substitution.json",
@@ -370,7 +370,7 @@ pub(crate) fn exercise(
         relation.clone(),
     );
     require_refusal(
-        commissioning(
+        &commissioning(
             database_url,
             fixture,
             "owner-correction-unknown-feedback.json",

@@ -80,7 +80,7 @@ pub(super) fn exercise(
     let daemon = serve(database_url, fixture)?;
     let _ = await_status(database_url, fixture)?;
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("operate"),
@@ -106,7 +106,7 @@ pub(super) fn exercise(
     )?;
     let overlap_guard = CompletionBarrier::install(database_url, fixture)?;
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("operate"),
@@ -175,7 +175,7 @@ fn concurrent_one_winner(
     let observation = barrier.observation(&reservation)?;
     let loser = spawn_operate(database_url, fixture, &loser_request)?;
     require_refusal(
-        loser.wait_with_output()?,
+        &loser.wait_with_output()?,
         "fresh authority operation overlapping a claimed effect",
         UNRESOLVED_OVERLAP,
     )?;

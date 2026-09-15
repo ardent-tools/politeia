@@ -100,7 +100,7 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
         }),
     )?;
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("commissioning"),
@@ -124,7 +124,7 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
                 request,
             )?;
             require_refusal(
-                run(
+                &run(
                     database_url,
                     &[
                         Path::new("commissioning"),

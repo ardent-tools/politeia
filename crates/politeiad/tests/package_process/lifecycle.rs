@@ -61,13 +61,8 @@ pub(crate) fn activate(
             GenerationTransitionAction::Activate => GenerationTransitionAction::Rollback,
             GenerationTransitionAction::Rollback => GenerationTransitionAction::Activate,
         };
-        let mut missing_transition = fixture.activation_request(
-            kind,
-            generation.clone(),
-            revision,
-            active.clone(),
-            &assurance,
-        );
+        let mut missing_transition =
+            fixture.activation_request(kind, &generation, revision, active.as_ref(), &assurance);
         missing_transition["request"]
             .as_object_mut()
             .ok_or("activation request is an object")?
@@ -181,13 +176,7 @@ pub(crate) fn activate(
                 database_url,
                 fixture,
                 "lifecycle-non-clean.json",
-                &fixture.activation_request(
-                    kind,
-                    generation.clone(),
-                    revision,
-                    active.clone(),
-                    &altered,
-                ),
+                &fixture.activation_request(kind, &generation, revision, active.as_ref(), &altered),
                 "signed lifecycle assurance differs from freshly calibrated artifact validation",
             )?;
         }
@@ -205,13 +194,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-substituted-grant.json",
-            &fixture.activation_request(
-                kind,
-                generation.clone(),
-                revision,
-                active.clone(),
-                &wrong_grant,
-            ),
+            &fixture.activation_request(kind, &generation, revision, active.as_ref(), &wrong_grant),
             "control run authorization digest differs from its admitted direct grant",
         )?;
         let mut dangling = assurance.clone();
@@ -228,13 +211,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-dangling-evidence.json",
-            &fixture.activation_request(
-                kind,
-                generation.clone(),
-                revision,
-                active.clone(),
-                &dangling,
-            ),
+            &fixture.activation_request(kind, &generation, revision, active.as_ref(), &dangling),
             "activation proof lacks exact verifier-signed lifecycle calibration evidence",
         )?;
         refuse(
@@ -243,9 +220,9 @@ pub(crate) fn activate(
             "lifecycle-stale-revision.json",
             &fixture.activation_request(
                 kind,
-                generation.clone(),
+                &generation,
                 revision - 1,
-                active.clone(),
+                active.as_ref(),
                 &assurance,
             ),
             "generation activation compare-and-swap is stale",
@@ -317,13 +294,7 @@ pub(crate) fn activate(
             database_url,
             fixture,
             "lifecycle-self-verification.json",
-            &fixture.activation_request(
-                kind,
-                generation.clone(),
-                revision,
-                active.clone(),
-                &self_proof,
-            ),
+            &fixture.activation_request(kind, &generation, revision, active.as_ref(), &self_proof),
             "the control producer also signed its activation proof",
         )?;
     }
@@ -336,7 +307,7 @@ pub(crate) fn activate(
         database_url,
         fixture,
         &format!("{kind}-generation.json"),
-        &fixture.activation_request(kind, generation.clone(), revision, active, &assurance),
+        &fixture.activation_request(kind, &generation, revision, active.as_ref(), &assurance),
     )?;
     assert_eq!(
         status_value(database_url, fixture)?["active_generation"],
@@ -384,7 +355,7 @@ fn refuse(
 ) -> TestResult {
     let path = write_request(fixture, name, document)?;
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 std::path::Path::new("commissioning"),

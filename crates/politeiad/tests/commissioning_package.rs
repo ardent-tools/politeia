@@ -130,14 +130,14 @@ fn require_coordinated(output: Output, phase: &str) -> TestResult<serde_json::Va
     Ok(result)
 }
 
-fn require_refusal(output: Output, phase: &str, expected: &str) -> TestResult {
+fn require_refusal(output: &Output, phase: &str, expected: &str) -> TestResult {
     if output.status.success() {
         return Err(format!("{phase} unexpectedly succeeded").into());
     }
     let detail = format!(
         "{}\n{}",
-        String::from_utf8(output.stdout)?,
-        String::from_utf8(output.stderr)?
+        std::str::from_utf8(&output.stdout)?,
+        std::str::from_utf8(&output.stderr)?
     );
     if detail.contains(expected) {
         return Ok(());
@@ -435,7 +435,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         &software.forged_candidate_approval(&software_candidate),
     )?;
     require_refusal(
-        run(
+        &run(
             &database_url,
             &[
                 Path::new("commissioning"),
@@ -456,7 +456,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         }),
     )?;
     require_refusal(
-        run(
+        &run(
             &database_url,
             &[
                 Path::new("commissioning"),
@@ -577,7 +577,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         &software.forged_context_requester(&software_context_delegation),
     )?;
     require_refusal(
-        run(
+        &run(
             &database_url,
             &[
                 Path::new("commissioning"),
@@ -613,7 +613,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         serde_json::json!(fs::read(&software.source_document)?)
     );
     require_refusal(
-        run(
+        &run(
             &database_url,
             &[
                 Path::new("commissioning"),
@@ -697,7 +697,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
             serde_json::json!(generation)
         );
         require_refusal(
-            run(
+            &run(
                 &database_url,
                 &[
                     Path::new("commissioning"),
@@ -913,7 +913,7 @@ fn commission_generation(
         }),
     )?;
     require_refusal(
-        run(
+        &run(
             database_url,
             &[
                 Path::new("commissioning"),

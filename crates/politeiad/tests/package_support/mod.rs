@@ -902,17 +902,17 @@ impl ReferenceFixture {
     pub(crate) fn activation_request(
         &self,
         kind: &str,
-        generation: Digest,
+        generation: &Digest,
         expected_revision: i64,
-        expected_active: Option<Digest>,
+        expected_active: Option<&Digest>,
         assurance: &ActivationDocuments,
     ) -> serde_json::Value {
         let action = transition_action(kind);
         let transition = self.generation_transition_authorization(
             action,
-            generation,
+            generation.clone(),
             expected_revision,
-            expected_active,
+            expected_active.cloned(),
             assurance,
         );
         Self::activation_request_with_transition(assurance, &transition)
