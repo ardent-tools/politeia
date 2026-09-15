@@ -630,6 +630,11 @@ impl VerifiedGenerationArtifact {
         self.component_bytes("policy")
     }
 
+    /// Reread the exact executable component bound into this verified generation.
+    pub fn executable_bytes(&self) -> Result<Vec<u8>, ArtifactError> {
+        self.component_bytes("component:executable")
+    }
+
     /// Reread the exact execution registry bound into this verified generation.
     pub fn execution_registry_bytes(&self) -> Result<Vec<u8>, ArtifactError> {
         self.component_bytes("component:execution_registry")

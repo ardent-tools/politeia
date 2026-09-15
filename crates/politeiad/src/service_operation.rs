@@ -1177,7 +1177,7 @@ impl PoliteiadService {
         // Reread and rehash the exact component now, rather than accepting the
         // immutable bundle verification from an earlier filesystem read.
         artifact
-            .component_bytes("executable")
+            .executable_bytes()
             .map_err(|error| operational_refusal(error.to_string()))?;
         validate_approved_executable_identity(&executable_digest, self.running_executable_digest())
             .map_err(OperationalRegistryRefusal::ExecutableIdentity)
