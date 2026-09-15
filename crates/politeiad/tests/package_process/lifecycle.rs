@@ -1,5 +1,10 @@
 //! Real lifecycle calibration, deliberate failures, and atomic activation.
 
+use super::evidence::observe_effects;
+use super::{
+    OperationalFixture, ReferenceFixture, TestResult, require_refusal, run, status_value,
+    submit_commissioning, write_request,
+};
 use jiff::Timestamp;
 use politeia_core::{
     DelegationId, Digest, EvidenceId,
@@ -9,12 +14,6 @@ use politeia_evidence::assurance::ControlResult;
 use politeiad::{
     service_generation::GenerationTransitionAction,
     service_generation_validation::GenerationValidationReport,
-};
-use tokio_postgres::NoTls;
-
-use super::{
-    OperationalFixture, ReferenceFixture, TestResult, require_refusal, run, status_value,
-    submit_commissioning, write_request,
 };
 
 /// Activate or roll back only after independent public validation calls.
@@ -407,6 +406,9 @@ fn qualify_candidate(
         "exercise-detector-qualification.json",
         &documents.exercise,
     )?;
+    let stage_one_revision = status_value(database_url, fixture)?["revision"]
+        .as_i64()
+        .ok_or("status omitted revision after Stage 1")?;
     let report: politeia_policy::operational::PublicDetectorCalibration =
         serde_json::from_value(result["report"].clone())?;
     let detector = report.control.clone();
@@ -420,7 +422,14 @@ fn qualify_candidate(
             "submission": qualification,
         }),
     )?;
-    let attempts_before_replay = operation_attempt_counts(database_url, fixture)?;
+    let stage_two_revision = status_value(database_url, fixture)?["revision"]
+        .as_i64()
+        .ok_or("status omitted revision after Stage 2")?;
+    assert!(
+        stage_two_revision > stage_one_revision,
+        "Stage 2 commits verifier evidence after the retained Stage 1 exercise"
+    );
+    let effects_before_replay = observe_effects(database_url, fixture)?;
     refuse(
         database_url,
         fixture,
@@ -429,9 +438,9 @@ fn qualify_candidate(
         "replay",
     )?;
     assert_eq!(
-        operation_attempt_counts(database_url, fixture)?,
-        attempts_before_replay,
-        "replaying Stage 1 must not create another candidate effect attempt or completion"
+        observe_effects(database_url, fixture)?,
+        effects_before_replay,
+        "replaying Stage 1 after Stage 2 advances revision creates no attempt/reservation, completion, or outbox record"
     );
     operations.remember_qualification(generation.clone(), detector, qualification);
     let qualifications = operations
@@ -453,27 +462,6 @@ fn qualify_candidate(
         "the fixture's four blocking bindings share one detector proof"
     );
     Ok(qualifications)
-}
-
-/// Read the same durable attempt/completion seam used by the package's
-/// executable-identity witness. This observes the exact subject of the replay
-/// refusal instead of treating a transport failure as proof of no execution.
-fn operation_attempt_counts(
-    database_url: &str,
-    fixture: &ReferenceFixture,
-) -> TestResult<(i64, i64)> {
-    let runtime = tokio::runtime::Runtime::new()?;
-    let (client, connection) = runtime.block_on(tokio_postgres::connect(database_url, NoTls))?;
-    let _connection = runtime.spawn(connection);
-    let institution = fixture.host_trust.workspace.institution.0;
-    let workspace = fixture.host_trust.workspace.id.0;
-    let row = runtime.block_on(client.query_one(
-        "SELECT COUNT(*)::BIGINT, COUNT(*) FILTER (WHERE status = 'completed')::BIGINT
-         FROM operation_attempts
-         WHERE institution_id = $1 AND workspace_id = $2",
-        &[&institution, &workspace],
-    ))?;
-    Ok((row.get(0), row.get(1)))
 }
 
 fn validate(

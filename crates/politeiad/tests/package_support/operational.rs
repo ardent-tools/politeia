@@ -474,6 +474,21 @@ impl OperationalFixture {
             .count()
     }
 
+    /// Binding identities the canonical evaluator applies to one installed
+    /// operation. These remain distinct even when their shared detector proof
+    /// is represented once in the activation assurance set.
+    pub(crate) fn blocking_binding_ids_for(&self, operation_name: &str) -> BTreeSet<String> {
+        let operation = self.operation(operation_name);
+        self.policy
+            .bindings()
+            .iter()
+            .filter(|binding| {
+                binding.is_blocking() && binding.scope == operation_scope(&operation.spec)
+            })
+            .map(|binding| binding.id.clone())
+            .collect()
+    }
+
     /// Availability observation naming both the eligible local resource and
     /// cheaper, higher-scoring but hard-ineligible remote reference resource.
     pub(crate) fn availability(&self, at: Timestamp) -> AvailabilitySnapshot {

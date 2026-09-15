@@ -14,10 +14,75 @@ use std::{
 
 use politeia_core::Digest;
 use serde_json::{Value, json};
+use tokio_postgres::NoTls;
 
-use super::TestResult;
+use super::{ReferenceFixture, TestResult};
 
 static TRANSCRIPT: Mutex<Option<File>> = Mutex::new(None);
+
+/// Durable dispatcher-side state visible after one process request. Each
+/// attempt owns one non-null reservation; completion and outbox prove its
+/// atomic externalization counterpart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct EffectObservation {
+    pub(super) attempts: i64,
+    pub(super) completions: i64,
+    pub(super) outbox: i64,
+}
+
+/// Read only the durable effect boundary. Refusal witnesses compare this
+/// before and after a request so a transport failure cannot be mistaken for
+/// proof that no attempt/reservation, completion, or outbox record was
+/// created.
+pub(super) fn observe_effects(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+) -> TestResult<EffectObservation> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (client, connection) = runtime.block_on(tokio_postgres::connect(database_url, NoTls))?;
+    let _connection = runtime.spawn(connection);
+    let institution = fixture.host_trust.workspace.institution.0;
+    let workspace = fixture.host_trust.workspace.id.0;
+    let attempts = runtime.block_on(client.query_one(
+        "SELECT COUNT(*)::BIGINT,
+                COUNT(*) FILTER (WHERE status = 'completed')::BIGINT
+         FROM operation_attempts
+         WHERE institution_id = $1 AND workspace_id = $2",
+        &[&institution, &workspace],
+    ))?;
+    let outbox = runtime.block_on(client.query_one(
+        "SELECT COUNT(*)::BIGINT
+         FROM transactional_outbox
+         WHERE institution_id = $1 AND workspace_id = $2",
+        &[&institution, &workspace],
+    ))?;
+    Ok(EffectObservation {
+        attempts: attempts.get(0),
+        completions: attempts.get(1),
+        outbox: outbox.get(0),
+    })
+}
+
+/// Check whether one named governed-state artifact was durably written. This
+/// is used for capture refusal probes whose semantic artifact is a state entry
+/// rather than an operation-completion response.
+pub(super) fn state_entry_exists(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    key: &str,
+) -> TestResult<bool> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (client, connection) = runtime.block_on(tokio_postgres::connect(database_url, NoTls))?;
+    let _connection = runtime.spawn(connection);
+    let institution = fixture.host_trust.workspace.institution.0;
+    let workspace = fixture.host_trust.workspace.id.0;
+    let exists = runtime.block_on(client.query_opt(
+        "SELECT 1 FROM state_entries
+         WHERE institution_id = $1 AND workspace_id = $2 AND state_key = $3",
+        &[&institution, &workspace, &key],
+    ))?;
+    Ok(exists.is_some())
+}
 
 pub(super) struct Session {
     path: Option<PathBuf>,

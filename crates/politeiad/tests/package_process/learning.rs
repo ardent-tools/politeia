@@ -17,6 +17,7 @@ use politeiad::{
     service_learning::LearningRequest,
     service_operation::{
         CAPTURE_SOURCE_OPERATION, COMPILE_CONTEXT_OPERATION, DISCOVER_CAPABILITIES_OPERATION,
+        OperationSubmission,
     },
 };
 
@@ -27,7 +28,9 @@ use crate::package_support::{
 };
 
 use super::{
-    TestResult, require_coordinated, require_refusal, run, submit_commissioning, write_request,
+    TestResult,
+    evidence::{observe_effects, state_entry_exists},
+    require_coordinated, require_refusal, run, submit_commissioning, write_request,
 };
 
 pub(super) struct LearningExercise {
@@ -111,12 +114,47 @@ pub(crate) fn exercise(
         now,
         Some(context.idempotency_key()),
     );
+    let alternate_context = fixture.active_context_draft(
+        fixture.identities.worker.clone(),
+        fixture.identities.worker_key(),
+        &context_grant,
+        runtime.clone(),
+        original_source,
+        original_candidate,
+    );
+    let alternate_context_submission = operations.submission(
+        fixture,
+        COMPILE_CONTEXT_OPERATION,
+        &fixture.identities.worker,
+        fixture.identities.worker_key(),
+        alternate_context.input_digest().clone(),
+        vec![context_grant.clone()],
+        alternate_context.resources().clone(),
+        active_learning_budget(),
+        Timestamp::now(),
+        Some(alternate_context.idempotency_key()),
+    );
     let context_document = context.document(context_submission);
+    refuse_learning_assurance(
+        database_url,
+        fixture,
+        "active-context",
+        &context_document,
+        signed_control_run(&alternate_context_submission)?,
+    )?;
     let original_context = submit_commissioning(
         database_url,
         fixture,
         "active-context.json",
         &context_document,
+    )?;
+    let prior_context_receipt =
+        super::continuity::observe_completed_disclosure(database_url, fixture, &original_context)?;
+    assert_disclosure_decision(
+        operations,
+        COMPILE_CONTEXT_OPERATION,
+        &context_document,
+        &prior_context_receipt,
     )?;
     assert_eq!(
         original_context["context"]["input_ids"],
@@ -157,11 +195,46 @@ pub(crate) fn exercise(
         now,
         Some(discovery.idempotency_key()),
     );
+    let alternate_discovery = fixture.active_discovery_draft(
+        fixture.identities.worker.clone(),
+        fixture.identities.worker_key(),
+        &discovery_grant,
+        runtime.clone(),
+        &operations.capability_population_digest(),
+    );
+    let alternate_discovery_submission = operations.submission(
+        fixture,
+        DISCOVER_CAPABILITIES_OPERATION,
+        &fixture.identities.worker,
+        fixture.identities.worker_key(),
+        alternate_discovery.input_digest().clone(),
+        vec![discovery_grant.clone()],
+        alternate_discovery.resources().clone(),
+        active_learning_budget(),
+        Timestamp::now(),
+        Some(alternate_discovery.idempotency_key()),
+    );
+    let discovery_document = discovery.document(discovery_submission);
+    refuse_learning_assurance(
+        database_url,
+        fixture,
+        "active-discovery",
+        &discovery_document,
+        signed_control_run(&alternate_discovery_submission)?,
+    )?;
     let discovery_result = submit_commissioning(
         database_url,
         fixture,
         "active-discovery.json",
-        &discovery.document(discovery_submission),
+        &discovery_document,
+    )?;
+    let discovery_receipt =
+        super::continuity::observe_completed_disclosure(database_url, fixture, &discovery_result)?;
+    assert_disclosure_decision(
+        operations,
+        DISCOVER_CAPABILITIES_OPERATION,
+        &discovery_document,
+        &discovery_receipt,
     )?;
     assert_eq!(
         discovery_result["operations"],
@@ -244,6 +317,32 @@ pub(crate) fn exercise(
     let capture_documents = fixture.capture_after_admission(&capture_documents);
     let replacement_capture =
         active_capture_document(fixture, operations, &capture_grant, capture_documents, now)?;
+    let capture_submission: SourceCaptureSubmission =
+        serde_json::from_value(replacement_capture.document.clone())?;
+    let capture_state_key = format!("source_capture:{}", capture_submission.capture.payload.id.0);
+    assert!(
+        !state_entry_exists(database_url, fixture, &capture_state_key)?,
+        "the fresh active capture has no durable source artifact before dispatcher admission"
+    );
+    let alternate_capture_submission = operations.submission(
+        fixture,
+        CAPTURE_SOURCE_OPERATION,
+        &fixture.identities.commissioner,
+        fixture.identities.commissioner_key(),
+        Digest::blake3(b"another signed capture operation intent"),
+        vec![capture_grant.clone()],
+        bootstrap_capture_resources(&capture_submission.capture.payload),
+        capture_grant.budget.clone(),
+        Timestamp::now(),
+        None,
+    );
+    refuse_capture_assurance(
+        database_url,
+        fixture,
+        &replacement_capture.document,
+        signed_control_run(&alternate_capture_submission)?,
+        &capture_state_key,
+    )?;
     let replacement_capture_result = require_coordinated(
         run(
             database_url,
@@ -260,6 +359,10 @@ pub(crate) fn exercise(
         "active corrected source capture",
     )?;
     assert!(replacement_capture_result["snapshot_manifest"].is_string());
+    assert!(
+        state_entry_exists(database_url, fixture, &capture_state_key)?,
+        "the accepted active capture retains its governed source artifact"
+    );
     let replacement_candidate = fixture.candidate_documents(&capture_grant, &replacement_capture);
     let approval_key = format!(
         "fact_approval:{}",
@@ -267,8 +370,6 @@ pub(crate) fn exercise(
     );
     let prior_approval =
         super::continuity::observe_signed_state(database_url, fixture, &approval_key)?;
-    let prior_context_receipt =
-        super::continuity::observe_completed_disclosure(database_url, fixture, &original_context)?;
     submit_commissioning(
         database_url,
         fixture,
@@ -549,6 +650,169 @@ fn delegation_admission(fixture: &ReferenceFixture, delegation: Delegation) -> s
         "kind": "admit_delegation",
         "delegation": fixture.signed_commissioner_delegation(delegation),
     })
+}
+
+/// Extract a separately signed, correctly typed run that can be transplanted
+/// into another request. The later refusal must therefore reach policy's exact
+/// subject comparison rather than stopping at JSON decoding or signature
+/// admission.
+fn signed_control_run(submission: &OperationSubmission) -> TestResult<serde_json::Value> {
+    Ok(serde_json::to_value(
+        submission
+            .assurance
+            .first()
+            .ok_or("native operation omitted its control assurance")?
+            .run
+            .clone(),
+    )?)
+}
+
+/// Exercise both assurance failures through the actual learning ingress for a
+/// context or discovery request. These documents retain valid primary request
+/// and delegation axes; only operational assurance is omitted or replaced by
+/// a correctly signed run from another exact intent.
+fn refuse_learning_assurance(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    label: &str,
+    document: &serde_json::Value,
+    alternate_run: serde_json::Value,
+) -> TestResult {
+    let before = observe_effects(database_url, fixture)?;
+    let mut omitted = document.clone();
+    *omitted
+        .pointer_mut("/request/active_submission/assurance")
+        .ok_or("learning request omitted active assurance")? = serde_json::json!([]);
+    require_refusal(
+        &commissioning(
+            database_url,
+            fixture,
+            &format!("{label}-omitted-assurance.json"),
+            &omitted,
+        )?,
+        &format!("{label} omitted assurance"),
+        "operation assurance does not exactly cover active policy controls",
+    )?;
+    assert_eq!(
+        observe_effects(database_url, fixture)?,
+        before,
+        "omitted learning assurance creates no attempt/reservation, completion, or outbox record"
+    );
+
+    let mut substituted = document.clone();
+    *substituted
+        .pointer_mut("/request/active_submission/assurance/0/run")
+        .ok_or("learning request omitted active control run")? = alternate_run;
+    require_refusal(
+        &commissioning(
+            database_url,
+            fixture,
+            &format!("{label}-substituted-run.json"),
+            &substituted,
+        )?,
+        &format!("{label} substituted control run"),
+        "mismatches Input",
+    )?;
+    assert_eq!(
+        observe_effects(database_url, fixture)?,
+        before,
+        "substituted learning assurance creates no attempt/reservation, completion, or outbox record"
+    );
+    Ok(())
+}
+
+/// Confirm the daemon-retained disclosure receipt, not merely the generated
+/// request, binds the evaluator's applicable binding and the exact fresh run
+/// and shared activation proof supplied to the native handler.
+fn assert_disclosure_decision(
+    operations: &OperationalFixture,
+    operation: &str,
+    document: &serde_json::Value,
+    durable: &serde_json::Value,
+) -> TestResult {
+    let decision = &durable["receipt"]["decision"];
+    let expected_bindings = serde_json::to_value(operations.blocking_binding_ids_for(operation))?;
+    let run = document
+        .pointer("/request/active_submission/assurance/0/run/payload/id")
+        .cloned()
+        .ok_or("learning request omitted signed control-run identity")?;
+    let proof = document
+        .pointer("/request/active_submission/assurance/0/activation/payload/id")
+        .cloned()
+        .ok_or("learning request omitted signed activation-proof identity")?;
+    assert_eq!(decision["allowed"], true);
+    assert_eq!(
+        decision["binding_ids"], expected_bindings,
+        "durable learning decision retains every applicable policy binding"
+    );
+    assert_eq!(
+        decision["control_runs"],
+        serde_json::json!([run]),
+        "durable learning decision retains the exact submitted control run"
+    );
+    assert_eq!(
+        decision["activation_proofs"],
+        serde_json::json!([proof]),
+        "durable learning decision retains the shared detector activation proof"
+    );
+    Ok(())
+}
+
+/// Source capture uses the public snapshot entrypoint but reaches the same
+/// active operational admission. Its source artifact must remain absent when
+/// either assurance axis fails.
+fn refuse_capture_assurance(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    document: &serde_json::Value,
+    alternate_run: serde_json::Value,
+    capture_state_key: &str,
+) -> TestResult {
+    let before = observe_effects(database_url, fixture)?;
+    let mut omitted = document.clone();
+    *omitted
+        .pointer_mut("/operation/assurance")
+        .ok_or("active capture omitted assurance")? = serde_json::json!([]);
+    require_refusal(
+        &run(
+            database_url,
+            &[
+                Path::new("snapshot"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &write_request(fixture, "active-capture-omitted-assurance.json", &omitted)?,
+            ],
+        )?,
+        "active capture omitted assurance",
+        "operation assurance does not exactly cover active policy controls",
+    )?;
+    assert_eq!(observe_effects(database_url, fixture)?, before);
+    assert!(
+        !state_entry_exists(database_url, fixture, capture_state_key)?,
+        "omitted capture assurance does not retain a source artifact"
+    );
+
+    let mut substituted = document.clone();
+    *substituted
+        .pointer_mut("/operation/assurance/0/run")
+        .ok_or("active capture omitted control run")? = alternate_run;
+    require_refusal(
+        &run(
+            database_url,
+            &[
+                Path::new("snapshot"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &write_request(fixture, "active-capture-substituted-run.json", &substituted)?,
+            ],
+        )?,
+        "active capture substituted control run",
+        "mismatches Input",
+    )?;
+    assert_eq!(observe_effects(database_url, fixture)?, before);
+    assert!(
+        !state_entry_exists(database_url, fixture, capture_state_key)?,
+        "substituted capture assurance does not retain a source artifact"
+    );
+    Ok(())
 }
 
 fn active_capture_document(
