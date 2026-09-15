@@ -27,6 +27,7 @@ timeout_secs = 300
 
 [stages.postgres]
 commands = [
+  { cmd = "python3 -B -m unittest discover -s bin -p test_check_postgres.py" },
   { cmd = "cargo test --no-run --locked --message-format=json --jobs 8 -p politeia-storage", stdout = ".kanon-artifacts/postgres-storage-build.json" },
   { cmd = "cargo test --no-run --locked --message-format=json --jobs 8 -p politeiad --test commissioning_package", stdout = ".kanon-artifacts/postgres-package-build.json" },
   { cmd = "python3 bin/check-postgres.py", env = { POLITEIA_STORAGE_ARTIFACTS_JSON = ".kanon-artifacts/postgres-storage-build.json", POLITEIA_PACKAGE_ARTIFACTS_JSON = ".kanon-artifacts/postgres-package-build.json", POLITEIA_ACCEPTANCE_ARTIFACT_FILE = ".kanon-artifacts/postgres-package.jsonl" } },

@@ -110,6 +110,7 @@ jobs:
       - name: Prepare exact PostgreSQL acceptance executables
         shell: bash
         run: |
+          python3 -B -m unittest discover -s bin -p test_check_postgres.py
           mkdir -p .kanon-artifacts
           cargo test --no-run --locked --message-format=json --jobs 8 \
             -p politeia-storage \

@@ -35,7 +35,6 @@ class ExpectedArtifact:
     target: str
     kind: tuple[str, ...]
     profile_test: bool
-    execute: bool
 
 
 EXPECTED_ARTIFACTS = (
@@ -46,7 +45,6 @@ EXPECTED_ARTIFACTS = (
         "politeia_storage",
         ("lib",),
         True,
-        True,
     ),
     ExpectedArtifact(
         "runtime ledger tests",
@@ -54,7 +52,6 @@ EXPECTED_ARTIFACTS = (
         "crates/politeia-storage/Cargo.toml",
         "runtime_ledger",
         ("test",),
-        True,
         True,
     ),
     ExpectedArtifact(
@@ -64,7 +61,6 @@ EXPECTED_ARTIFACTS = (
         "politeia",
         ("bin",),
         False,
-        False,
     ),
     ExpectedArtifact(
         "daemon CLI",
@@ -73,7 +69,6 @@ EXPECTED_ARTIFACTS = (
         "politeiad",
         ("bin",),
         False,
-        False,
     ),
     ExpectedArtifact(
         "commissioning package tests",
@@ -81,7 +76,6 @@ EXPECTED_ARTIFACTS = (
         "crates/politeiad/Cargo.toml",
         "commissioning_package",
         ("test",),
-        True,
         True,
     ),
 )
@@ -108,7 +102,7 @@ def read_build_transcript(path: Path, label: str) -> list[dict[str, object]]:
 
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         raise RuntimeError(f"{label} build transcript is unavailable at {path}: {error}") from error
     if not lines:
         raise RuntimeError(f"{label} build transcript is empty")
@@ -241,7 +235,7 @@ def run_tests(database_url: str, binaries: dict[str, Path]) -> int:
             str(REPOSITORY_ROOT / "target" / "package-acceptance"),
         )
     for artifact in EXPECTED_ARTIFACTS:
-        if not artifact.execute:
+        if not artifact.profile_test:
             continue
         result = subprocess.run(
             [str(binaries[artifact.label]), "--ignored", "--test-threads=1"],
