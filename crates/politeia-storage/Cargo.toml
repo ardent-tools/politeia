@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 politeia-core.workspace = true
+politeia-policy.workspace = true
 politeia-runtime.workspace = true
 jiff.workspace = true
 serde.workspace = true
@@ -17,7 +18,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
-politeia-policy.workspace = true
 
 [lints]
 workspace = true

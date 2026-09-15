@@ -22,7 +22,7 @@ use politeia_core::{
     Effect, EffectLeaseId, OperationId, OperationSpec, PolicyBundleId, PrincipalId, ResourceBudget,
     RuntimeGenerationId,
 };
-use politeia_policy::PolicyDecision;
+use politeia_policy::{DecisionPurpose, PolicyDecision};
 
 mod dispatcher;
 mod ledger;
@@ -151,6 +151,13 @@ pub enum RuntimeError {
         /// is erased here while the public outer error remains matchable.
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// A planted qualification vector reached execution after an unexpected allow.
+    #[snafu(display("planted qualification vector cannot be claimed or executed"))]
+    QualificationViolationExecution {
+        /// Source location where the fail-closed fence rejected execution.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
     /// The registered effect port failed after authorization was claimed.
     #[snafu(display("effect invocation failed: {source}"))]
     EffectInvocation {
@@ -234,6 +241,8 @@ struct LeaseClaims {
     audience: BTreeSet<String>,
     expires_at: Timestamp,
     replay_domain: String,
+    #[serde(skip_serializing_if = "DecisionPurpose::is_operational")]
+    purpose: DecisionPurpose,
 }
 
 /// An unforgeable, single-use authorization to produce effects.
@@ -351,6 +360,10 @@ impl EffectLease {
     pub fn replay_domain(&self) -> &str {
         &self.claims.replay_domain
     }
+    /// Exact admitted purpose carried from policy evaluation.
+    pub fn purpose(&self) -> &DecisionPurpose {
+        &self.claims.purpose
+    }
 
     /// True when the lease has expired at `now`.
     pub fn is_expired(&self, now: Timestamp) -> bool {
@@ -409,6 +422,7 @@ impl EffectLease {
             self.claims.expires_at,
             self.claims_digest.clone(),
             self.claims.runtime.clone(),
+            self.claims.purpose.clone(),
         ))
     }
 }

@@ -5,8 +5,9 @@
 //! resource, institution, and lifetime needed to make it authoritative.
 
 use jiff::Timestamp;
+use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::trust::{AdmissionKind, Admitted};
-use politeia_core::{Delegation, InstitutionId, InstitutionWorkspaceId, PrincipalId};
+use politeia_core::{Delegation, Digest, InstitutionId, InstitutionWorkspaceId, PrincipalId};
 
 /// Trusted coordinates against which a direct assurance grant is resolved.
 ///
@@ -150,6 +151,24 @@ impl<'admission> DirectGrant<'admission> {
     /// The trusted instant at which this grant was resolved.
     pub fn valid_at(&self) -> Timestamp {
         self.valid_at
+    }
+
+    /// The exact admitted delegation's canonical digest.
+    ///
+    /// This binds evidence to the particular owner grant that authorized it,
+    /// rather than to any later grant with equivalent semantic axes.
+    pub fn digest(&self) -> Result<Digest, CanonicalError> {
+        to_canonical_bytes(self.admission.payload()).map(|bytes| Digest::blake3(&bytes))
+    }
+
+    /// The authenticated subject that received this direct grant.
+    pub fn subject(&self) -> &PrincipalId {
+        &self.admission.payload().subject
+    }
+
+    /// The latest instant at which this grant remains live.
+    pub fn expires_at(&self) -> Timestamp {
+        self.admission.payload().expires_at
     }
 }
 

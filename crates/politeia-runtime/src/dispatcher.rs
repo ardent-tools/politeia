@@ -1,12 +1,14 @@
 use jiff::Timestamp;
 use politeia_core::{BudgetReservationId, Delegation, EffectLeaseId};
+use politeia_policy::QualificationVector;
 use snafu::ensure;
 
 use super::{
     AuthorizationLedger, AuthorizedEffect, DecisionMismatchSnafu, DeniedSnafu, Dispatcher,
     DispatcherConfig, EffectLease, EffectPort, InvalidDelegationSnafu,
     InvalidExecutionAssignmentSnafu, LeaseClaims, LeaseMismatchSnafu, OperationIntent,
-    PolicyDecisionPoint, RuntimeError, WrongAudienceSnafu, effect_reservation,
+    PolicyDecisionPoint, QualificationViolationExecutionSnafu, RuntimeError, WrongAudienceSnafu,
+    effect_reservation,
 };
 
 impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P, H, L> {
@@ -45,6 +47,12 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
                 .map_err(|source| RuntimeError::PolicyEvaluation {
                     source: Box::new(source),
                 })?;
+        let purpose = decision.verified_purpose().cloned().ok_or_else(|| {
+            DecisionMismatchSnafu {
+                field: "admitted decision purpose",
+            }
+            .build()
+        })?;
         ensure!(
             decision.principal == intent.principal,
             DecisionMismatchSnafu { field: "principal" }
@@ -67,6 +75,35 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
                 field: "operation intent digest"
             }
         );
+        let purpose_expiry = if let Some(qualification) = purpose.qualification_purpose() {
+            ensure!(
+                qualification.intent() == &intent_digest,
+                DecisionMismatchSnafu {
+                    field: "qualification intent"
+                }
+            );
+            ensure!(
+                qualification.generation() == &self.config.runtime,
+                DecisionMismatchSnafu {
+                    field: "qualification generation"
+                }
+            );
+            ensure!(
+                qualification.replay_domain() == self.config.replay_domain,
+                DecisionMismatchSnafu {
+                    field: "qualification replay domain"
+                }
+            );
+            ensure!(
+                now < qualification.expires_at(),
+                DecisionMismatchSnafu {
+                    field: "qualification authority expiry"
+                }
+            );
+            qualification.expires_at()
+        } else {
+            now + self.config.max_lease_ttl
+        };
         ensure!(
             decision.allowed,
             DeniedSnafu {
@@ -95,8 +132,13 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             runtime: self.config.runtime.clone(),
             adapter: self.adapter.clone(),
             audience: delegation.audience.clone(),
-            expires_at: delegation.expires_at.min(max_expiry).min(assignment_expiry),
+            expires_at: delegation
+                .expires_at
+                .min(max_expiry)
+                .min(assignment_expiry)
+                .min(purpose_expiry),
             replay_domain: self.config.replay_domain.clone(),
+            purpose,
         };
         let claims_digest = EffectLease::claims_digest(&claims)?;
         let lease = EffectLease {
@@ -340,6 +382,13 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
                     field: "effect target"
                 }
             );
+        }
+        if lease
+            .purpose()
+            .qualification_purpose()
+            .is_some_and(|purpose| purpose.vector() == QualificationVector::PlantedViolation)
+        {
+            return QualificationViolationExecutionSnafu.fail();
         }
 
         let reservation = lease.reservation_request()?;

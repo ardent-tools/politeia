@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jiff::Timestamp;
 use politeia_core::{Digest, InstitutionId, InstitutionWorkspaceId, PolicyBundleId, PrincipalId};
-use politeia_evidence::assurance::{AuthorizedControlRun, ControlResult, VerifiedActivation};
+use politeia_evidence::assurance::{
+    AuthorizedControlRun, ControlResult, Coverage, VerifiedActivation,
+};
 
 use crate::hardening::HardeningState;
 use crate::waiver::DelegatedWaiver;
@@ -62,6 +64,18 @@ impl<'set, 'admission> EvaluationEvidence<'set, 'admission> {
             activations,
             waivers,
         }
+    }
+
+    pub(crate) fn control_runs(&self) -> &[AuthorizedControlRun<'admission>] {
+        self.control_runs
+    }
+
+    pub(crate) fn activations(&self) -> &[VerifiedActivation<'admission>] {
+        self.activations
+    }
+
+    pub(crate) fn waivers(&self) -> &[DelegatedWaiver<'admission>] {
+        self.waivers
     }
 }
 
@@ -204,6 +218,10 @@ pub enum Unevaluable {
         /// Axis that differed.
         axis: EvidenceAxis,
     },
+    /// A selected qualification target did not name an applicable blocking control.
+    UnusedQualificationTarget(ControlRef),
+    /// The completed decision could not be sealed to its canonical wire bytes.
+    DecisionEncoding,
 }
 
 impl std::fmt::Display for Unevaluable {
@@ -336,6 +354,14 @@ impl std::fmt::Display for Unevaluable {
             Self::WaiverBindingMismatch { binding, axis } => {
                 write!(formatter, "waiver for {binding} mismatches {axis:?}")
             }
+            Self::UnusedQualificationTarget(control) => write!(
+                formatter,
+                "qualification target {} on {} was not applicable",
+                control.detector, control.binding
+            ),
+            Self::DecisionEncoding => {
+                formatter.write_str("policy decision could not be encoded canonically")
+            }
         }
     }
 }
@@ -354,12 +380,30 @@ pub fn evaluate(
     detectors: &BTreeMap<String, DetectorSpec>,
     evidence: &EvaluationEvidence<'_, '_>,
 ) -> Result<PolicyDecision, Unevaluable> {
+    evaluate_with_qualification_target(subject, bindings, detectors, evidence, None)
+}
+
+pub(crate) struct QualificationEvaluation<'target> {
+    pub(crate) binding: &'target str,
+    pub(crate) detector: &'target str,
+    pub(crate) result: ControlResult,
+    pub(crate) coverage: Coverage,
+}
+
+pub(crate) fn evaluate_with_qualification_target(
+    subject: &EvaluationSubject,
+    bindings: &[PolicyBinding],
+    detectors: &BTreeMap<String, DetectorSpec>,
+    evidence: &EvaluationEvidence<'_, '_>,
+    qualification_target: Option<QualificationEvaluation<'_>>,
+) -> Result<PolicyDecision, Unevaluable> {
     let mut binding_ids = Vec::new();
     let mut control_run_ids = BTreeSet::new();
     let mut activation_ids = BTreeSet::new();
     let mut waiver_ids = BTreeSet::new();
     let mut reasons = Vec::new();
     let mut allowed = true;
+    let mut used_qualification_target = false;
 
     for binding in bindings {
         if !subject.scopes.contains(&binding.scope) {
@@ -372,7 +416,7 @@ pub fn evaluate(
         }
         binding_ids.push(binding.id.clone());
         let consequence = binding.authority.consequence();
-        let blocks = consequence >= Consequence::RequireReview;
+        let blocks = binding.is_blocking();
         let mut violation = false;
 
         for detector_id in &binding.detector_ids {
@@ -385,6 +429,20 @@ pub fn evaluate(
             }
             if blocks && matches!(detector.evidence_class, EvidenceClass::Heuristic) {
                 return Err(Unevaluable::HeuristicBlocking(control_ref));
+            }
+
+            if let Some(target) = qualification_target
+                .as_ref()
+                .filter(|target| binding.id == target.binding && detector_id == target.detector)
+            {
+                used_qualification_target = true;
+                violation |= normalize_control_result(
+                    binding,
+                    detector_id,
+                    target.result,
+                    &target.coverage,
+                )?;
+                continue;
             }
 
             let run = one_run(evidence.control_runs, binding, detector_id)?;
@@ -421,20 +479,30 @@ pub fn evaluate(
         }
     }
 
-    Ok(PolicyDecision {
-        bundle: subject.bundle.clone(),
-        policy_digest: subject.policy_digest.clone(),
-        intent_digest: subject.intent_digest.clone(),
-        subject: subject.subject.clone(),
-        population: subject.population.clone(),
-        principal: subject.principal.clone(),
+    if let Some(target) = qualification_target {
+        if !used_qualification_target {
+            return Err(Unevaluable::UnusedQualificationTarget(ControlRef {
+                binding: target.binding.to_string(),
+                detector: target.detector.to_string(),
+            }));
+        }
+    }
+
+    PolicyDecision::operational(
+        subject.bundle.clone(),
+        subject.policy_digest.clone(),
+        subject.intent_digest.clone(),
+        subject.subject.clone(),
+        subject.population.clone(),
+        subject.principal.clone(),
         allowed,
         binding_ids,
-        control_runs: control_run_ids.into_iter().collect(),
-        activation_proofs: activation_ids.into_iter().collect(),
-        waiver_ids: waiver_ids.into_iter().collect(),
+        control_run_ids.into_iter().collect(),
+        activation_ids.into_iter().collect(),
+        waiver_ids.into_iter().collect(),
         reasons,
-    })
+    )
+    .map_err(|_| Unevaluable::DecisionEncoding)
 }
 
 fn one_run<'set, 'admission>(
@@ -453,7 +521,7 @@ fn one_run<'set, 'admission>(
     Ok(run)
 }
 
-fn validate_run(
+pub(crate) fn validate_run(
     subject: &EvaluationSubject,
     binding: &PolicyBinding,
     detector_id: &str,
@@ -510,8 +578,17 @@ fn normalize_result(
     admitted: &AuthorizedControlRun<'_>,
 ) -> Result<bool, Unevaluable> {
     let run = admitted.run();
+    normalize_control_result(binding, detector, run.result, &run.coverage)
+}
+
+fn normalize_control_result(
+    binding: &PolicyBinding,
+    detector: &str,
+    result: ControlResult,
+    coverage: &Coverage,
+) -> Result<bool, Unevaluable> {
     let control_ref = || ControlRef::new(binding, detector);
-    match run.result {
+    match result {
         ControlResult::NotRun => return Err(Unevaluable::ControlNotRun(control_ref())),
         ControlResult::Unavailable => {
             return Err(Unevaluable::ControlUnavailable(control_ref()));
@@ -531,27 +608,27 @@ fn normalize_result(
         ControlResult::Clean | ControlResult::Violation => {}
         _ => return Err(Unevaluable::UnsupportedControlResult(control_ref())),
     }
-    if run.coverage.population == 0 {
+    if coverage.population == 0 {
         return Err(Unevaluable::EmptyPopulation(control_ref()));
     }
-    if run.coverage.observed == 0 {
+    if coverage.observed == 0 {
         return Err(Unevaluable::UnobservedPopulation(control_ref()));
     }
-    if run.coverage.observed > run.coverage.population {
+    if coverage.observed > coverage.population {
         return Err(Unevaluable::InvalidCoverage {
             control: control_ref(),
-            observed: run.coverage.observed,
-            population: run.coverage.population,
+            observed: coverage.observed,
+            population: coverage.population,
         });
     }
-    if run.result == ControlResult::Clean && !run.coverage.is_complete() {
+    if result == ControlResult::Clean && !coverage.is_complete() {
         return Err(Unevaluable::PartialCleanCoverage {
             control: control_ref(),
-            observed: run.coverage.observed,
-            population: run.coverage.population,
+            observed: coverage.observed,
+            population: coverage.population,
         });
     }
-    Ok(run.result == ControlResult::Violation)
+    Ok(result == ControlResult::Violation)
 }
 
 fn one_activation<'set, 'admission>(

@@ -18,7 +18,8 @@ use politeia_core::reconnaissance::{
 };
 use politeia_core::trust::{AdmissionKind, Admitted};
 use politeia_core::{
-    DataClass, Delegation, Digest, Effect, OperationId, OperationSpec, PrincipalId, SourceCaptureId,
+    DataClass, Delegation, Digest, Effect, OperationId, OperationSpec, PrincipalId, ResourceBudget,
+    SourceCaptureId,
 };
 use serde::Serialize;
 
@@ -32,6 +33,22 @@ pub const BOOTSTRAP_RECONNAISSANCE_OPERATION: &str = "bootstrap.reconnaissance.c
 
 /// Evidence the source-capture port owes after the authorized read.
 pub const SOURCE_CAPTURE_MANIFEST_EVIDENCE: &str = "source_capture.manifest.v1";
+
+/// Exact bootstrap operation that compiles approved institutional context.
+pub const BOOTSTRAP_COMPILE_CONTEXT_OPERATION: &str = "bootstrap.compile_institutional_context";
+
+/// Exact bootstrap operation that discloses approved capability identities.
+pub const BOOTSTRAP_DISCOVER_CAPABILITIES_OPERATION: &str =
+    "bootstrap.discover_institutional_capabilities";
+
+/// Semantic action for approved institutional-context compilation.
+pub const BOOTSTRAP_COMPILE_CONTEXT_ACTION: &str = "context.compile";
+
+/// Semantic action for approved institutional-capability discovery.
+pub const BOOTSTRAP_DISCOVER_CAPABILITIES_ACTION: &str = "context.discover-capabilities";
+
+/// Evidence owed by either protected bootstrap learning disclosure.
+pub const BOOTSTRAP_LEARNING_DISCLOSURE_EVIDENCE: &str = "learning.bootstrap.disclosure.v1";
 
 /// One pre-generation source-read evaluation.
 ///
@@ -144,23 +161,24 @@ pub fn evaluate_bootstrap_reconnaissance(
         content_manifest: &capture_request.content_manifest_digest,
     })?;
 
-    Ok(PolicyDecision {
-        bundle: request.workspace.policy_bundle.clone(),
-        policy_digest: request.workspace.policy_digest.clone(),
-        intent_digest: request.intent_digest.clone(),
+    PolicyDecision::operational(
+        request.workspace.policy_bundle.clone(),
+        request.workspace.policy_digest.clone(),
+        request.intent_digest.clone(),
         subject,
         population,
-        principal: request.principal.clone(),
-        allowed: true,
-        binding_ids: vec![BOOTSTRAP_RECONNAISSANCE_BINDING.to_string()],
-        control_runs: Vec::new(),
-        activation_proofs: Vec::new(),
-        waiver_ids: Vec::new(),
-        reasons: vec![
+        request.principal.clone(),
+        true,
+        vec![BOOTSTRAP_RECONNAISSANCE_BINDING.to_string()],
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        vec![
             "installed owner directly delegated this descriptor-bound read-only capture"
                 .to_string(),
         ],
-    })
+    )
+    .map_err(BootstrapRefusal::Encoding)
 }
 
 fn admit_delegation(
@@ -314,6 +332,244 @@ struct CapturePopulation<'a> {
     manifest: &'a BTreeSet<String>,
     descriptor: &'a Digest,
     content_manifest: &'a Digest,
+}
+
+/// Opaque policy owner for one authenticated bootstrap learning disclosure.
+///
+/// Construction consumes anchor-admitted authority and the exact signed
+/// disclosure axes. Only an exact runtime intent can then obtain an ordinary
+/// in-process decision seal.
+#[derive(Clone, Debug)]
+pub struct BootstrapLearningDisclosure {
+    workspace: InstitutionWorkspace,
+    bootstrap: Digest,
+    requester: PrincipalId,
+    authority: Vec<Delegation>,
+    operation: OperationSpec,
+    resources: BTreeSet<String>,
+    budget: ResourceBudget,
+    input_digest: Digest,
+    replay_key: String,
+    request: Digest,
+    population: Digest,
+}
+
+/// Actual runtime-intent view evaluated by [`BootstrapLearningDisclosure`].
+pub struct BootstrapLearningIntent<'intent> {
+    /// Authenticated operation principal.
+    pub principal: &'intent PrincipalId,
+    /// Digest of the authenticated semantic disclosure input.
+    pub input_digest: &'intent Digest,
+    /// Complete runtime delegation chain.
+    pub delegation_chain: &'intent [Delegation],
+    /// Exact runtime operation contract.
+    pub operation: &'intent OperationSpec,
+    /// Exact runtime resource set.
+    pub resources: &'intent BTreeSet<String>,
+    /// Finite requested runtime budget.
+    pub budget: &'intent ResourceBudget,
+    /// Stable runtime replay key.
+    pub idempotency_key: Option<&'intent str>,
+    /// Whether the runtime intent selected an execution resource.
+    pub has_execution_assignment: bool,
+    /// Canonical digest of the complete runtime intent.
+    pub intent_digest: Digest,
+}
+
+impl BootstrapLearningDisclosure {
+    /// Admit one signed, delegation-bounded bootstrap disclosure policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootstrapLearningDisclosureRefusal`] when authenticated
+    /// authority, the semantic operation, or any signed request axis is wider
+    /// than this built-in bootstrap exception.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "bootstrap disclosure binds every authenticated operation axis"
+    )]
+    pub fn admit(
+        workspace: &InstitutionWorkspace,
+        bootstrap: Digest,
+        requester: PrincipalId,
+        authority: &[Admitted<Delegation>],
+        operation: OperationSpec,
+        resources: BTreeSet<String>,
+        budget: ResourceBudget,
+        input_digest: Digest,
+        replay_key: String,
+        request: Digest,
+        population: Digest,
+    ) -> Result<Self, BootstrapLearningDisclosureRefusal> {
+        let root = authority
+            .first()
+            .ok_or(BootstrapLearningDisclosureRefusal::AuthorityMismatch)?;
+        if root.payload().parent.is_some()
+            || root.payload().issuer != workspace.owner
+            || root.signer() != &workspace.owner
+        {
+            return Err(BootstrapLearningDisclosureRefusal::AuthorityMismatch);
+        }
+        for admitted in authority {
+            if admitted.kind() != AdmissionKind::Delegation
+                || admitted.institution() != &workspace.institution
+                || admitted.workspace() != &workspace.id
+                || admitted.signer() != &admitted.payload().issuer
+            {
+                return Err(BootstrapLearningDisclosureRefusal::AuthorityMismatch);
+            }
+        }
+        for pair in authority.windows(2) {
+            let [parent, child] = pair else {
+                continue;
+            };
+            if child.payload().parent.as_ref() != Some(&parent.payload().id)
+                || child.payload().issuer != parent.payload().subject
+                || !child.payload().is_attenuation_of(parent.payload())
+            {
+                return Err(BootstrapLearningDisclosureRefusal::AuthorityMismatch);
+            }
+        }
+        let leaf = authority
+            .last()
+            .ok_or(BootstrapLearningDisclosureRefusal::AuthorityMismatch)?;
+        if leaf.payload().subject != requester
+            || !operation.actions.is_subset(&leaf.payload().actions)
+            || !resources.is_subset(&leaf.payload().resources)
+            || !operation.effects.is_subset(&leaf.payload().effects)
+            || !operation
+                .data_classes
+                .is_subset(&leaf.payload().data_classes)
+            || !budget.is_attenuation_of(&leaf.payload().budget)
+        {
+            return Err(BootstrapLearningDisclosureRefusal::AuthorityMismatch);
+        }
+        let expected_action = match operation.name.as_str() {
+            BOOTSTRAP_COMPILE_CONTEXT_OPERATION => BOOTSTRAP_COMPILE_CONTEXT_ACTION,
+            BOOTSTRAP_DISCOVER_CAPABILITIES_OPERATION => BOOTSTRAP_DISCOVER_CAPABILITIES_ACTION,
+            _ => return Err(BootstrapLearningDisclosureRefusal::OperationMismatch),
+        };
+        if operation.actions != BTreeSet::from([expected_action.to_string()])
+            || operation.effects != BTreeSet::from([Effect::ReadInstitutionalContext])
+            || operation.evidence_obligations
+                != vec![BOOTSTRAP_LEARNING_DISCLOSURE_EVIDENCE.to_string()]
+            || operation.execution_requirement.is_some()
+            || operation.retryable
+            || !operation.requires_idempotency
+        {
+            return Err(BootstrapLearningDisclosureRefusal::OperationMismatch);
+        }
+        if !budget.is_finite() || !replay_key.starts_with("learning:") || replay_key.len() > 256 {
+            return Err(BootstrapLearningDisclosureRefusal::BudgetMismatch);
+        }
+        Ok(Self {
+            workspace: workspace.clone(),
+            bootstrap,
+            requester,
+            authority: authority
+                .iter()
+                .map(|admitted| admitted.payload().clone())
+                .collect(),
+            operation,
+            resources,
+            budget,
+            input_digest,
+            replay_key,
+            request,
+            population,
+        })
+    }
+
+    /// Evaluate the actual runtime intent against the admitted disclosure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootstrapLearningDisclosureRefusal`] for any substituted
+    /// authority, input, operation, resource, budget, replay, or execution axis.
+    pub fn evaluate(
+        &self,
+        intent: &BootstrapLearningIntent<'_>,
+    ) -> Result<PolicyDecision, BootstrapLearningDisclosureRefusal> {
+        if intent.principal != &self.requester || intent.delegation_chain != self.authority {
+            return Err(BootstrapLearningDisclosureRefusal::AuthorityMismatch);
+        }
+        if intent.input_digest != &self.input_digest || intent.operation != &self.operation {
+            return Err(BootstrapLearningDisclosureRefusal::OperationMismatch);
+        }
+        if intent.resources != &self.resources || intent.has_execution_assignment {
+            return Err(BootstrapLearningDisclosureRefusal::ResourceMismatch);
+        }
+        if intent.budget != &self.budget
+            || !intent.budget.is_finite()
+            || intent.idempotency_key != Some(self.replay_key.as_str())
+        {
+            return Err(BootstrapLearningDisclosureRefusal::BudgetMismatch);
+        }
+        PolicyDecision::operational(
+            self.workspace.policy_bundle.clone(),
+            self.workspace.policy_digest.clone(),
+            intent.intent_digest.clone(),
+            self.request.clone(),
+            self.population.clone(),
+            self.requester.clone(),
+            true,
+            vec!["politeia.bootstrap.learning-disclosure.v1".to_string()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![format!(
+                "owner-pinned bootstrap disclosure {}",
+                self.bootstrap.as_str()
+            )],
+        )
+        .map_err(BootstrapLearningDisclosureRefusal::Encoding)
+    }
+}
+
+/// Why a bootstrap learning disclosure could not obtain a decision seal.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum BootstrapLearningDisclosureRefusal {
+    /// Admitted delegation scope or the actual chain differs.
+    AuthorityMismatch,
+    /// Built-in operation or authenticated semantic input differs.
+    OperationMismatch,
+    /// Runtime resources or execution assignment differs.
+    ResourceMismatch,
+    /// Finite budget or stable replay binding differs.
+    BudgetMismatch,
+    /// The normalized decision could not be encoded canonically.
+    Encoding(CanonicalError),
+}
+
+impl std::fmt::Display for BootstrapLearningDisclosureRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::AuthorityMismatch => {
+                "disclosure intent delegation chain differs from admitted authority"
+            }
+            Self::OperationMismatch => {
+                "disclosure intent operation or signed input differs from admission"
+            }
+            Self::ResourceMismatch => {
+                "disclosure intent resources or execution selection differs from admission"
+            }
+            Self::BudgetMismatch => {
+                "disclosure intent budget or replay key differs from finite admission"
+            }
+            Self::Encoding(_) => "bootstrap learning decision cannot be encoded canonically",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for BootstrapLearningDisclosureRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Encoding(source) => Some(source),
+            _ => None,
+        }
+    }
 }
 
 /// Why the built-in pre-generation rule refused a source read.

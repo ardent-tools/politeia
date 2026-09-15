@@ -22,6 +22,31 @@ pub struct CanonicalPayload {
 }
 
 impl CanonicalPayload {
+    /// Admit existing bytes only when they are exact canonical JSON with the
+    /// supplied content digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::Canonical`] when the payload is not JSON,
+    /// [`StorageError::AdmissionMismatch`] when it is not in canonical form,
+    /// and [`StorageError::DigestMismatch`] when its digest differs.
+    pub fn from_bytes(bytes: Vec<u8>, digest: Digest) -> Result<Self, StorageError> {
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| StorageError::Canonical(error.into()))?;
+        let canonical = to_canonical_bytes(&value).map_err(StorageError::Canonical)?;
+        if canonical != bytes {
+            return Err(StorageError::AdmissionMismatch);
+        }
+        let actual = Digest::blake3(&bytes);
+        if actual != digest {
+            return Err(StorageError::DigestMismatch {
+                expected: digest,
+                actual,
+            });
+        }
+        Ok(Self { bytes, digest })
+    }
+
     /// Canonicalize one typed value and derive its content identity.
     ///
     /// # Errors
@@ -176,5 +201,26 @@ mod tests {
             &politeia_core::Digest::blake3(payload.bytes())
         );
         Ok(())
+    }
+
+    #[test]
+    fn existing_payload_bytes_must_already_be_canonical_and_digest_exactly() {
+        let canonical = br#"{"count":2,"result":"completed"}"#.to_vec();
+        let digest = politeia_core::Digest::blake3(&canonical);
+        let admitted = CanonicalPayload::from_bytes(canonical.clone(), digest.clone())
+            .expect("canonical bytes with their digest are admitted");
+        assert_eq!(admitted.bytes(), canonical);
+
+        assert!(matches!(
+            CanonicalPayload::from_bytes(
+                br#"{"result":"completed", "count":2}"#.to_vec(),
+                digest.clone(),
+            ),
+            Err(crate::StorageError::AdmissionMismatch)
+        ));
+        assert!(matches!(
+            CanonicalPayload::from_bytes(canonical, politeia_core::Digest::blake3(b"other")),
+            Err(crate::StorageError::DigestMismatch { .. })
+        ));
     }
 }

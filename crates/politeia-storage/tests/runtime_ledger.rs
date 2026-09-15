@@ -4,7 +4,7 @@
 //! policy and does not count as control activation or daemon acceptance.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     sync::{
         Arc,
@@ -26,7 +26,10 @@ use politeia_core::{
         AdmissionKind, Admitted, InstitutionTrustAnchors, SignedAdmissionWire, TrustedSigningKey,
     },
 };
-use politeia_policy::PolicyDecision;
+use politeia_policy::{
+    PolicyDecision,
+    evaluate::{EvaluationEvidence, EvaluationSubject, evaluate},
+};
 use politeia_runtime::{
     AuthorizedEffect, Dispatcher, DispatcherConfig, EffectPort, OperationIntent,
     PolicyDecisionPoint, RuntimeError,
@@ -187,7 +190,7 @@ async fn delegated_commits_recheck_current_exact_authority_and_all_ancestors() -
         transition: fixture.signed_fixture_record(serde_json::json!({"change": "first"}))?,
         state: vec![StateMutation {
             key: "fixture.authorized".to_owned(),
-            value: fixture.signed_fixture_record(serde_json::json!({"value": "admitted"}))?,
+            value: CanonicalPayload::from_serializable(&serde_json::json!({"value": "admitted"}))?,
         }],
         evidence: vec![],
         outbox: vec![],
@@ -228,7 +231,7 @@ async fn delegated_commits_recheck_current_exact_authority_and_all_ancestors() -
     commit.transition =
         fixture.signed_fixture_record(serde_json::json!({"change": "after-revoke"}))?;
     commit.state[0].value =
-        fixture.signed_fixture_record(serde_json::json!({"value": "forbidden"}))?;
+        CanonicalPayload::from_serializable(&serde_json::json!({"value": "forbidden"}))?;
     assert!(
         matches!(
             fixture.storage.commit_authorized(&commit, &chain).await,
@@ -373,19 +376,27 @@ impl PolicyDecisionPoint for LedgerFixturePolicy {
     type Error = RuntimeError;
 
     async fn decide(&self, intent: &OperationIntent) -> Result<PolicyDecision, Self::Error> {
-        Ok(PolicyDecision {
+        let intent_digest = intent.digest()?;
+        let subject = EvaluationSubject {
+            institution: InstitutionId::new(),
+            workspace: InstitutionWorkspaceId::new(),
             bundle: self.bundle.clone(),
             policy_digest: self.digest.clone(),
-            intent_digest: intent.digest()?,
-            subject: intent.digest()?,
+            intent_digest: intent_digest.clone(),
+            subject: intent_digest,
             population: Digest::blake3(b"ledger fixture population"),
             principal: intent.principal.clone(),
-            allowed: true,
-            binding_ids: vec!["ledger-fixture".to_owned()],
-            control_runs: Vec::new(),
-            activation_proofs: Vec::new(),
-            waiver_ids: Vec::new(),
-            reasons: vec!["test isolates persistence from policy evaluation".to_owned()],
+            scopes: BTreeSet::new(),
+            at: Timestamp::now(),
+        };
+        evaluate(
+            &subject,
+            &[],
+            &BTreeMap::new(),
+            &EvaluationEvidence::new(&[], &[], &[]),
+        )
+        .map_err(|source| RuntimeError::PolicyEvaluation {
+            source: Box::new(source),
         })
     }
 }

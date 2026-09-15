@@ -23,10 +23,11 @@
 //! than falling into whichever arm was written last.
 
 use jiff::Timestamp;
+use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::trust::{AdmissionKind, Admitted};
 use politeia_core::{
-    Delegation, Digest, EvidenceId, InstitutionId, InstitutionWorkspaceId, PolicyBundleId,
-    PrincipalId,
+    Delegation, DelegationId, Digest, EvidenceId, InstitutionId, InstitutionWorkspaceId,
+    PolicyBundleId, PrincipalId, RuntimeGenerationId,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -39,9 +40,110 @@ pub const RUN_POLICY_CONTROL_ACTION: &str = "run-policy-control";
 /// Semantic action delegated to an activation-proof verifier.
 pub const VERIFY_POLICY_CONTROL_ACTION: &str = "verify-policy-control";
 
+/// Semantic action delegated for one inactive candidate's control exercise.
+pub const QUALIFY_POLICY_CONTROL_ACTION: &str = "qualify-policy-control";
+
 /// Exact delegation resource for one named policy control.
 pub fn policy_control_resource(control: &str) -> String {
     format!("policy-control:{control}")
+}
+
+/// Derive the exact direct-grant resource for one candidate control exercise.
+///
+/// The readable prefix names the authority class. The suffix is a digest of
+/// every semantic axis, avoiding delimiter ambiguity in caller-chosen binding
+/// and control identifiers.
+///
+/// # Errors
+///
+/// Returns a canonical encoding error if the grant subject cannot be encoded.
+pub fn policy_control_qualification_resource(
+    generation: &RuntimeGenerationId,
+    policy_digest: &Digest,
+    binding: &str,
+    control: &str,
+    population: &Digest,
+    vectors: &ControlQualificationVectorSet,
+) -> Result<String, CanonicalError> {
+    let bytes = to_canonical_bytes(&ControlQualificationGrantSubject {
+        kind: "politeia.policy-control-qualification-grant.v1",
+        generation,
+        policy_digest,
+        binding,
+        control,
+        population,
+        known_good_intent: vectors.known_good_intent(),
+        known_good_run: vectors.known_good_run(),
+        planted_violation_intent: vectors.planted_violation_intent(),
+        planted_violation_run: vectors.planted_violation_run(),
+    })?;
+    Ok(format!(
+        "policy-control-qualification:{}",
+        Digest::blake3(&bytes).as_str()
+    ))
+}
+
+#[derive(Serialize)]
+struct ControlQualificationGrantSubject<'a> {
+    kind: &'static str,
+    generation: &'a RuntimeGenerationId,
+    policy_digest: &'a Digest,
+    binding: &'a str,
+    control: &'a str,
+    population: &'a Digest,
+    known_good_intent: &'a Digest,
+    known_good_run: &'a EvidenceId,
+    planted_violation_intent: &'a Digest,
+    planted_violation_run: &'a EvidenceId,
+}
+
+/// Exact signed intents and future record identities covered by one grant.
+///
+/// Constructing this inert value grants no authority. Its complete canonical
+/// representation must be named by the direct owner grant admitted below.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlQualificationVectorSet {
+    known_good_intent: Digest,
+    known_good_run: EvidenceId,
+    planted_violation_intent: Digest,
+    planted_violation_run: EvidenceId,
+}
+
+impl ControlQualificationVectorSet {
+    /// Bind both signed intent digests to the identities reserved for their actual runs.
+    pub fn new(
+        known_good_intent: Digest,
+        known_good_run: EvidenceId,
+        planted_violation_intent: Digest,
+        planted_violation_run: EvidenceId,
+    ) -> Self {
+        Self {
+            known_good_intent,
+            known_good_run,
+            planted_violation_intent,
+            planted_violation_run,
+        }
+    }
+
+    /// Digest of the exact signed known-good operation intent.
+    pub fn known_good_intent(&self) -> &Digest {
+        &self.known_good_intent
+    }
+
+    /// Record identity assigned to the actual known-good control invocation.
+    pub fn known_good_run(&self) -> &EvidenceId {
+        &self.known_good_run
+    }
+
+    /// Digest of the exact signed planted-violation operation intent.
+    pub fn planted_violation_intent(&self) -> &Digest {
+        &self.planted_violation_intent
+    }
+
+    /// Record identity assigned to the actual planted-violation control invocation.
+    pub fn planted_violation_run(&self) -> &EvidenceId {
+        &self.planted_violation_run
+    }
 }
 
 /// The exact result states a control run may report.
@@ -278,6 +380,206 @@ impl<'admission> AuthorizedControlRun<'admission> {
     /// Trusted instant for which its direct grant was resolved.
     pub fn valid_at(&self) -> Timestamp {
         self.grant.valid_at()
+    }
+
+    /// Digest of the exact direct owner grant authorizing this run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonical encoding error if the admitted delegation cannot be
+    /// represented canonically.
+    pub fn authority_digest(&self) -> Result<Digest, CanonicalError> {
+        self.grant.digest()
+    }
+
+    /// Latest instant at which the run's direct authority remains live.
+    pub fn authority_expires_at(&self) -> Timestamp {
+        self.grant.expires_at()
+    }
+}
+
+/// An authenticated direct owner grant for one exact candidate qualification.
+///
+/// This is deliberately separate from [`AuthorizedControlRun`]. Permission to
+/// produce ordinary control evidence does not authorize the exceptional
+/// inactive-generation dispatch needed to establish first activation.
+#[derive(Clone, Debug)]
+pub struct AuthorizedControlQualification<'admission> {
+    grant: DirectGrant<'admission>,
+    generation: RuntimeGenerationId,
+    policy_digest: Digest,
+    binding: String,
+    control: String,
+    population: Digest,
+    vectors: ControlQualificationVectorSet,
+}
+
+impl<'admission> AuthorizedControlQualification<'admission> {
+    /// Resolve one exact, direct owner-issued qualification grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControlQualificationAuthorityRefusal`] when the grant subject
+    /// cannot be encoded or the admitted delegation does not match every exact
+    /// authority axis.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "qualification authority binds independent candidate and control axes"
+    )]
+    pub fn admit(
+        authority: &'admission Admitted<Delegation>,
+        context: &AuthorityContext,
+        qualification_actor: &PrincipalId,
+        generation: RuntimeGenerationId,
+        policy_digest: Digest,
+        binding: String,
+        control: String,
+        population: Digest,
+        vectors: ControlQualificationVectorSet,
+    ) -> Result<Self, ControlQualificationAuthorityRefusal> {
+        let resource = policy_control_qualification_resource(
+            &generation,
+            &policy_digest,
+            &binding,
+            &control,
+            &population,
+            &vectors,
+        )
+        .map_err(ControlQualificationAuthorityRefusal::Canonical)?;
+        let grant = DirectGrant::admit(
+            authority,
+            context,
+            qualification_actor,
+            QUALIFY_POLICY_CONTROL_ACTION,
+            &resource,
+        )
+        .map_err(ControlQualificationAuthorityRefusal::Authority)?;
+        Ok(Self {
+            grant,
+            generation,
+            policy_digest,
+            binding,
+            control,
+            population,
+            vectors,
+        })
+    }
+
+    /// Institution in whose installed authority context this grant resolved.
+    pub fn institution(&self) -> &InstitutionId {
+        self.grant.admission().institution()
+    }
+
+    /// Workspace in whose installed authority context this grant resolved.
+    pub fn workspace(&self) -> &InstitutionWorkspaceId {
+        self.grant.admission().workspace()
+    }
+
+    /// Authenticated actor entrusted with this exact qualification exercise.
+    pub fn actor(&self) -> &PrincipalId {
+        self.grant.subject()
+    }
+
+    /// Candidate generation named by the exact grant resource.
+    pub fn generation(&self) -> &RuntimeGenerationId {
+        &self.generation
+    }
+
+    /// Policy artifact digest named by the exact grant resource.
+    pub fn policy_digest(&self) -> &Digest {
+        &self.policy_digest
+    }
+
+    /// Blocking binding named by the exact grant resource.
+    pub fn binding(&self) -> &str {
+        &self.binding
+    }
+
+    /// Control named by the exact grant resource.
+    pub fn control(&self) -> &str {
+        &self.control
+    }
+
+    /// Immutable good/bad population named by the exact grant resource.
+    pub fn population(&self) -> &Digest {
+        &self.population
+    }
+
+    /// Signed known-good operation intent named by the exact grant resource.
+    pub fn known_good_intent(&self) -> &Digest {
+        self.vectors.known_good_intent()
+    }
+
+    /// Identity reserved for the actual known-good control invocation.
+    pub fn known_good_run(&self) -> &EvidenceId {
+        self.vectors.known_good_run()
+    }
+
+    /// Signed planted-violation operation intent named by the exact grant resource.
+    pub fn planted_violation_intent(&self) -> &Digest {
+        self.vectors.planted_violation_intent()
+    }
+
+    /// Identity reserved for the actual planted-violation control invocation.
+    pub fn planted_violation_run(&self) -> &EvidenceId {
+        self.vectors.planted_violation_run()
+    }
+
+    /// Trusted instant at which the direct grant was resolved.
+    pub fn valid_at(&self) -> Timestamp {
+        self.grant.valid_at()
+    }
+
+    /// Latest instant at which the qualification grant remains live.
+    pub fn expires_at(&self) -> Timestamp {
+        self.grant.expires_at()
+    }
+
+    /// Digest of the exact direct owner grant authorizing qualification.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonical encoding error if the admitted delegation cannot be
+    /// represented canonically.
+    pub fn authority_digest(&self) -> Result<Digest, CanonicalError> {
+        self.grant.digest()
+    }
+
+    /// Durable identity of the direct owner grant behind this qualification.
+    pub fn authority_id(&self) -> &DelegationId {
+        &self.grant.admission().payload().id
+    }
+}
+
+/// Why a direct grant did not become candidate-qualification authority.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ControlQualificationAuthorityRefusal {
+    /// The exact resource binding could not be encoded canonically.
+    Canonical(CanonicalError),
+    /// The admitted delegation was not the required direct owner grant.
+    Authority(AuthorityRefusal),
+}
+
+impl std::fmt::Display for ControlQualificationAuthorityRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Canonical(error) => {
+                write!(formatter, "qualification resource is invalid: {error}")
+            }
+            Self::Authority(refusal) => {
+                write!(formatter, "qualification authority refused: {refusal}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ControlQualificationAuthorityRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Canonical(error) => Some(error),
+            Self::Authority(refusal) => Some(refusal),
+        }
     }
 }
 

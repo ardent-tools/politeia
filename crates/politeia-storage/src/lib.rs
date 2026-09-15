@@ -17,6 +17,7 @@ pub use read::{PersistedDelegation, StoredPayload, WorkspaceSnapshot};
 
 use std::str::FromStr;
 
+use politeia_policy::{QualificationVector, operational::OperationalQualification};
 use politeia_runtime::{AuthorizationLedger, EffectReservation, ReservationRequest, RuntimeError};
 
 use jiff::Timestamp;
@@ -199,7 +200,7 @@ pub struct StateMutation {
     /// Stable normalized state key.
     pub key: String,
     /// Canonical value stored for the current state projection.
-    pub value: SignedRecord,
+    pub value: CanonicalPayload,
 }
 
 /// An outbox message published only after its enclosing transaction commits.
@@ -769,6 +770,39 @@ impl PostgresStorage {
         })
     }
 
+    /// Count durable attempts in one exact candidate-qualification replay domain.
+    ///
+    /// The planted policy denial must observe zero here and zero calls at its
+    /// concrete effect port. A completion cannot exist without such an attempt.
+    pub async fn count_candidate_qualification_attempts(
+        &self,
+        scope: &Scope,
+        qualification: &OperationalQualification,
+        vector: QualificationVector,
+    ) -> Result<u64, StorageError> {
+        if qualification.institution() != scope.institution()
+            || qualification.workspace() != scope.workspace()
+        {
+            return Err(StorageError::AdmissionMismatch);
+        }
+        let client = self.client().await?;
+        let scoped = scope_values(scope);
+        let replay_domain = qualification.replay_domain(vector);
+        let row = client
+            .query_one(
+                "SELECT COUNT(*)::bigint FROM operation_attempts a JOIN institution_workspaces w USING (institution_id, workspace_id) WHERE a.institution_id = $1 AND a.workspace_id = $2 AND a.replay_domain = $3 AND w.trust_domain = $4",
+                &[
+                    &scoped.institution,
+                    &scoped.workspace,
+                    &replay_domain,
+                    &scoped.trust_domain,
+                ],
+            )
+            .await
+            .map_err(StorageError::Database)?;
+        u64::try_from(row.get::<_, i64>(0)).map_err(|_| StorageError::AdmissionMismatch)
+    }
+
     /// Recover one immutable generation envelope within the installed scope.
     ///
     /// The returned manifest remains inert until the semantic service re-admits
@@ -1147,7 +1181,7 @@ impl PostgresStorage {
         for state in &commit.state {
             transaction.execute(
                 "INSERT INTO state_entries (institution_id, workspace_id, state_key, value_digest, value_payload) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (institution_id, workspace_id, state_key) DO UPDATE SET value_digest = EXCLUDED.value_digest, value_payload = EXCLUDED.value_payload, updated_at = CURRENT_TIMESTAMP",
-                &[&scoped.institution, &scoped.workspace, &state.key, &state.value.digest().as_str(), &state.value.payload()],
+                &[&scoped.institution, &scoped.workspace, &state.key, &state.value.digest().as_str(), &state.value.bytes()],
             ).await.map_err(StorageError::Database)?;
         }
         for evidence in &commit.evidence {
@@ -1184,8 +1218,22 @@ pub struct PostgresAuthorizationLedger {
 
 #[derive(Clone, Debug)]
 struct GenerationAdmission {
-    bootstrap: Option<Digest>,
-    workspace_revision: Option<i64>,
+    kind: GenerationAdmissionKind,
+}
+
+#[derive(Clone, Debug)]
+enum GenerationAdmissionKind {
+    Active {
+        workspace_revision: Option<i64>,
+    },
+    Bootstrap {
+        digest: Digest,
+        workspace_revision: Option<i64>,
+    },
+    CandidateQualification {
+        qualification: OperationalQualification,
+        vector: QualificationVector,
+    },
 }
 
 impl PostgresAuthorizationLedger {
@@ -1198,8 +1246,9 @@ impl PostgresAuthorizationLedger {
             storage,
             scope,
             generation: GenerationAdmission {
-                bootstrap: None,
-                workspace_revision: None,
+                kind: GenerationAdmissionKind::Active {
+                    workspace_revision: None,
+                },
             },
         }
     }
@@ -1216,10 +1265,45 @@ impl PostgresAuthorizationLedger {
             storage,
             scope,
             generation: GenerationAdmission {
-                bootstrap: Some(bootstrap),
-                workspace_revision: None,
+                kind: GenerationAdmissionKind::Bootstrap {
+                    digest: bootstrap,
+                    workspace_revision: None,
+                },
             },
         }
+    }
+
+    /// Bind the ledger to one sealed inactive-candidate qualification vector.
+    ///
+    /// The opaque capability already binds the expected active pointer and
+    /// workspace revision. Reserve and claim recheck them, the durable direct
+    /// grant, and the exact purpose copied through the dispatcher.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::AdmissionMismatch`] when the capability belongs
+    /// to another institution or workspace.
+    pub fn for_candidate_qualification(
+        storage: PostgresStorage,
+        scope: Scope,
+        qualification: &OperationalQualification,
+        vector: QualificationVector,
+    ) -> Result<Self, StorageError> {
+        if qualification.institution() != scope.institution()
+            || qualification.workspace() != scope.workspace()
+        {
+            return Err(StorageError::AdmissionMismatch);
+        }
+        Ok(Self {
+            storage,
+            scope,
+            generation: GenerationAdmission {
+                kind: GenerationAdmissionKind::CandidateQualification {
+                    qualification: qualification.clone(),
+                    vector,
+                },
+            },
+        })
     }
 
     /// Pin both reservation and claim to the snapshot used to evaluate policy.
@@ -1230,7 +1314,13 @@ impl PostgresAuthorizationLedger {
     /// only the revision captured by reservation would miss that interval.
     #[must_use]
     pub fn with_workspace_revision(mut self, revision: i64) -> Self {
-        self.generation.workspace_revision = Some(revision);
+        match &mut self.generation.kind {
+            GenerationAdmissionKind::Active { workspace_revision }
+            | GenerationAdmissionKind::Bootstrap {
+                workspace_revision, ..
+            } => *workspace_revision = Some(revision),
+            GenerationAdmissionKind::CandidateQualification { .. } => {}
+        }
         self
     }
 
@@ -1320,15 +1410,27 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
-        let admission_revision = check_generation(&transaction, scope, request, generation).await?;
+        let admission_revision = check_generation(
+            &transaction,
+            scope,
+            request,
+            generation,
+            LedgerPhase::Reserve,
+        )
+        .await?;
         ensure_no_unresolved_effect_overlap(&transaction, scope, Some(request.effect())).await?;
-        transaction
-            .execute(
-                "DELETE FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND expires_at <= CURRENT_TIMESTAMP AND (status = 'reserved' OR (status = 'completed' AND retain_replay = FALSE))",
-                &[&scoped.institution, &scoped.workspace, &request.replay_domain()],
-            )
-            .await
-            .map_err(StorageError::Database)?;
+        if !matches!(
+            &generation.kind,
+            GenerationAdmissionKind::CandidateQualification { .. }
+        ) {
+            transaction
+                .execute(
+                    "DELETE FROM operation_attempts WHERE institution_id = $1 AND workspace_id = $2 AND replay_domain = $3 AND expires_at <= CURRENT_TIMESTAMP AND (status = 'reserved' OR (status = 'completed' AND retain_replay = FALSE))",
+                    &[&scoped.institution, &scoped.workspace, &request.replay_domain()],
+                )
+                .await
+                .map_err(StorageError::Database)?;
+        }
         for budget_scope in request.budget_scopes() {
             if !request
                 .requested_budget()
@@ -1433,7 +1535,8 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
-        let admission_revision = check_generation(&transaction, scope, request, generation).await?;
+        let admission_revision =
+            check_generation(&transaction, scope, request, generation, LedgerPhase::Claim).await?;
         ensure_no_unresolved_effect_overlap(&transaction, scope, Some(request.effect())).await?;
         for budget_scope in request.budget_scopes() {
             let admitted = transaction
@@ -1451,7 +1554,7 @@ impl PostgresStorage {
         }
         let claimed = transaction
             .execute(
-                "UPDATE operation_attempts SET status = 'claimed' WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND replay_domain = $4 AND replay_key = $5 AND claims_digest = $6 AND status = 'reserved' AND expires_at > CURRENT_TIMESTAMP AND admission_revision = $7",
+                "UPDATE operation_attempts SET status = 'claimed' WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3 AND replay_domain = $4 AND replay_key = $5 AND claims_digest = $6 AND status = 'reserved' AND expires_at > clock_timestamp() AND admission_revision = $7",
                 &[&scoped.institution, &scoped.workspace, &request.reservation_id().0, &request.replay_domain(), &request.replay_key().as_str(), &request.claims_digest().as_str(), &admission_revision],
             )
             .await
@@ -1577,7 +1680,9 @@ async fn check_generation(
     scope: &Scope,
     request: &ReservationRequest,
     generation: &GenerationAdmission,
+    phase: LedgerPhase,
 ) -> Result<i64, StorageError> {
+    check_admitted_purpose(request, generation, phase)?;
     let scoped = scope_values(scope);
     let productive = matches!(request.effect(), EffectReservation::Mutating(_));
     if productive {
@@ -1589,40 +1694,154 @@ async fn check_generation(
     // Read-only admission retains the original shared generation lock. The
     // productive path already owns the workspace row through its fence UPDATE.
     let query = if productive {
-        "SELECT w.active_generation_digest, (SELECT r.content_digest FROM workspace_revisions r WHERE r.institution_id = w.institution_id AND r.workspace_id = w.workspace_id AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'), w.revision FROM institution_workspaces w WHERE w.institution_id = $1 AND w.workspace_id = $2 AND w.trust_domain = $3"
+        "SELECT w.active_generation_digest, (SELECT r.content_digest FROM workspace_revisions r WHERE r.institution_id = w.institution_id AND r.workspace_id = w.workspace_id AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'), w.revision, EXISTS (SELECT 1 FROM runtime_generations g WHERE g.institution_id = w.institution_id AND g.workspace_id = w.workspace_id AND g.generation_digest = $4), ($5::text::timestamptz > clock_timestamp()) FROM institution_workspaces w WHERE w.institution_id = $1 AND w.workspace_id = $2 AND w.trust_domain = $3"
     } else {
-        "SELECT w.active_generation_digest, (SELECT r.content_digest FROM workspace_revisions r WHERE r.institution_id = w.institution_id AND r.workspace_id = w.workspace_id AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'), w.revision FROM institution_workspaces w WHERE w.institution_id = $1 AND w.workspace_id = $2 AND w.trust_domain = $3 FOR SHARE OF w"
+        "SELECT w.active_generation_digest, (SELECT r.content_digest FROM workspace_revisions r WHERE r.institution_id = w.institution_id AND r.workspace_id = w.workspace_id AND r.revision = 0 AND r.record_kind = 'workspace_bootstrap'), w.revision, EXISTS (SELECT 1 FROM runtime_generations g WHERE g.institution_id = w.institution_id AND g.workspace_id = w.workspace_id AND g.generation_digest = $4), ($5::text::timestamptz > clock_timestamp()) FROM institution_workspaces w WHERE w.institution_id = $1 AND w.workspace_id = $2 AND w.trust_domain = $3 FOR SHARE OF w"
     };
+    let request_generation = request.runtime_generation().digest().as_str();
+    let request_expires_at = request.expires_at().to_string();
     let row = transaction
         .query_opt(
             query,
-            &[&scoped.institution, &scoped.workspace, &scoped.trust_domain],
+            &[
+                &scoped.institution,
+                &scoped.workspace,
+                &scoped.trust_domain,
+                &request_generation,
+                &request_expires_at,
+            ],
         )
         .await
         .map_err(StorageError::Database)?
         .ok_or(StorageError::NotFound)?;
     let active: Option<String> = row.get(0);
     let revision: i64 = row.get(2);
-    if generation
-        .workspace_revision
-        .is_some_and(|expected| expected != revision)
-    {
+    if !row.get::<_, bool>(4) {
+        return Err(StorageError::AttemptUnavailable);
+    }
+    let expected_revision = match &generation.kind {
+        GenerationAdmissionKind::Active { workspace_revision }
+        | GenerationAdmissionKind::Bootstrap {
+            workspace_revision, ..
+        } => *workspace_revision,
+        GenerationAdmissionKind::CandidateQualification { qualification, .. } => {
+            Some(qualification.expected_revision())
+        }
+    };
+    if expected_revision.is_some_and(|expected| expected != revision) {
         return Err(StorageError::RevisionConflict);
     }
-    let expected = request.runtime_generation().digest().as_str();
-    let matches = match generation.bootstrap.as_ref() {
-        None => active.as_deref() == Some(expected),
-        Some(digest) => {
+    let matches = match &generation.kind {
+        GenerationAdmissionKind::Active { .. } => active.as_deref() == Some(request_generation),
+        GenerationAdmissionKind::Bootstrap { digest, .. } => {
             let genesis: Option<String> = row.get(1);
             active.is_none()
                 && genesis.as_deref() == Some(digest.as_str())
-                && expected == digest.as_str()
+                && request_generation == digest.as_str()
+        }
+        GenerationAdmissionKind::CandidateQualification { qualification, .. } => {
+            let candidate_exists: bool = row.get(3);
+            candidate_exists
+                && request.runtime_generation() == qualification.generation()
+                && active.as_deref() == qualification.expected_active().map(Digest::as_str)
+                && active.as_deref() != Some(request_generation)
         }
     };
     if !matches {
         return Err(StorageError::AttemptUnavailable);
     }
+    if let GenerationAdmissionKind::CandidateQualification { qualification, .. } = &generation.kind
+    {
+        check_qualification_authority(transaction, scope, qualification, request).await?;
+    }
     Ok(revision)
+}
+
+fn check_admitted_purpose(
+    request: &ReservationRequest,
+    generation: &GenerationAdmission,
+    phase: LedgerPhase,
+) -> Result<(), StorageError> {
+    match &generation.kind {
+        GenerationAdmissionKind::Active { .. } | GenerationAdmissionKind::Bootstrap { .. } => {
+            if !request.purpose().is_operational() {
+                return Err(StorageError::AttemptUnavailable);
+            }
+        }
+        GenerationAdmissionKind::CandidateQualification {
+            qualification,
+            vector,
+        } => {
+            if matches!(
+                (vector, phase),
+                (
+                    QualificationVector::PlantedViolation,
+                    LedgerPhase::Reserve | LedgerPhase::Claim
+                )
+            ) {
+                return Err(StorageError::AttemptUnavailable);
+            }
+            let purpose = request
+                .purpose()
+                .qualification_purpose()
+                .ok_or(StorageError::AttemptUnavailable)?;
+            if purpose.capability() != qualification.digest()
+                || purpose.vector() != *vector
+                || purpose.generation() != qualification.generation()
+                || purpose.intent() != qualification.intent(*vector)
+                || purpose.replay_domain() != qualification.replay_domain(*vector)
+                || purpose.expires_at() != qualification.expires_at()
+                || request.runtime_generation() != qualification.generation()
+                || request.intent_digest() != qualification.intent(*vector)
+                || request.replay_domain() != qualification.replay_domain(*vector)
+                || request.expires_at() > qualification.expires_at()
+                || !qualification.admits_control_run(*vector, purpose.control_run())
+            {
+                return Err(StorageError::AttemptUnavailable);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn check_qualification_authority(
+    transaction: &tokio_postgres::Transaction<'_>,
+    scope: &Scope,
+    qualification: &OperationalQualification,
+    request: &ReservationRequest,
+) -> Result<(), StorageError> {
+    let purpose = request
+        .purpose()
+        .qualification_purpose()
+        .ok_or(StorageError::AttemptUnavailable)?;
+    let scoped = scope_values(scope);
+    let authority_expires_at = qualification.expires_at().to_string();
+    let run_finished_at = purpose.control_run().finished_at.to_string();
+    let row = transaction
+        .query_opt(
+            "SELECT ($5::text::timestamptz > clock_timestamp()), ($6::text::timestamptz <= clock_timestamp()) FROM delegations d WHERE d.institution_id = $1 AND d.workspace_id = $2 AND d.delegation_id = $3 AND d.delegation_digest = $4 AND NOT EXISTS (SELECT 1 FROM delegation_revocations r WHERE r.institution_id = d.institution_id AND r.workspace_id = d.workspace_id AND r.delegation_id = d.delegation_id) FOR SHARE OF d",
+            &[
+                &scoped.institution,
+                &scoped.workspace,
+                &qualification.authority().0,
+                &qualification.authority_digest().as_str(),
+                &authority_expires_at,
+                &run_finished_at,
+            ],
+        )
+        .await
+        .map_err(StorageError::Database)?
+        .ok_or(StorageError::AdmissionMismatch)?;
+    if !row.get::<_, bool>(0) || !row.get::<_, bool>(1) {
+        return Err(StorageError::AttemptUnavailable);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LedgerPhase {
+    Reserve,
+    Claim,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1902,7 +2121,10 @@ mod tests {
                 transition: signed(&owner, serde_json::json!({"transition": "approve"})),
                 state: vec![StateMutation {
                     key: "institution.phase".to_owned(),
-                    value: signed(&owner, serde_json::json!({"value": "operational"})),
+                    value: CanonicalPayload::from_json(
+                        &serde_json::json!({"value": "operational"}),
+                    )
+                    .expect("state JSON is canonicalizable"),
                 }],
                 evidence: vec![EvidenceAdmission {
                     id: EvidenceId::new(),

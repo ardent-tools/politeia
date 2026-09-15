@@ -109,6 +109,8 @@ async fn mismatched_or_denied_policy_receipts_fail_before_lease_minting() {
         DecisionFault::PolicyDigest,
         DecisionFault::IntentDigest,
         DecisionFault::Deny,
+        DecisionFault::ControlRuns,
+        DecisionFault::Reasons,
     ] {
         let mut fixture = fixture();
         fixture.dispatcher.policy.fault = Some(fault);

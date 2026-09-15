@@ -24,7 +24,12 @@ use politeia_core::{
     trust::{AdmissionKind, Admitted, SignedAdmissionWire},
 };
 use politeia_evidence::assessment::{AssessmentRelation, Projection};
-use politeia_policy::PolicyDecision;
+use politeia_policy::{
+    PolicyDecision,
+    bootstrap::{
+        BootstrapLearningDisclosure, BootstrapLearningDisclosureRefusal, BootstrapLearningIntent,
+    },
+};
 use politeia_runtime::{
     AuthorizationLedger, AuthorizedEffect, Dispatcher, DispatcherConfig, EffectLease, EffectPort,
     OperationIntent, PolicyDecisionPoint,
@@ -382,19 +387,20 @@ impl PoliteiadService {
             .collect();
         let operation = bootstrap_context_operation(data_classes)?;
         let policy = BootstrapDisclosurePolicy {
-            workspace: self.workspace().clone(),
-            bootstrap: bootstrap.digest().clone(),
-            requester: admitted.payload().requester.clone(),
-            authority: authority
-                .iter()
-                .map(|grant| grant.payload().clone())
-                .collect(),
-            operation: operation.clone(),
-            resources: resources.clone(),
-            budget: admitted.payload().budget.clone(),
-            request: request_digest.clone(),
-            population: population.clone(),
-            replay_key: format!("learning:{}", admitted.payload().id.0),
+            disclosure: BootstrapLearningDisclosure::admit(
+                self.workspace(),
+                bootstrap.digest().clone(),
+                admitted.payload().requester.clone(),
+                &authority,
+                operation.clone(),
+                resources.clone(),
+                admitted.payload().budget.clone(),
+                input_digest.clone(),
+                format!("learning:{}", admitted.payload().id.0),
+                request_digest.clone(),
+                population.clone(),
+            )
+            .map_err(refusal)?,
         };
         let port = ContextDisclosurePort {
             adapter: AdapterId::new(),
@@ -771,19 +777,20 @@ impl PoliteiadService {
         revision: i64,
     ) -> Result<OperationResult, CoordinatorError> {
         let policy = BootstrapDisclosurePolicy {
-            workspace: self.workspace().clone(),
-            bootstrap: bootstrap.clone(),
-            requester: admitted.payload().requester.clone(),
-            authority: authority
-                .iter()
-                .map(|grant| grant.payload().clone())
-                .collect(),
-            operation: operation.clone(),
-            resources: resources.clone(),
-            budget: admitted.payload().budget.clone(),
-            request: request.clone(),
-            population: population.clone(),
-            replay_key: format!("learning:{}", admitted.payload().id.0),
+            disclosure: BootstrapLearningDisclosure::admit(
+                self.workspace(),
+                bootstrap.clone(),
+                admitted.payload().requester.clone(),
+                authority,
+                operation.clone(),
+                resources.clone(),
+                admitted.payload().budget.clone(),
+                input_digest.clone(),
+                format!("learning:{}", admitted.payload().id.0),
+                request.clone(),
+                population.clone(),
+            )
+            .map_err(refusal)?,
         };
         let port = ContextDisclosurePort {
             adapter: AdapterId::new(),
@@ -1100,6 +1107,8 @@ impl PoliteiadService {
                 "learning request identity was already committed".to_string(),
             ));
         }
+        let state = CanonicalPayload::from_bytes(state.payload().to_vec(), state.digest().clone())
+            .map_err(|error| storage_refusal(&error))?;
         let commit = ScopedCommit {
             scope: self.scope().clone(),
             expected_revision: durable.revision,
@@ -1699,36 +1708,6 @@ fn verify_active_disclosure_intent(
     Ok(())
 }
 
-#[allow(
-    clippy::enum_variant_names,
-    reason = "each variant names the rejected lease axis"
-)]
-#[derive(Debug)]
-enum LearningDisclosureRefusal {
-    AuthorityMismatch,
-    OperationMismatch,
-    ResourceMismatch,
-    BudgetMismatch,
-}
-
-impl fmt::Display for LearningDisclosureRefusal {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
-            Self::AuthorityMismatch => {
-                "disclosure intent delegation chain differs from live authority"
-            }
-            Self::OperationMismatch => "disclosure intent operation differs from active registry",
-            Self::ResourceMismatch => {
-                "disclosure intent resources differ from signed approved disclosure"
-            }
-            Self::BudgetMismatch => "disclosure intent budget differs from signed finite budget",
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl Error for LearningDisclosureRefusal {}
-
 fn bootstrap_context_operation(
     data_classes: BTreeSet<DataClass>,
 ) -> Result<politeia_core::OperationSpec, CoordinatorError> {
@@ -1768,55 +1747,29 @@ fn bootstrap_discovery_operation() -> Result<politeia_core::OperationSpec, Coord
 }
 
 struct BootstrapDisclosurePolicy {
-    workspace: politeia_core::institution::InstitutionWorkspace,
-    bootstrap: Digest,
-    requester: PrincipalId,
-    authority: Vec<politeia_core::Delegation>,
-    operation: politeia_core::OperationSpec,
-    resources: BTreeSet<String>,
-    budget: ResourceBudget,
-    request: Digest,
-    population: Digest,
-    replay_key: String,
+    disclosure: BootstrapLearningDisclosure,
 }
 
 impl PolicyDecisionPoint for BootstrapDisclosurePolicy {
-    type Error = LearningDisclosureRefusal;
+    type Error = BootstrapLearningDisclosureRefusal;
 
     async fn decide(
         &self,
         intent: &OperationIntent,
     ) -> Result<politeia_policy::PolicyDecision, Self::Error> {
-        if intent.principal != self.requester || intent.delegation_chain != self.authority {
-            return Err(LearningDisclosureRefusal::AuthorityMismatch);
-        }
-        if intent.operation != self.operation || intent.resources != self.resources {
-            return Err(LearningDisclosureRefusal::ResourceMismatch);
-        }
-        if intent.budget != self.budget
-            || !intent.budget.is_finite()
-            || intent.idempotency_key.as_deref() != Some(&self.replay_key)
-        {
-            return Err(LearningDisclosureRefusal::BudgetMismatch);
-        }
-        Ok(politeia_policy::PolicyDecision {
-            bundle: self.workspace.policy_bundle.clone(),
-            policy_digest: self.workspace.policy_digest.clone(),
-            intent_digest: intent
-                .digest()
-                .map_err(|_| LearningDisclosureRefusal::OperationMismatch)?,
-            subject: self.request.clone(),
-            population: self.population.clone(),
-            principal: self.requester.clone(),
-            allowed: true,
-            binding_ids: vec!["politeia.bootstrap.learning-disclosure.v1".to_string()],
-            control_runs: Vec::new(),
-            activation_proofs: Vec::new(),
-            waiver_ids: Vec::new(),
-            reasons: vec![format!(
-                "owner-pinned bootstrap disclosure {}",
-                self.bootstrap.as_str()
-            )],
+        let intent_digest = intent
+            .digest()
+            .map_err(|_| BootstrapLearningDisclosureRefusal::OperationMismatch)?;
+        self.disclosure.evaluate(&BootstrapLearningIntent {
+            principal: &intent.principal,
+            input_digest: &intent.input_digest,
+            delegation_chain: &intent.delegation_chain,
+            operation: &intent.operation,
+            resources: &intent.resources,
+            budget: &intent.budget,
+            idempotency_key: intent.idempotency_key.as_deref(),
+            has_execution_assignment: intent.execution.is_some(),
+            intent_digest,
         })
     }
 }

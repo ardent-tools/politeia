@@ -10,6 +10,7 @@ use jiff::Timestamp;
 use politeia_core::{
     AdapterId, BudgetReservationId, DelegationId, Digest, ResourceBudget, RuntimeGenerationId,
 };
+use politeia_policy::DecisionPurpose;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -212,6 +213,8 @@ pub struct ReservationRequest {
     expires_at: Timestamp,
     claims_digest: Digest,
     runtime_generation: RuntimeGenerationId,
+    #[serde(skip_serializing_if = "DecisionPurpose::is_operational")]
+    purpose: DecisionPurpose,
 }
 
 impl ReservationRequest {
@@ -231,6 +234,7 @@ impl ReservationRequest {
         expires_at: Timestamp,
         claims_digest: Digest,
         runtime_generation: RuntimeGenerationId,
+        purpose: DecisionPurpose,
     ) -> Self {
         Self {
             reservation_id,
@@ -244,6 +248,7 @@ impl ReservationRequest {
             expires_at,
             claims_digest,
             runtime_generation,
+            purpose,
         }
     }
 
@@ -300,6 +305,11 @@ impl ReservationRequest {
     /// Exact runtime generation that must still govern admission at claim time.
     pub fn runtime_generation(&self) -> &RuntimeGenerationId {
         &self.runtime_generation
+    }
+
+    /// Exact admitted purpose copied from the policy decision into the lease.
+    pub fn purpose(&self) -> &DecisionPurpose {
+        &self.purpose
     }
 }
 
@@ -525,6 +535,11 @@ impl AuthorizationLedger for InMemoryAuthorizationLedger {
         let mut state = self.state.lock().await;
         let now = Self::now(&state);
         Self::prune(&mut state, now);
+        if !request.purpose.is_operational() {
+            return Err(RuntimeError::ReservationMismatch {
+                reason: "ordinary ledger cannot admit candidate qualification",
+            });
+        }
         if request.expires_at <= now {
             return Err(lease_expired());
         }
@@ -615,6 +630,11 @@ impl AuthorizationLedger for InMemoryAuthorizationLedger {
     async fn claim(&self, request: &ReservationRequest) -> Result<(), RuntimeError> {
         let mut state = self.state.lock().await;
         let now = Self::now(&state);
+        if !request.purpose.is_operational() {
+            return Err(RuntimeError::ReservationMismatch {
+                reason: "ordinary ledger cannot claim candidate qualification",
+            });
+        }
         if request.expires_at <= now {
             Self::prune(&mut state, now);
             return Err(lease_expired());
