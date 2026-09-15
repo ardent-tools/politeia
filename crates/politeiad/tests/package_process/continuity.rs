@@ -24,7 +24,6 @@ use politeiad::service_operation::{OperationSubmission, RESOURCE_MANIFEST_OPERAT
 use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
-use super::evidence;
 use super::{
     Daemon, OperationalFixture, REQUEST_TIMEOUT, ReferenceFixture, RunningChild, TestResult,
     await_status, require_coordinated, require_refusal, run, serve, stop, submit_commissioning,

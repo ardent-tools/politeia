@@ -600,7 +600,7 @@ mod tests {
         match timeout(Duration::from_secs(5), server).await {
             Ok(Err(error)) if error.is_cancelled() => {}
             Ok(Err(error)) => {
-                failures.push(format!("listener task failed during teardown: {error}"))
+                failures.push(format!("listener task failed during teardown: {error}"));
             }
             Ok(Ok(Ok(()))) => failures.push("listener task unexpectedly completed".to_string()),
             Ok(Ok(Err(error))) => failures.push(format!("listener failed: {error}")),
