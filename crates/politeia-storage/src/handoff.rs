@@ -15,7 +15,7 @@ use tokio_postgres::IsolationLevel;
 
 use crate::{
     HandoffCommit, HandoffCommitReceipt, PostgresStorage, StorageError, StoredHandoffReceipt,
-    authority, parse_digest, scope_values, transaction,
+    advance_workspace_admission_epoch, authority, parse_digest, scope_values, transaction,
 };
 
 const HANDOFF_RECORD_KIND: &str = "handoff_receipt";
@@ -23,18 +23,19 @@ const HANDOFF_RECORD_KIND: &str = "handoff_receipt";
 impl PostgresStorage {
     /// Atomically retain a daemon-derived handoff receipt and its owner evidence.
     ///
-    /// The transaction serializes on the workspace, verifies the active
-    /// generation and revision, rechecks the live installed-owner root grant,
-    /// compares the complete relevant commissioner-authority set, and resolves
-    /// the exact completed operation receipt. A concurrent commissioner grant
-    /// admitted before this transaction therefore makes the caller's snapshot
-    /// stale instead of disappearing from the handoff record.
+    /// The transaction first advances the shared admission epoch, then
+    /// serializes on the workspace, verifies the active generation and
+    /// revision, rechecks the live installed-owner root grant, compares the
+    /// complete relevant commissioner-authority set, and resolves the exact
+    /// completed operation receipt. A concurrent commissioner grant therefore
+    /// either follows this handoff or becomes visible before validation; it
+    /// cannot disappear from the handoff record.
     ///
     /// # Errors
     ///
     /// Returns [`StorageError::RevisionConflict`] when generation, revision, or
-    /// authority membership changed; [`StorageError::AdmissionMismatch`] when
-    /// signed owner authority or commissioner closure is invalid; and
+    /// a closed authority-membership snapshot changed; [`StorageError::AdmissionMismatch`]
+    /// when signed owner authority or live commissioner closure is invalid; and
     /// [`StorageError::AttemptUnavailable`] when the selected continuity receipt
     /// is missing, incomplete, mismatched, was reserved before authority
     /// closure, or completed before authority closure.
@@ -61,6 +62,7 @@ impl PostgresStorage {
             .await
             .map_err(StorageError::Database)?;
         let scoped = scope_values(&commit.scope);
+        advance_workspace_admission_epoch(&transaction, &commit.scope).await?;
         let workspace = transaction
             .query_opt(
                 "SELECT revision, active_generation_digest, owner_principal_id, owner_delegation_id, model_digest, model_payload, model_signature, model_signer_id, (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000000)::bigint FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $3 FOR UPDATE",

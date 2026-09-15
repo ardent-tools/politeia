@@ -631,6 +631,10 @@ impl PostgresStorage {
     }
 
     /// Persist an anchor-admitted delegation and its exact signed wire envelope.
+    ///
+    /// The shared admission epoch is advanced in the serializable transaction
+    /// before the immutable insert, so an overlapping handoff either precedes
+    /// this authority or validates after it is visible.
     pub async fn admit_delegation(
         &self,
         scope: &Scope,
@@ -653,9 +657,38 @@ impl PostgresStorage {
         let delegation_digest = Digest::blake3(&delegation_payload);
         let wire_payload = to_canonical_bytes(wire).map_err(StorageError::Canonical)?;
         let wire_digest = Digest::blake3(&wire_payload);
-        let client = self.client().await?;
+        transaction::retry(|| {
+            self.admit_delegation_once(
+                scope,
+                delegation,
+                &delegation_digest,
+                wire,
+                &wire_payload,
+                &wire_digest,
+            )
+        })
+        .await
+    }
+
+    async fn admit_delegation_once(
+        &self,
+        scope: &Scope,
+        delegation: &Delegation,
+        delegation_digest: &Digest,
+        wire: &SignedAdmissionWire<Delegation>,
+        wire_payload: &[u8],
+        wire_digest: &Digest,
+    ) -> Result<DelegationAdmissionReceipt, StorageError> {
+        let mut client = self.client().await?;
+        let transaction = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
+            .await
+            .map_err(StorageError::Database)?;
         let scoped = scope_values(scope);
-        let row = client.query_opt(
+        advance_workspace_admission_epoch(&transaction, scope).await?;
+        let row = transaction.query_opt(
             "INSERT INTO delegations (institution_id, workspace_id, delegation_id, delegation_digest, wire_digest, payload, signature, signer_id) SELECT $1, $2, $3, $4, $5, $6, $7, $8 WHERE EXISTS (SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 AND trust_domain = $9) ON CONFLICT DO NOTHING RETURNING (EXTRACT(EPOCH FROM admitted_at) * 1000000)::bigint",
             &[&scoped.institution, &scoped.workspace, &delegation.id.0, &delegation_digest.as_str(), &wire_digest.as_str(), &wire_payload, &wire.signature, &wire.signer.0, &scoped.trust_domain],
         ).await.map_err(StorageError::Database)?;
@@ -667,6 +700,7 @@ impl PostgresStorage {
             .map_err(|_| StorageError::AdmissionMismatch)?;
         let admitted_at = Timestamp::new(micros.div_euclid(1_000_000), nanos)
             .map_err(|_| StorageError::AdmissionMismatch)?;
+        transaction.commit().await.map_err(StorageError::Database)?;
         Ok(DelegationAdmissionReceipt { admitted_at })
     }
 

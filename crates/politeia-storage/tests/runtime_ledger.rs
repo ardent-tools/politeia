@@ -816,7 +816,8 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
     };
     let handoff = |snapshot: &politeia_storage::WorkspaceSnapshot,
                    reservation: politeia_core::BudgetReservationId,
-                   canary: CanonicalPayload|
+                   canary: CanonicalPayload,
+                   expected_authorities: BTreeSet<DelegationId>|
      -> TestResult<HandoffCommit> {
         Ok(HandoffCommit {
             transition: ScopedCommit {
@@ -832,7 +833,7 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
             generation: generation.digest().clone(),
             commissioning_record: commissioning_record.clone(),
             commissioner: commissioner.clone(),
-            expected_authorities: BTreeSet::from([commissioner_grant.id.clone()]),
+            expected_authorities,
             continuity_reservation: reservation,
             continuity_receipt: canary,
             handoff_receipt: CanonicalPayload::from_json(&serde_json::json!({
@@ -844,6 +845,7 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
         &initial,
         early.reservation_id().clone(),
         early_receipt.clone(),
+        BTreeSet::from([commissioner_grant.id.clone()]),
     )?;
     assert!(matches!(
         fixture
@@ -862,7 +864,12 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
         .record_completion(&fixture.scope, crossing.reservation_id(), &crossing_receipt)
         .await?;
     let closed = fixture.storage.load_workspace(&fixture.scope).await?;
-    let crossing_boundary = handoff(&closed, crossing.reservation_id().clone(), crossing_receipt)?;
+    let crossing_boundary = handoff(
+        &closed,
+        crossing.reservation_id().clone(),
+        crossing_receipt,
+        BTreeSet::from([commissioner_grant.id.clone()]),
+    )?;
     assert!(matches!(
         fixture
             .storage
@@ -892,6 +899,7 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
         &closed,
         canary.reservation_id().clone(),
         CanonicalPayload::from_json(&serde_json::json!({"canary": "caller-asserted"}))?,
+        BTreeSet::from([commissioner_grant.id.clone()]),
     )?;
     assert!(matches!(
         fixture
@@ -901,29 +909,92 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
         Err(StorageError::AttemptUnavailable)
     ));
 
-    let accepted = handoff(
+    let contested = handoff(
         &closed,
         canary.reservation_id().clone(),
         canary_receipt.clone(),
+        BTreeSet::from([commissioner_grant.id.clone()]),
     )?;
-    let committed = fixture
-        .storage
-        .commit_handoff_authorized(&accepted, std::slice::from_ref(&fixture.authority))
-        .await?;
+    // Handoff and a new commissioner grant race through the same admission
+    // epoch. Either order is legal, but the handoff may only commit before the
+    // new authority becomes visible; otherwise its old closure is refused.
+    let mut concurrent_grant = commissioner_grant.clone();
+    concurrent_grant.id = DelegationId::new();
+    concurrent_grant.subject = PrincipalId::new();
+    let (concurrent_authority, concurrent_wire) =
+        admit_fixture_authority(&fixture, concurrent_grant.clone())?;
+    let (handoff_result, admission_result) = tokio::join!(
+        fixture
+            .storage
+            .commit_handoff_authorized(&contested, std::slice::from_ref(&fixture.authority)),
+        fixture
+            .storage
+            .admit_delegation(&fixture.scope, &concurrent_authority, &concurrent_wire,),
+    );
+    admission_result?;
+    let (committed, expected_receipt, expected_handoff_receipt) = match handoff_result {
+        Ok(committed) => (
+            committed,
+            canary_receipt.clone(),
+            contested.handoff_receipt.clone(),
+        ),
+        Err(StorageError::AdmissionMismatch) => {
+            // The admission won. Close the newly visible authority, generate
+            // a continuity witness after that closure, and prove a handoff
+            // with the complete authority set can proceed.
+            revoke_fixture_authority(&fixture, &concurrent_grant).await?;
+            canary_intent.idempotency_key = Some("handoff-after-racing-admission".to_owned());
+            let fresh_dispatcher = fixture.dispatcher_for_generation(
+                fixture.storage.clone(),
+                SignedDuration::from_secs(30),
+                generation.clone(),
+                false,
+            )?;
+            let fresh_canary = fresh_dispatcher.authorize(&canary_intent).await?;
+            fresh_dispatcher.execute(&fresh_canary).await?;
+            let fresh_receipt = CanonicalPayload::from_json(&serde_json::json!({
+                "canary": "after-racing-admission"
+            }))?;
+            fixture
+                .storage
+                .record_completion(
+                    &fixture.scope,
+                    fresh_canary.reservation_id(),
+                    &fresh_receipt,
+                )
+                .await?;
+            let refreshed = fixture.storage.load_workspace(&fixture.scope).await?;
+            let accepted = handoff(
+                &refreshed,
+                fresh_canary.reservation_id().clone(),
+                fresh_receipt.clone(),
+                BTreeSet::from([commissioner_grant.id.clone(), concurrent_grant.id.clone()]),
+            )?;
+            let committed = fixture
+                .storage
+                .commit_handoff_authorized(&accepted, std::slice::from_ref(&fixture.authority))
+                .await?;
+            (committed, fresh_receipt, accepted.handoff_receipt.clone())
+        }
+        other => return Err(format!("unexpected handoff race result: {other:?}").into()),
+    };
     let retained = fixture
         .storage
         .load_handoff_receipt(&fixture.scope, generation.digest())
         .await?;
     assert_eq!(retained.revision, committed.revision);
-    assert_eq!(retained.payload, accepted.handoff_receipt.bytes());
-    assert_eq!(retained.continuity_receipt_digest, *canary_receipt.digest());
+    assert_eq!(retained.payload, expected_handoff_receipt.bytes());
+    assert_eq!(
+        retained.continuity_receipt_digest,
+        *expected_receipt.digest()
+    );
     assert_eq!(
         fixture
             .storage
             .load_workspace(&fixture.scope)
             .await?
             .revision,
-        closed.revision + 1
+        committed.revision
     );
     Ok(())
 }
