@@ -1,12 +1,12 @@
 //! The local Politeia daemon and CLI.
 
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, sync::Arc};
 
 use crate::{
     SemanticOperation,
     config::{HostTrustConfiguration, InstallationLayout},
     service::PoliteiadService,
-    transport::{LocalOutcome, bind, current_request, request, serve_once},
+    transport::{LocalOutcome, bind, current_request, request, serve_connections},
 };
 
 /// Run the administrative commands shared by the CLI and daemon entrypoints.
@@ -36,19 +36,20 @@ async fn serve(arguments: &[String]) -> anyhow::Result<()> {
     let anchors = installed.anchors()?;
     // Validate all installed trust and durable connectivity before publishing a
     // listener. A failed start must not masquerade as a running daemon.
-    let coordinator = PoliteiadService::connect(
-        layout.clone(),
-        installed.workspace,
-        anchors,
-        installed.bootstrap,
-        &database_url,
-    )
-    .await
-    .map_err(anyhow::Error::msg)?;
+    let coordinator = Arc::new(
+        PoliteiadService::connect(
+            layout.clone(),
+            installed.workspace,
+            anchors,
+            installed.bootstrap,
+            &database_url,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?,
+    );
     let listener = bind(&layout.socket).await?;
-    loop {
-        serve_once(&listener, &coordinator).await?;
-    }
+    serve_connections(&listener, coordinator).await?;
+    Ok(())
 }
 
 async fn initialize_host(arguments: &[String]) -> anyhow::Result<()> {

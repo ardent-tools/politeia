@@ -4,6 +4,7 @@ use std::{
     io,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use politeia_protocol::{CURRENT_PROTOCOL_VERSION, ProtocolVersion, negotiate};
@@ -11,11 +12,13 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
+    task::JoinSet,
 };
 
 use crate::{CommissioningCoordinator, OperationResult, SemanticOperation, execute};
 
 const MAX_REQUEST_BYTES: usize = 1_048_576;
+const MAX_IN_FLIGHT_CONNECTIONS: usize = 32;
 
 /// One newline-delimited local semantic request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -208,9 +211,46 @@ pub async fn serve_once(
     coordinator: &dyn CommissioningCoordinator,
 ) -> Result<(), TransportError> {
     let (mut stream, _) = listener.accept().await?;
-    let response = match peer_is_daemon_user(&stream) {
+    serve_connection(&mut stream, coordinator).await
+}
+
+/// Serve local connections concurrently through the shared semantic executor.
+///
+/// The daemon retains each connection task until it finishes and stops
+/// accepting once the bounded in-flight set is full. A peer-specific transport
+/// failure cannot discard unrelated admitted work; every result is observed
+/// through the owned task set. Dropping the listener future drops that set, so
+/// in-flight connection tasks do not outlive daemon shutdown.
+pub async fn serve_connections(
+    listener: &UnixListener,
+    coordinator: Arc<dyn CommissioningCoordinator>,
+) -> Result<(), TransportError> {
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(result) = joined {
+                    observe_connection(result);
+                }
+            }
+            accepted = listener.accept(), if connections.len() < MAX_IN_FLIGHT_CONNECTIONS => {
+                let (mut stream, _) = accepted?;
+                let coordinator = Arc::clone(&coordinator);
+                connections.spawn(async move {
+                    serve_connection(&mut stream, coordinator.as_ref()).await
+                });
+            }
+        }
+    }
+}
+
+async fn serve_connection(
+    stream: &mut UnixStream,
+    coordinator: &dyn CommissioningCoordinator,
+) -> Result<(), TransportError> {
+    let response = match peer_is_daemon_user(stream) {
         Err(error) => error_response(String::new(), &error),
-        Ok(()) => match read_request(&mut stream).await {
+        Ok(()) => match read_request(stream).await {
             Ok(request) => {
                 let request_id = request.request_id.clone();
                 match handle(coordinator, request).await {
@@ -227,6 +267,14 @@ pub async fn serve_once(
     stream.write_all(b"\n").await?;
     stream.flush().await?;
     Ok(())
+}
+
+fn observe_connection(result: Result<Result<(), TransportError>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => eprintln!("local semantic connection ended: {error}"),
+        Err(error) => eprintln!("local semantic connection task failed: {error}"),
+    }
 }
 
 /// Send one local semantic request and read its single response.
@@ -340,7 +388,18 @@ mod tests {
         clippy::expect_used,
         reason = "fixtures fail loudly when setup or assertions drift"
     )]
-    use std::{collections::BTreeSet, fs, future::Future, pin::Pin};
+    use std::{
+        collections::BTreeSet,
+        fs,
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::{
@@ -350,6 +409,36 @@ mod tests {
 
     struct SourceCoordinator {
         capture: SourceSnapshotRequest,
+    }
+
+    struct BlockingCoordinator {
+        first_entered: Arc<Notify>,
+        release_first: Arc<Notify>,
+        calls: AtomicUsize,
+    }
+
+    impl CommissioningCoordinator for BlockingCoordinator {
+        fn execute(
+            &self,
+            _operation: SemanticOperation,
+        ) -> Pin<Box<dyn Future<Output = Result<OperationResult, CoordinatorError>> + Send + '_>>
+        {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let entered = Arc::clone(&self.first_entered);
+            let release = Arc::clone(&self.release_first);
+            Box::pin(async move {
+                if call == 0 {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(OperationResult::Coordinated {
+                        result: serde_json::json!({"first": "completed"}),
+                        evidence_refs: Vec::new(),
+                    })
+                } else {
+                    Err(CoordinatorError::Unavailable)
+                }
+            })
+        }
     }
 
     impl CommissioningCoordinator for SourceCoordinator {
@@ -412,6 +501,66 @@ mod tests {
         .expect("local semantic request succeeds");
         server.await.expect("server task finishes");
         assert!(matches!(response.outcome, LocalOutcome::Ok { .. }));
+        fs::remove_dir_all(root).expect("fixture is removable");
+    }
+
+    #[tokio::test]
+    async fn concurrent_listener_serves_a_later_request_while_the_first_is_held() {
+        let root = std::env::temp_dir().join(format!(
+            "politeiad-transport-concurrent-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let run = root.join("run");
+        fs::create_dir_all(&run).expect("fixture run directory is creatable");
+        fs::set_permissions(&run, fs::Permissions::from_mode(0o700))
+            .expect("fixture run directory becomes private");
+        let socket = run.join("politeiad.sock");
+        let listener = bind(&socket).await.expect("fixture socket binds");
+        let first_entered = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let coordinator = BlockingCoordinator {
+            first_entered: Arc::clone(&first_entered),
+            release_first: Arc::clone(&release_first),
+            calls: AtomicUsize::new(0),
+        };
+        let server =
+            tokio::spawn(async move { serve_connections(&listener, Arc::new(coordinator)).await });
+
+        let first_socket = socket.clone();
+        let first = tokio::spawn(async move {
+            request(
+                &first_socket,
+                &current_request("held-request".to_string(), SemanticOperation::Status),
+            )
+            .await
+        });
+        first_entered.notified().await;
+
+        let later = request(
+            &socket,
+            &current_request("later-request".to_string(), SemanticOperation::Status),
+        )
+        .await
+        .expect("later request receives a response while the first is held");
+        assert!(matches!(
+            later.outcome,
+            LocalOutcome::Error { ref code, .. } if code == "coordinator_unavailable"
+        ));
+
+        release_first.notify_one();
+        let first = first
+            .await
+            .expect("held client task completes")
+            .expect("held request receives a response");
+        assert!(matches!(first.outcome, LocalOutcome::Ok { .. }));
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("listener task is cancelled for fixture teardown")
+                .is_cancelled(),
+            "fixture owns and cancels the listener task"
+        );
         fs::remove_dir_all(root).expect("fixture is removable");
     }
 
