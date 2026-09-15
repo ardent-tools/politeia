@@ -356,7 +356,7 @@ pub(crate) fn activate(
     let revision = snapshot["revision"]
         .as_i64()
         .ok_or("status omitted revision")?;
-    let active = serde_json::from_value(snapshot["active_generation"].clone())?;
+    let active: Option<Digest> = serde_json::from_value(snapshot["active_generation"].clone())?;
     submit_commissioning(
         database_url,
         fixture,

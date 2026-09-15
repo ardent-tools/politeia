@@ -86,8 +86,8 @@ fn candidate_blocking_controls(bindings: &[PolicyBinding]) -> BTreeSet<Candidate
 mod control_set_tests {
     use super::{CandidateBlockingControl, candidate_blocking_controls};
     use politeia_policy::{
-        BindingAuthority, Consequence, PolicyBinding,
-        hardening::{HardeningLadder, HardeningState},
+        Consequence, PolicyBinding,
+        hardening::{BindingAuthority, HardeningLadder, HardeningState},
     };
 
     fn authority(
