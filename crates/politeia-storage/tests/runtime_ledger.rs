@@ -1447,7 +1447,7 @@ async fn expired_reservation_releases_budget_for_a_different_replay_key() -> Tes
     assert!(
         matches!(&blocked, Err(RuntimeError::AuthorizationState { source })
             if matches!(source.downcast_ref::<StorageError>(), Some(StorageError::AttemptUnavailable))),
-        "a live reservation must retain the entire finite budget; got {blocked:?}"
+        "a live reservation must retain the entire finite budget"
     );
 
     let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
@@ -1478,7 +1478,7 @@ async fn expired_reservation_releases_budget_for_a_different_replay_key() -> Tes
     assert!(
         matches!(&stale_execution, Err(RuntimeError::AuthorizationState { source })
             if matches!(source.downcast_ref::<StorageError>(), Some(StorageError::AttemptUnavailable))),
-        "the expired reservation must not reach the effect port; got {stale_execution:?}"
+        "the expired reservation must not reach the effect port"
     );
     dispatcher
         .execute(&lease)
