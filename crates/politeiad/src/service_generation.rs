@@ -831,7 +831,7 @@ impl PoliteiadService {
             },
         ];
         let transition = signed_wire_record(&transition)?;
-        let authority_chains = vec![
+        let mut authority_chains = vec![
             self.admit_live_delegation_chain(
                 &run_authority.payload().id,
                 &run_authority.payload().subject,
@@ -843,6 +843,13 @@ impl PoliteiadService {
             )
             .await?,
         ];
+        for qualification in &assurance.qualifications {
+            let grant = &qualification.proof_authority.payload;
+            authority_chains.push(
+                self.admit_live_delegation_chain(&grant.id, &grant.subject)
+                    .await?,
+            );
+        }
         let receipt = self
             .storage()
             .activate_generation_authorized(
@@ -879,7 +886,7 @@ impl PoliteiadService {
     /// Refuse a transition until every control that can block a candidate
     /// operation has one independently admitted, real-path qualification.
     ///
-    /// The owner signs the complete ordered collection through
+    /// The owner signs the complete collection through
     /// [`activation_assurance_digest`].  This method only resolves and checks
     /// it before the compare-and-swap commit; it never admits caller-supplied
     /// reports or treats a detector-only calibration as qualification.
@@ -893,13 +900,6 @@ impl PoliteiadService {
         at: jiff::Timestamp,
     ) -> Result<(), CoordinatorError> {
         let required = candidate_blocking_controls(registry.policy().bindings());
-        if assurance.qualifications.len() != required.len() {
-            return Err(CoordinatorError::Refused(
-                "candidate control qualifications do not completely cover blocking policy controls"
-                    .to_string(),
-            ));
-        }
-
         let mut supplied = BTreeSet::new();
         for qualification in &assurance.qualifications {
             let resolved = self
@@ -923,24 +923,6 @@ impl PoliteiadService {
                 .policy()
                 .validate_detector_qualification(report)
                 .map_err(refusal)?;
-            let proof = resolved.verified_proof()?.proof();
-            registry
-                .policy()
-                .validate_activation_proof(proof)
-                .map_err(refusal)?;
-            if proof.control != report.control
-                || proof.control_version != report.control_version
-                || proof.configuration_digest != report.configuration_digest
-                || proof.policy != report.policy
-                || proof.policy_digest != report.policy_digest
-                || proof.population != report.population
-                || proof.mediation_path != report.mediation_path
-            {
-                return Err(CoordinatorError::Refused(
-                    "candidate control proof differs from the exact candidate policy detector"
-                        .to_string(),
-                ));
-            }
             let registered = registry
                 .execution()
                 .exact_operation(real_path.operation())
@@ -962,13 +944,8 @@ impl PoliteiadService {
                         .to_string(),
                 )
                 })?;
-            if !real_path.matches_candidate(
-                generation,
-                artifact,
-                self.running_executable_digest(),
-                durable.active_generation.as_ref(),
-                durable.revision,
-            ) || real_path.handler() != &handler
+            if !real_path.matches_candidate(generation, artifact, self.running_executable_digest())
+                || real_path.handler() != &handler
                 || resource.adapter != *real_path.adapter()
             {
                 return Err(CoordinatorError::Refused(
@@ -981,12 +958,6 @@ impl PoliteiadService {
                 scope: real_path.scope().to_owned(),
                 control: real_path.control().to_owned(),
             };
-            if !required.contains(&key) {
-                return Err(CoordinatorError::Refused(
-                    "candidate control qualification is not required by the target policy"
-                        .to_string(),
-                ));
-            }
             if !supplied.insert(key) {
                 return Err(CoordinatorError::Refused(
                     "candidate control qualifications duplicate one blocking binding control"
@@ -995,9 +966,11 @@ impl PoliteiadService {
             }
         }
         if supplied != required {
-            return Err(CoordinatorError::Refused(
-                "candidate control qualifications omit a blocking binding control".to_string(),
-            ));
+            return Err(CoordinatorError::Refused(format!(
+                "candidate control qualification coverage differs: missing {:?}; unexpected {:?}",
+                required.difference(&supplied).collect::<Vec<_>>(),
+                supplied.difference(&required).collect::<Vec<_>>(),
+            )));
         }
         Ok(())
     }
