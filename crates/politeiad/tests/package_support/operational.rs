@@ -5,6 +5,7 @@
 //! handle; callers must admit every returned request through the daemon CLI.
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fs,
 };
@@ -14,7 +15,7 @@ use jiff::{SignedDuration, Timestamp};
 use politeia_core::{
     CapabilityProfileId, CapabilityVerificationId, DataClass, Delegation, DelegationId, Digest,
     Effect, EvidenceId, ExecutionLocality, ExecutionResourceId, OperationId, OperationSpec,
-    PrincipalId, ResourceBudget, RoutingDecisionId,
+    PrincipalId, ResourceBudget, RoutingDecisionId, RuntimeGenerationId,
     canonical::to_canonical_bytes,
     evidence::{EvidenceRequest, IndependenceClass},
     institution::TrustDomainId,
@@ -23,8 +24,9 @@ use politeia_core::{
 };
 use politeia_evidence::{
     assurance::{
-        ActivationProof, RUN_POLICY_CONTROL_ACTION, VERIFY_POLICY_CONTROL_ACTION,
-        policy_control_resource,
+        ActivationProof, ControlQualificationVectorSet, QUALIFY_POLICY_CONTROL_ACTION,
+        RUN_POLICY_CONTROL_ACTION, VERIFY_POLICY_CONTROL_ACTION,
+        policy_control_qualification_resource, policy_control_resource,
     },
     authority::institution_audience,
 };
@@ -33,7 +35,7 @@ use politeia_policy::{
     hardening::{BindingAuthority, HardeningLadder, HardeningState},
     operational::{
         OperationalDetector, OperationalEvaluationRequest, OperationalPolicyRegistry,
-        PublicDetectorRule, operation_scope,
+        PublicDetectorCalibration, PublicDetectorRule, operation_scope,
     },
 };
 use politeia_runtime::{
@@ -52,6 +54,7 @@ use politeiad::{
         CapabilityEvidenceSubmission, CapabilityQualificationEvidence,
         CapabilityVerificationEvidence, DETECTOR_CALIBRATION_METHOD,
         DISCOVER_CAPABILITIES_OPERATION, DetectorCalibrationEvidenceSubmission,
+        DetectorQualificationSubmission, DetectorQualificationVectorSubmission,
         InstalledOperationHandler, OPERATION_RECEIPT_OBLIGATION, OperationSubmission,
         OperationalControlEvidence, OperationalExecutionRegistry, RESOURCE_MANIFEST_ACTION,
         RESOURCE_MANIFEST_OPERATION, RegisteredOperation, VERIFY_EXECUTION_CAPABILITY_ACTION,
@@ -85,7 +88,23 @@ pub(crate) struct OperationalFixture {
     capability_admissions: Vec<serde_json::Value>,
     run_authority: SignedAdmissionWire<Delegation>,
     activation_authority: SignedAdmissionWire<Delegation>,
-    activation: SignedAdmissionWire<ActivationProof>,
+    activation: RefCell<Option<SignedAdmissionWire<ActivationProof>>>,
+}
+
+/// Stage-one material whose grants and vector identities are fixed before the
+/// daemon performs either target-control invocation.
+pub(crate) struct DetectorQualificationDocuments {
+    /// All independently signed direct grants that must be durably admitted
+    /// before the exercise request reaches the daemon.
+    pub(crate) authority_admissions: Vec<serde_json::Value>,
+    /// Typed public commissioning request for the sealed candidate path.
+    pub(crate) exercise: serde_json::Value,
+}
+
+/// One inert signed vector and its separately admitted operation grant.
+struct PreparedQualificationVector {
+    operation_authority: SignedAdmissionWire<Delegation>,
+    submission: DetectorQualificationVectorSubmission,
 }
 
 impl OperationalFixture {
@@ -338,46 +357,6 @@ impl OperationalFixture {
             });
         }
 
-        let calibration = policy
-            .calibrate_detector(PUBLIC_RESOURCE_DETECTOR)
-            .expect("public detector calibration executes");
-        let calibration_observed_at = Timestamp::now();
-        let calibration_digest = calibration.digest().expect("calibration digests");
-        let calibration_evidence_id = EvidenceId::new();
-        let calibration_evidence = sign(
-            fixture,
-            AdmissionKind::Evidence,
-            &fixture.identities.verifier,
-            fixture.identities.verifier_key(),
-            EvidenceRequest {
-                id: calibration_evidence_id.clone(),
-                subject: calibration_digest.clone(),
-                producer_delegation: activation_authority.payload.id.clone(),
-                method: DETECTOR_CALIBRATION_METHOD.to_string(),
-                payload_digest: calibration_digest,
-                observed_at: calibration_observed_at,
-                independence: IndependenceClass::IndependentAgent,
-            },
-        );
-        let activation = sign(
-            fixture,
-            AdmissionKind::ActivationProof,
-            &fixture.identities.verifier,
-            fixture.identities.verifier_key(),
-            calibration
-                .activation_proof(EvidenceId::new(), calibration_evidence_id, Timestamp::now())
-                .expect("activation proof binds actual detector vectors"),
-        );
-        capability_admissions.push(serde_json::json!({
-            "kind": "detector_calibration_evidence",
-            "submission": DetectorCalibrationEvidenceSubmission {
-                policy_bytes: policy.artifact_bytes().expect("policy artifact encodes"),
-                calibration,
-                authority: activation_authority.clone(),
-                evidence: calibration_evidence,
-            },
-        }));
-
         let policy_bytes = policy.artifact_bytes().expect("policy artifact encodes");
         let execution_bytes = execution
             .artifact_bytes()
@@ -421,7 +400,7 @@ impl OperationalFixture {
             capability_admissions,
             run_authority,
             activation_authority,
-            activation,
+            activation: RefCell::new(None),
         }
     }
 
@@ -476,6 +455,203 @@ impl OperationalFixture {
     /// capability and calibration evidence whose commits recheck them.
     pub(crate) fn admission_requests(&self) -> Vec<serde_json::Value> {
         self.capability_admissions.clone()
+    }
+
+    /// Build the sealed candidate-control exercise after its immutable
+    /// generation has been published but before it is activated.  The owner
+    /// grant names both already-signed vector intents and their inert run
+    /// identities, so the daemon alone can produce the resulting runs.
+    pub(crate) fn detector_qualification_documents(
+        &self,
+        fixture: &ReferenceFixture,
+        candidate: &Digest,
+        at: Timestamp,
+    ) -> DetectorQualificationDocuments {
+        let operation = self.operation(RESOURCE_MANIFEST_OPERATION);
+        let known_good = self.qualification_vector(
+            fixture,
+            candidate,
+            operation,
+            BTreeSet::from(["public:detector-known-good".to_string()]),
+            "known-good",
+            at,
+        );
+        let planted_violation = self.qualification_vector(
+            fixture,
+            candidate,
+            operation,
+            BTreeSet::from(["forbidden:detector-planted".to_string()]),
+            "planted-violation",
+            at,
+        );
+        let binding = format!(
+            "{PUBLIC_RESOURCE_DETECTOR}:{}",
+            operation_scope(&operation.spec)
+        );
+        let calibration = self
+            .policy
+            .calibrate_detector(PUBLIC_RESOURCE_DETECTOR)
+            .expect("fixture detector calibration is canonical");
+        let vectors = ControlQualificationVectorSet::new(
+            known_good
+                .submission
+                .intent
+                .payload
+                .digest()
+                .expect("known-good intent digests"),
+            known_good.submission.control_run.clone(),
+            planted_violation
+                .submission
+                .intent
+                .payload
+                .digest()
+                .expect("planted intent digests"),
+            planted_violation.submission.control_run.clone(),
+        );
+        let resource = policy_control_qualification_resource(
+            &RuntimeGenerationId::from_digest(candidate.clone()),
+            self.policy.digest(),
+            &binding,
+            PUBLIC_RESOURCE_DETECTOR,
+            &calibration.population,
+            &vectors,
+        )
+        .expect("qualification grant resource encodes");
+        let qualification_authority = assurance_authority(
+            fixture,
+            &fixture.identities.worker,
+            QUALIFY_POLICY_CONTROL_ACTION,
+            &resource,
+            at,
+        );
+        DetectorQualificationDocuments {
+            authority_admissions: vec![
+                delegation_admission(&known_good.operation_authority),
+                delegation_admission(&planted_violation.operation_authority),
+                delegation_admission(&qualification_authority),
+            ],
+            exercise: serde_json::json!({
+                "kind": "exercise_detector_qualification",
+                "submission": DetectorQualificationSubmission {
+                    candidate: candidate.clone(),
+                    binding,
+                    control: PUBLIC_RESOURCE_DETECTOR.to_string(),
+                    qualification_authority,
+                    known_good: known_good.submission,
+                    planted_violation: planted_violation.submission,
+                },
+            }),
+        }
+    }
+
+    /// Construct independent verifier admission material from the exact
+    /// report returned by the daemon's stage-one response.  A pure detector
+    /// calibration cannot enter this path because `activation_proof` requires
+    /// the embedded real-path qualification.
+    pub(crate) fn detector_calibration_evidence(
+        &self,
+        fixture: &ReferenceFixture,
+        report: PublicDetectorCalibration,
+    ) -> DetectorCalibrationEvidenceSubmission {
+        let report_digest = report.digest().expect("daemon report digests");
+        let evidence_id = EvidenceId::new();
+        let observed_at = Timestamp::now();
+        let evidence = sign(
+            fixture,
+            AdmissionKind::Evidence,
+            &fixture.identities.verifier,
+            fixture.identities.verifier_key(),
+            EvidenceRequest {
+                id: evidence_id.clone(),
+                subject: report_digest.clone(),
+                producer_delegation: self.activation_authority.payload.id.clone(),
+                method: DETECTOR_CALIBRATION_METHOD.to_string(),
+                payload_digest: report_digest.clone(),
+                observed_at,
+                independence: IndependenceClass::IndependentAgent,
+            },
+        );
+        let proof = sign(
+            fixture,
+            AdmissionKind::ActivationProof,
+            &fixture.identities.verifier,
+            fixture.identities.verifier_key(),
+            report
+                .activation_proof(EvidenceId::new(), evidence_id, Timestamp::now())
+                .expect("real-path report produces a verifier proof"),
+        );
+        *self.activation.borrow_mut() = Some(proof.clone());
+        DetectorCalibrationEvidenceSubmission {
+            report: report_digest,
+            proof_authority: self.activation_authority.clone(),
+            evidence,
+            proof,
+        }
+    }
+
+    fn qualification_vector(
+        &self,
+        fixture: &ReferenceFixture,
+        candidate: &Digest,
+        operation: &RegisteredOperation,
+        resources: BTreeSet<String>,
+        label: &str,
+        at: Timestamp,
+    ) -> PreparedQualificationVector {
+        let availability = self.availability(at);
+        let inventory = self.execution.capability_inventory();
+        let mut routing = Router::route(
+            &operation.requirement,
+            inventory.resources,
+            inventory.profiles,
+            inventory.verifications,
+            &availability,
+            at,
+        )
+        .expect("qualification routing inputs are coherent");
+        routing.id = RoutingDecisionId::new();
+        let assignment = routing
+            .assignment()
+            .expect("qualification routing encodes")
+            .expect("qualification selects local deterministic resource");
+        let budget = operation_budget();
+        let operation_authority = operation_authority(
+            fixture,
+            &fixture.identities.worker,
+            &operation.spec,
+            resources.clone(),
+            budget.clone(),
+            at,
+        );
+        let intent = OperationIntent {
+            principal: fixture.identities.worker.clone(),
+            input_digest: Digest::blake3(
+                &to_canonical_bytes(&(candidate, label, &resources))
+                    .expect("qualification input encodes"),
+            ),
+            delegation_chain: vec![operation_authority.payload.clone()],
+            operation: operation.spec.clone(),
+            resources,
+            budget,
+            idempotency_key: Some(format!("qualification:{label}:{}", candidate.as_str())),
+            execution: Some(assignment),
+        };
+        PreparedQualificationVector {
+            operation_authority,
+            submission: DetectorQualificationVectorSubmission {
+                intent: sign(
+                    fixture,
+                    AdmissionKind::OperationIntent,
+                    &fixture.identities.worker,
+                    fixture.identities.worker_key(),
+                    intent,
+                ),
+                availability,
+                routing,
+                capability_verifications: self.capability_evidence.clone(),
+                control_run: EvidenceId::new(),
+            },
+        }
     }
 
     /// Build an exact signed operation submission around an already admitted
@@ -569,7 +745,11 @@ impl OperationalFixture {
                     run,
                 ),
                 run_authority: self.run_authority.clone(),
-                activation: self.activation.clone(),
+                activation: self
+                    .activation
+                    .borrow()
+                    .clone()
+                    .expect("real-path detector qualification precedes active operations"),
                 activation_authority: self.activation_authority.clone(),
             }],
         }

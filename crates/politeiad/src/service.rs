@@ -597,6 +597,16 @@ impl PoliteiadService {
         let capture_record = signed_wire_record(&submission.capture)?;
         let evidence_record = signed_wire_record(&submission.evidence)?;
         let observation_record = signed_wire_record(&submission.observation)?;
+        let capture_state = CanonicalPayload::from_bytes(
+            capture_record.payload().to_vec(),
+            capture_record.digest().clone(),
+        )
+        .map_err(|error| storage_refusal(&error))?;
+        let observation_state = CanonicalPayload::from_bytes(
+            observation_record.payload().to_vec(),
+            observation_record.digest().clone(),
+        )
+        .map_err(|error| storage_refusal(&error))?;
         let receipt = self
             .storage
             .commit_authorized(
@@ -609,11 +619,11 @@ impl PoliteiadService {
                     state: vec![
                         StateMutation {
                             key: format!("source_capture:{}", request.id.0),
-                            value: capture_record,
+                            value: capture_state,
                         },
                         StateMutation {
                             key: format!("observation:{}", observation.id.0),
-                            value: observation_record,
+                            value: observation_state,
                         },
                     ],
                     evidence: vec![EvidenceAdmission {
@@ -698,6 +708,16 @@ impl PoliteiadService {
         }
         let candidate_record = signed_wire_record(&candidate)?;
         let approval_record = signed_wire_record(&approval)?;
+        let candidate_state = CanonicalPayload::from_bytes(
+            candidate_record.payload().to_vec(),
+            candidate_record.digest().clone(),
+        )
+        .map_err(|error| storage_refusal(&error))?;
+        let approval_state = CanonicalPayload::from_bytes(
+            approval_record.payload().to_vec(),
+            approval_record.digest().clone(),
+        )
+        .map_err(|error| storage_refusal(&error))?;
         let receipt = self
             .storage
             .commit(&ScopedCommit {
@@ -709,11 +729,11 @@ impl PoliteiadService {
                 state: vec![
                     StateMutation {
                         key: candidate_key,
-                        value: candidate_record,
+                        value: candidate_state,
                     },
                     StateMutation {
                         key: approval_key,
-                        value: approval_record,
+                        value: approval_state,
                     },
                 ],
                 evidence: Vec::new(),
