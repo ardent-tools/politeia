@@ -81,4 +81,17 @@ Operational handoff uses `CommissioningRequest::Handoff`. After commissioner aut
 
 Run `politeiad serve` only after `initialize` succeeds. A normal daemon exit removes its own socket; a restart removes only a proved stale private socket. Refused requests print a JSON refusal and exit nonzero.
 
-The executable acceptance harness constructs the software-development and analytics installations from public Rust APIs and signed JSON documents. Run it and the durable storage checks with `python3 bin/check-postgres.py`; the script uses `POLITEIA_STORAGE_TEST_DATABASE_URL` when supplied, or starts a disposable PostgreSQL container with Docker or Podman. PostgreSQL is required: an absent database is a failed prerequisite, never a passing acceptance result. The harness retains source and executable digests, signed requests, responses, and durable observations in `target/package-acceptance`; set `POLITEIA_ACCEPTANCE_ARTIFACT_DIR` to choose another directory.
+The executable acceptance harness constructs the software-development and analytics installations from public Rust APIs and signed JSON documents. Prepare its exact test executables before invoking the Python harness; the harness only validates Cargo's complete JSON artifact records and runs those emitted binaries:
+
+```sh
+mkdir -p .kanon-artifacts
+cargo test --no-run --locked --message-format=json --jobs 8 \
+  -p politeia-storage --lib --test runtime_ledger \
+  > .kanon-artifacts/postgres-storage-build.json
+cargo test --no-run --locked --message-format=json --jobs 8 \
+  -p politeiad --test commissioning_package \
+  > .kanon-artifacts/postgres-package-build.json
+python3 bin/check-postgres.py
+```
+
+The script uses `POLITEIA_STORAGE_TEST_DATABASE_URL` when supplied, or starts a disposable PostgreSQL container with Docker or Podman. Use an isolated or disposable database: the fixture changes schema and installs test triggers. PostgreSQL is required: an absent database is a failed prerequisite, never a passing acceptance result. Local runs retain observations in a fresh directory under `target/package-acceptance`; set `POLITEIA_ACCEPTANCE_ARTIFACT_DIR` to choose another directory. CI custody uses `POLITEIA_ACCEPTANCE_ARTIFACT_FILE` for one immutable package observation.
