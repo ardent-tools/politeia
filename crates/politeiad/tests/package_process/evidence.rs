@@ -91,14 +91,30 @@ pub(super) struct Session {
 
 impl Session {
     pub(super) fn begin(client: &str, daemon: &str) -> TestResult<Self> {
-        let Some(directory) = std::env::var_os("POLITEIA_ACCEPTANCE_ARTIFACT_DIR") else {
-            return Ok(Self {
-                path: None,
-                finished: false,
-            });
+        let path = match (
+            std::env::var_os("POLITEIA_ACCEPTANCE_ARTIFACT_FILE"),
+            std::env::var_os("POLITEIA_ACCEPTANCE_ARTIFACT_DIR"),
+        ) {
+            (Some(_), Some(_)) => {
+                return Err("choose one acceptance artifact FILE or DIR destination".into());
+            }
+            (Some(path), None) => PathBuf::from(path),
+            (None, Some(directory)) => {
+                PathBuf::from(directory).join(format!("package-{}.jsonl", uuid::Uuid::now_v7()))
+            }
+            (None, None) => {
+                return Ok(Self {
+                    path: None,
+                    finished: false,
+                });
+            }
         };
-        fs::create_dir_all(&directory)?;
-        let path = PathBuf::from(directory).join(format!("package-{}.jsonl", uuid::Uuid::now_v7()));
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
