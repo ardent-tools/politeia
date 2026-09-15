@@ -9,7 +9,7 @@ use std::{fs, path::Path};
 
 use politeia_core::Digest;
 
-use super::evidence::observe_effects;
+use super::evidence::{observe_effects, record_observation};
 use super::{
     OperationalFixture, ReferenceFixture, ReferenceInstitutionKind, TestResult, await_status,
     client_binary, commission_generation, daemon_binary, require_refusal, require_source_capture,
@@ -112,9 +112,16 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
         "generation validation with a staged CLI executable",
         EXECUTABLE_IDENTITY_REFUSAL,
     )?;
+    let effects_after_validation = observe_effects(database_url, &fixture)?;
+    record_observation(
+        "executable_identity_validation_effects",
+        &serde_json::json!({
+            "before": effects_before_validation,
+            "after": effects_after_validation,
+        }),
+    )?;
     assert_eq!(
-        observe_effects(database_url, &fixture)?,
-        effects_before_validation,
+        effects_after_validation, effects_before_validation,
         "generation validation with a staged executable creates no attempt, completion, or outbox record"
     );
 
@@ -142,9 +149,16 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
                 "capability evidence with a staged CLI executable",
                 EXECUTABLE_IDENTITY_REFUSAL,
             )?;
+            let effects_after_capability = observe_effects(database_url, &fixture)?;
+            record_observation(
+                "executable_identity_capability_effects",
+                &serde_json::json!({
+                    "before": effects_before_capability,
+                    "after": effects_after_capability,
+                }),
+            )?;
             assert_eq!(
-                observe_effects(database_url, &fixture)?,
-                effects_before_capability,
+                effects_after_capability, effects_before_capability,
                 "capability evidence with a staged executable creates no attempt, completion, or outbox record"
             );
             capability_refused = true;
@@ -178,11 +192,7 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
         "staged_executable_digest": staged_digest,
         "running_daemon_digest": daemon_digest,
         "active_generation": active,
-        "effects": {
-            "attempts": effects.attempts,
-            "completions": effects.completions,
-            "outbox": effects.outbox,
-        },
+        "effects": effects,
         "refusal": EXECUTABLE_IDENTITY_REFUSAL,
     }))
 }

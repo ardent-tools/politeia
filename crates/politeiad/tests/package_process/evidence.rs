@@ -23,7 +23,7 @@ static TRANSCRIPT: Mutex<Option<File>> = Mutex::new(None);
 /// Durable dispatcher-side state visible after one process request. Each
 /// attempt owns one non-null reservation; completion and outbox prove its
 /// atomic externalization counterpart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub(super) struct EffectObservation {
     pub(super) attempts: i64,
     pub(super) completions: i64,
