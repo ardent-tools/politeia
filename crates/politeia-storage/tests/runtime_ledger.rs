@@ -10,6 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use ed25519_dalek::SigningKey;
@@ -77,6 +78,29 @@ fn admit_fixture_authority(
             .admit_expected(AdmissionKind::Delegation, wire.clone())?,
         wire,
     ))
+}
+
+async fn wait_for_workspace_lock_waiters(
+    observer: &tokio_postgres::Client,
+    expected: i64,
+) -> TestResult {
+    for _ in 0..100 {
+        let row = observer
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%institution_workspaces%'",
+                &[],
+            )
+            .await?;
+        let observed: i64 = row.get(0);
+        if observed >= expected {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Err(format!(
+        "expected at least {expected} workspace-lock waiters; the admission did not share handoff serialization"
+    )
+    .into())
 }
 
 #[tokio::test]
@@ -742,7 +766,8 @@ impl Fixture {
 #[ignore = "requires a disposable PostgreSQL instance; the package CI runs this explicitly"]
 async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_canary() -> TestResult
 {
-    let fixture = Fixture::new(&database_url()?, 8).await?;
+    let url = database_url()?;
+    let fixture = Fixture::new(&url, 8).await?;
     let generation = fixture.admit_fixture_generation("handoff").await?;
     fixture.activate(&generation).await?;
     let commissioning_record = politeia_core::CommissioningRecordId::new();
@@ -915,79 +940,65 @@ async fn handoff_atomically_requires_closed_authority_and_the_exact_completed_ca
         canary_receipt.clone(),
         BTreeSet::from([commissioner_grant.id.clone()]),
     )?;
-    // Handoff and a new commissioner grant race through the same admission
-    // epoch. Either order is legal, but the handoff may only commit before the
-    // new authority becomes visible; otherwise its old closure is refused.
+    // Hold a non-key workspace update before either public storage operation
+    // starts. It blocks handoff's UPDATE/FOR UPDATE and the corrected
+    // admission UPDATE, but permits the old INSERT's foreign-key KEY SHARE.
+    // The handoff must first become a visible waiter. The corrected admission
+    // must then wait too; the old INSERT/EXISTS-only admission would commit
+    // while the handoff retained its pre-admission snapshot.
+    let (mut lock_client, lock_connection) =
+        tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+    tokio::spawn(async move {
+        let _ = lock_connection.await;
+    });
+    let lock = lock_client.build_transaction().start().await?;
+    lock.query_one(
+        "SELECT 1 FROM institution_workspaces WHERE institution_id = $1 AND workspace_id = $2 FOR NO KEY UPDATE",
+        &[
+            &fixture.scope.institution().0,
+            &fixture.scope.workspace().0,
+        ],
+    )
+    .await?;
+    let (observer, observer_connection) =
+        tokio_postgres::connect(&url, tokio_postgres::NoTls).await?;
+    tokio::spawn(async move {
+        let _ = observer_connection.await;
+    });
+    let handoff_storage = fixture.storage.clone();
+    let handoff_owner = fixture.authority.clone();
+    let expected_handoff_receipt = contested.handoff_receipt.clone();
+    let blocked_handoff = contested.clone();
+    let handoff_task = tokio::spawn(async move {
+        handoff_storage
+            .commit_handoff_authorized(&blocked_handoff, &[handoff_owner])
+            .await
+    });
+    wait_for_workspace_lock_waiters(&observer, 1).await?;
+
     let mut concurrent_grant = commissioner_grant.clone();
     concurrent_grant.id = DelegationId::new();
     concurrent_grant.subject = PrincipalId::new();
     let (concurrent_authority, concurrent_wire) =
         admit_fixture_authority(&fixture, concurrent_grant.clone())?;
-    let (handoff_result, admission_result) = tokio::join!(
-        fixture
-            .storage
-            .commit_handoff_authorized(&contested, std::slice::from_ref(&fixture.authority)),
-        fixture
-            .storage
-            .admit_delegation(&fixture.scope, &concurrent_authority, &concurrent_wire,),
-    );
-    admission_result?;
-    let (committed, expected_receipt, expected_handoff_receipt) = match handoff_result {
-        Ok(committed) => (
-            committed,
-            canary_receipt.clone(),
-            contested.handoff_receipt.clone(),
-        ),
-        Err(StorageError::AdmissionMismatch) => {
-            // The admission won. Close the newly visible authority, generate
-            // a continuity witness after that closure, and prove a handoff
-            // with the complete authority set can proceed.
-            revoke_fixture_authority(&fixture, &concurrent_grant).await?;
-            canary_intent.idempotency_key = Some("handoff-after-racing-admission".to_owned());
-            let fresh_dispatcher = fixture.dispatcher_for_generation(
-                fixture.storage.clone(),
-                SignedDuration::from_secs(30),
-                generation.clone(),
-                false,
-            )?;
-            let fresh_canary = fresh_dispatcher.authorize(&canary_intent).await?;
-            fresh_dispatcher.execute(&fresh_canary).await?;
-            let fresh_receipt = CanonicalPayload::from_json(&serde_json::json!({
-                "canary": "after-racing-admission"
-            }))?;
-            fixture
-                .storage
-                .record_completion(
-                    &fixture.scope,
-                    fresh_canary.reservation_id(),
-                    &fresh_receipt,
-                )
-                .await?;
-            let refreshed = fixture.storage.load_workspace(&fixture.scope).await?;
-            let accepted = handoff(
-                &refreshed,
-                fresh_canary.reservation_id().clone(),
-                fresh_receipt.clone(),
-                BTreeSet::from([commissioner_grant.id.clone(), concurrent_grant.id.clone()]),
-            )?;
-            let committed = fixture
-                .storage
-                .commit_handoff_authorized(&accepted, std::slice::from_ref(&fixture.authority))
-                .await?;
-            (committed, fresh_receipt, accepted.handoff_receipt.clone())
-        }
-        other => return Err(format!("unexpected handoff race result: {other:?}").into()),
-    };
+    let admission_storage = fixture.storage.clone();
+    let admission_scope = fixture.scope.clone();
+    let admission_task = tokio::spawn(async move {
+        admission_storage
+            .admit_delegation(&admission_scope, &concurrent_authority, &concurrent_wire)
+            .await
+    });
+    wait_for_workspace_lock_waiters(&observer, 2).await?;
+    lock.commit().await?;
+    let committed = handoff_task.await??;
+    admission_task.await??;
     let retained = fixture
         .storage
         .load_handoff_receipt(&fixture.scope, generation.digest())
         .await?;
     assert_eq!(retained.revision, committed.revision);
     assert_eq!(retained.payload, expected_handoff_receipt.bytes());
-    assert_eq!(
-        retained.continuity_receipt_digest,
-        *expected_receipt.digest()
-    );
+    assert_eq!(retained.continuity_receipt_digest, *canary_receipt.digest());
     assert_eq!(
         fixture
             .storage
