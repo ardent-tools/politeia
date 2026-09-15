@@ -399,7 +399,10 @@ mod tests {
         },
     };
 
-    use tokio::sync::Notify;
+    use tokio::{
+        sync::Notify,
+        time::{Duration, timeout},
+    };
 
     use super::*;
     use crate::{
@@ -414,15 +417,23 @@ mod tests {
     struct BlockingCoordinator {
         first_entered: Arc<Notify>,
         release_first: Arc<Notify>,
-        calls: AtomicUsize,
+        calls: Arc<AtomicUsize>,
     }
 
     impl CommissioningCoordinator for BlockingCoordinator {
         fn execute(
             &self,
-            _operation: SemanticOperation,
+            operation: SemanticOperation,
         ) -> Pin<Box<dyn Future<Output = Result<OperationResult, CoordinatorError>> + Send + '_>>
         {
+            if !matches!(operation, SemanticOperation::Status) {
+                return Box::pin(async {
+                    Err(CoordinatorError::Refused(
+                        "test coordinator requires status through the semantic executor"
+                            .to_string(),
+                    ))
+                });
+            }
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let entered = Arc::clone(&self.first_entered);
             let release = Arc::clone(&self.release_first);
@@ -518,10 +529,11 @@ mod tests {
         let listener = bind(&socket).await.expect("fixture socket binds");
         let first_entered = Arc::new(Notify::new());
         let release_first = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
         let coordinator = BlockingCoordinator {
             first_entered: Arc::clone(&first_entered),
             release_first: Arc::clone(&release_first),
-            calls: AtomicUsize::new(0),
+            calls: Arc::clone(&calls),
         };
         let server =
             tokio::spawn(async move { serve_connections(&listener, Arc::new(coordinator)).await });
@@ -534,34 +546,73 @@ mod tests {
             )
             .await
         });
-        first_entered.notified().await;
-
-        let later = request(
-            &socket,
-            &current_request("later-request".to_string(), SemanticOperation::Status),
-        )
-        .await
-        .expect("later request receives a response while the first is held");
-        assert!(matches!(
-            later.outcome,
-            LocalOutcome::Error { ref code, .. } if code == "coordinator_unavailable"
-        ));
-
-        release_first.notify_one();
-        let first = first
-            .await
-            .expect("held client task completes")
-            .expect("held request receives a response");
-        assert!(matches!(first.outcome, LocalOutcome::Ok { .. }));
-        server.abort();
-        assert!(
-            server
+        let mut first = first;
+        let mut first_joined = false;
+        let result = async {
+            timeout(Duration::from_secs(5), first_entered.notified())
                 .await
-                .expect_err("listener task is cancelled for fixture teardown")
-                .is_cancelled(),
-            "fixture owns and cancels the listener task"
-        );
-        fs::remove_dir_all(root).expect("fixture is removable");
+                .map_err(|_| "held request did not enter the coordinator within five seconds")?;
+            let later = timeout(
+                Duration::from_secs(5),
+                request(
+                    &socket,
+                    &current_request("later-request".to_string(), SemanticOperation::Status),
+                ),
+            )
+            .await
+            .map_err(|_| "later request did not receive a response within five seconds")?
+            .map_err(|error| format!("later request failed: {error}"))?;
+            if !matches!(
+                later.outcome,
+                LocalOutcome::Error { ref code, .. } if code == "coordinator_unavailable"
+            ) {
+                return Err(
+                    "later request did not traverse the coordinator refusal path".to_string(),
+                );
+            }
+
+            release_first.notify_one();
+            let first_result = timeout(Duration::from_secs(5), &mut first).await.map_err(
+                |_| "held request did not receive a response after release within five seconds",
+            )?;
+            first_joined = true;
+            let first = first_result
+                .map_err(|error| format!("held client task failed: {error}"))?
+                .map_err(|error| format!("held request failed: {error}"))?;
+            if !matches!(first.outcome, LocalOutcome::Ok { .. }) {
+                return Err("held request did not complete through the coordinator".to_string());
+            }
+            Ok(())
+        }
+        .await;
+
+        release_first.notify_waiters();
+        let mut failures = result.err().into_iter().collect::<Vec<_>>();
+        if !first_joined {
+            if !first.is_finished() {
+                first.abort();
+            }
+            if timeout(Duration::from_secs(5), &mut first).await.is_err() {
+                failures.push("held client task did not stop within five seconds".to_string());
+            }
+        }
+        server.abort();
+        match timeout(Duration::from_secs(5), server).await {
+            Ok(Err(error)) if error.is_cancelled() => {}
+            Ok(Err(error)) => {
+                failures.push(format!("listener task failed during teardown: {error}"))
+            }
+            Ok(Ok(Ok(()))) => failures.push("listener task unexpectedly completed".to_string()),
+            Ok(Ok(Err(error))) => failures.push(format!("listener failed: {error}")),
+            Err(_) => failures.push("listener task did not stop within five seconds".to_string()),
+        }
+        if calls.load(Ordering::SeqCst) != 2 {
+            failures.push("both status requests did not traverse the coordinator".to_string());
+        }
+        if let Err(error) = fs::remove_dir_all(&root) {
+            failures.push(format!("fixture directory is removable: {error}"));
+        }
+        assert!(failures.is_empty(), "{}", failures.join("; "));
     }
 
     #[tokio::test]

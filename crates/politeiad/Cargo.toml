@@ -34,6 +34,7 @@ politeia-evidence.workspace = true
 [dev-dependencies]
 ed25519-dalek.workspace = true
 tokio-postgres.workspace = true
+tokio = { workspace = true, features = ["time"] }
 
 [lints]
 workspace = true
