@@ -1864,7 +1864,12 @@ impl std::fmt::Display for OperationalPolicyRefusal {
             Self::Encoding(_) => "operational policy artifact is malformed",
             Self::NonCanonicalArtifact => "operational policy artifact bytes are not canonical",
             Self::Canonical(_) => "operational policy binding cannot be encoded",
-            Self::Evaluation(_) => "operational policy evidence is incomplete or mismatched",
+            Self::Evaluation(source) => {
+                return write!(
+                    formatter,
+                    "operational policy evidence is incomplete or mismatched: {source}"
+                );
+            }
         };
         formatter.write_str(message)
     }
