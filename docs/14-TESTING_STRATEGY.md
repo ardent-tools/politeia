@@ -80,7 +80,11 @@ The executable package must exercise process and database boundaries: race two c
   forged `clean` without activation or coverage evidence and require assurance aggregation to
   reject it. Exercise `violation`, `not_run`, `unavailable`, `unevaluable`, `unexpectedly_empty`,
   `not_applicable`, and `unresolved` independently; preserve each distinction and prove none can
-  aggregate as clean.
+  aggregate as clean. Substitute an intent, candidate, binding, or decision after qualification
+  admission and require refusal before port invocation. Reject pure rule reports, fabricated or
+  unretained observations, and self-verification. Omit or duplicate a required binding/control
+  proof, including a review-requiring binding, and require activation and rollback to preserve
+  the active pointer.
 - `POL-P`: deliver or attest artifact `A`, append a correction and a superseding `B`, and prove
   `A`'s bytes/digest remain unchanged while the current interpretation is reproducible from the
   admitted records. Add two competing live successors and a supersession cycle; both project to an

@@ -15,7 +15,7 @@ The first deployment phase establishes an institution-owner-approved discovery s
 9. Require institution-owner approval for constitutional commitments and unresolved authority choices.
 10. Compile authorized context and capability discovery from the approved model; build and test the required adapter, pack, policy, and evidence obligations.
 11. Enter shadow mode and calibrate detectors and bindings.
-12. Derive and verify an immutable operational runtime generation.
+12. Derive and verify an immutable operational runtime generation; qualify its blocking controls under the [policy assurance contract](06-POLICY_COMPILER.md), then activate it under an institution-owner decision bound to the complete assurance evidence.
 13. Hand off the preserved workspace and generation, then revoke or expire commissioner authority without interrupting ordinary operation.
 14. Preserve operational feedback as observations and proposed corrections; require authorized approval before those proposals change institutional truth or the active generation.
 
