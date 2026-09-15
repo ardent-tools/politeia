@@ -8,8 +8,8 @@
 use std::{fs, path::Path};
 
 use politeia_core::Digest;
-use tokio_postgres::NoTls;
 
+use super::evidence::observe_effects;
 use super::{
     OperationalFixture, ReferenceFixture, ReferenceInstitutionKind, TestResult, await_status,
     client_binary, commission_generation, daemon_binary, require_refusal, require_source_capture,
@@ -99,6 +99,7 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
             },
         }),
     )?;
+    let effects_before_validation = observe_effects(database_url, &fixture)?;
     require_refusal(
         &run(
             database_url,
@@ -111,6 +112,11 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
         "generation validation with a staged CLI executable",
         EXECUTABLE_IDENTITY_REFUSAL,
     )?;
+    assert_eq!(
+        observe_effects(database_url, &fixture)?,
+        effects_before_validation,
+        "generation validation with a staged executable creates no attempt, completion, or outbox record"
+    );
 
     // The first capability submission has executable claims and reaches the
     // same process-bound check. Admit only its prerequisite direct grants;
@@ -123,6 +129,7 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
                 &format!("executable-identity-capability-{index}.json"),
                 request,
             )?;
+            let effects_before_capability = observe_effects(database_url, &fixture)?;
             require_refusal(
                 &run(
                     database_url,
@@ -135,6 +142,11 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
                 "capability evidence with a staged CLI executable",
                 EXECUTABLE_IDENTITY_REFUSAL,
             )?;
+            assert_eq!(
+                observe_effects(database_url, &fixture)?,
+                effects_before_capability,
+                "capability evidence with a staged executable creates no attempt, completion, or outbox record"
+            );
             capability_refused = true;
             break;
         }
@@ -156,7 +168,7 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
         active.is_none(),
         "executable identity refusal leaves the active generation pointer empty"
     );
-    let attempts = observe_no_operation_attempts(database_url, &fixture)?;
+    let effects = observe_effects(database_url, &fixture)?;
     drop(daemon);
 
     Ok(serde_json::json!({
@@ -166,40 +178,11 @@ pub(crate) fn exercise(database_url: &str) -> TestResult<serde_json::Value> {
         "staged_executable_digest": staged_digest,
         "running_daemon_digest": daemon_digest,
         "active_generation": active,
-        "attempts": attempts,
+        "effects": {
+            "attempts": effects.attempts,
+            "completions": effects.completions,
+            "outbox": effects.outbox,
+        },
         "refusal": EXECUTABLE_IDENTITY_REFUSAL,
-    }))
-}
-
-/// Read-only test administration proving the refusal never reached an effect
-/// attempt or completion row for this fresh workspace.
-fn observe_no_operation_attempts(
-    database_url: &str,
-    fixture: &ReferenceFixture,
-) -> TestResult<serde_json::Value> {
-    let runtime = tokio::runtime::Runtime::new()?;
-    let (client, connection) = runtime.block_on(tokio_postgres::connect(database_url, NoTls))?;
-    let _connection = runtime.spawn(connection);
-    let institution = fixture.host_trust.workspace.institution.0;
-    let workspace = fixture.host_trust.workspace.id.0;
-    let row = runtime.block_on(client.query_one(
-        "SELECT COUNT(*)::BIGINT, COUNT(*) FILTER (WHERE status = 'completed')::BIGINT
-         FROM operation_attempts
-         WHERE institution_id = $1 AND workspace_id = $2",
-        &[&institution, &workspace],
-    ))?;
-    let attempts: i64 = row.get(0);
-    let completed: i64 = row.get(1);
-    assert_eq!(
-        attempts, 0,
-        "identity refusal must not reserve an effect attempt"
-    );
-    assert_eq!(
-        completed, 0,
-        "identity refusal must not retain a completion"
-    );
-    Ok(serde_json::json!({
-        "operation_attempts": attempts,
-        "completed_attempts": completed,
     }))
 }
