@@ -27,6 +27,7 @@ use politeia_evidence::{
     },
     authority::AuthorityContext,
 };
+use politeia_policy::PolicyBinding;
 use politeia_runtime::AuthorizationLedger;
 use politeia_storage::{
     ActivationCommit, EvidenceAdmission, PostgresAuthorizationLedger, RuntimeGeneration,
@@ -43,11 +44,155 @@ use crate::{
     },
     service::PoliteiadService,
     service_generation_validation::{GenerationValidationReport, LIFECYCLE_CALIBRATION_METHOD},
-    service_operation::direct_grant_authorization_digest,
+    service_operation::{
+        ActiveOperationalRegistry, DetectorCalibrationEvidenceSubmission,
+        direct_grant_authorization_digest,
+    },
 };
 
 const ACTIVATE_CONTROL: &str = "generation:activate";
 const ROLLBACK_CONTROL: &str = "generation:rollback";
+
+/// One detector required by a candidate's blocking policy at an exact scope.
+///
+/// The scope is part of the identity: one detector may serve different
+/// operations, but a qualification proves one real dispatcher path only.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CandidateBlockingControl {
+    binding: String,
+    scope: String,
+    control: String,
+}
+
+fn candidate_blocking_controls(bindings: &[PolicyBinding]) -> BTreeSet<CandidateBlockingControl> {
+    bindings
+        .iter()
+        .filter(|binding| binding.is_blocking())
+        .flat_map(|binding| {
+            binding
+                .detector_ids
+                .iter()
+                .cloned()
+                .map(|control| CandidateBlockingControl {
+                    binding: binding.id.clone(),
+                    scope: binding.scope.clone(),
+                    control,
+                })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod control_set_tests {
+    use super::{CandidateBlockingControl, candidate_blocking_controls};
+    use politeia_policy::{
+        BindingAuthority, Consequence, PolicyBinding,
+        hardening::{HardeningLadder, HardeningState},
+    };
+
+    fn authority(
+        states: &[HardeningState],
+        consequence: Consequence,
+    ) -> Result<BindingAuthority, String> {
+        let mut ladder = HardeningLadder::new();
+        for state in states {
+            ladder.advance(*state).map_err(|error| error.to_string())?;
+        }
+        BindingAuthority::new(ladder, consequence).map_err(|error| error.to_string())
+    }
+
+    fn binding(
+        id: &str,
+        scope: &str,
+        controls: &[&str],
+        authority: BindingAuthority,
+    ) -> PolicyBinding {
+        PolicyBinding {
+            id: id.to_owned(),
+            clause_id: format!("clause:{id}"),
+            detector_ids: controls.iter().map(ToString::to_string).collect(),
+            scope: scope.to_owned(),
+            authority,
+        }
+    }
+
+    #[test]
+    fn activation_requires_every_blocking_binding_control_and_keeps_scope_in_its_identity()
+    -> Result<(), String> {
+        let enforced = [
+            HardeningState::Observed,
+            HardeningState::Proposed,
+            HardeningState::Approved,
+            HardeningState::Shadow,
+            HardeningState::Calibrated,
+            HardeningState::Advisory,
+            HardeningState::Enforced,
+        ];
+        let advisory = [
+            HardeningState::Observed,
+            HardeningState::Proposed,
+            HardeningState::Approved,
+            HardeningState::Shadow,
+            HardeningState::Calibrated,
+            HardeningState::Advisory,
+        ];
+        let bindings = vec![
+            binding(
+                "manifest-deny",
+                "operation:derive_resource_manifest",
+                &["public-detector", "second-detector"],
+                authority(&enforced, Consequence::Deny)?,
+            ),
+            binding(
+                "context-deny",
+                "operation:compile_institutional_context",
+                &["public-detector"],
+                authority(&enforced, Consequence::Deny)?,
+            ),
+            binding(
+                "manifest-review",
+                "operation:derive_resource_manifest",
+                &["public-detector"],
+                authority(&enforced, Consequence::RequireReview)?,
+            ),
+            binding(
+                "advice-only",
+                "operation:derive_resource_manifest",
+                &["advisory-detector"],
+                authority(&advisory, Consequence::Advisory)?,
+            ),
+        ];
+
+        let required = candidate_blocking_controls(&bindings);
+
+        assert_eq!(
+            required,
+            std::collections::BTreeSet::from([
+                CandidateBlockingControl {
+                    binding: "context-deny".to_owned(),
+                    scope: "operation:compile_institutional_context".to_owned(),
+                    control: "public-detector".to_owned(),
+                },
+                CandidateBlockingControl {
+                    scope: "operation:derive_resource_manifest".to_owned(),
+                    binding: "manifest-deny".to_owned(),
+                    control: "public-detector".to_owned(),
+                },
+                CandidateBlockingControl {
+                    binding: "manifest-deny".to_owned(),
+                    scope: "operation:derive_resource_manifest".to_owned(),
+                    control: "second-detector".to_owned(),
+                },
+                CandidateBlockingControl {
+                    binding: "manifest-review".to_owned(),
+                    scope: "operation:derive_resource_manifest".to_owned(),
+                    control: "public-detector".to_owned(),
+                },
+            ])
+        );
+        Ok(())
+    }
+}
 
 mod provenance;
 mod reproduction;
@@ -144,6 +289,10 @@ pub struct ActivationAssurance {
     pub proof: SignedAdmissionWire<ActivationProof>,
     /// Signed direct grant for the independent activation verifier.
     pub proof_authority: SignedAdmissionWire<Delegation>,
+    /// Complete independently admitted real-path qualification set for every
+    /// blocking candidate-policy control.
+    #[serde(default)]
+    pub qualifications: Vec<DetectorCalibrationEvidenceSubmission>,
 }
 
 /// One typed lifecycle action that only the installed institution owner may
@@ -651,6 +800,18 @@ impl PoliteiadService {
             ));
         }
         clean_claim(&[authorized], action.control(), &generation, &verified).map_err(refusal)?;
+        let registry = self
+            .operational_registry_for_generation(&generation)
+            .await?;
+        self.require_candidate_control_qualifications(
+            &durable,
+            &registry,
+            &generation,
+            &artifact,
+            &assurance,
+            now,
+        )
+        .await?;
         let evidence = vec![
             EvidenceAdmission {
                 id: transition_request.evidence.clone(),
@@ -713,6 +874,132 @@ impl PoliteiadService {
                 transition_request.evidence.0.to_string(),
             ],
         })
+    }
+
+    /// Refuse a transition until every control that can block a candidate
+    /// operation has one independently admitted, real-path qualification.
+    ///
+    /// The owner signs the complete ordered collection through
+    /// [`activation_assurance_digest`].  This method only resolves and checks
+    /// it before the compare-and-swap commit; it never admits caller-supplied
+    /// reports or treats a detector-only calibration as qualification.
+    async fn require_candidate_control_qualifications(
+        &self,
+        durable: &politeia_storage::WorkspaceSnapshot,
+        registry: &ActiveOperationalRegistry,
+        generation: &Digest,
+        artifact: &Digest,
+        assurance: &ActivationAssurance,
+        at: jiff::Timestamp,
+    ) -> Result<(), CoordinatorError> {
+        let required = candidate_blocking_controls(registry.policy().bindings());
+        if assurance.qualifications.len() != required.len() {
+            return Err(CoordinatorError::Refused(
+                "candidate control qualifications do not completely cover blocking policy controls"
+                    .to_string(),
+            ));
+        }
+
+        let mut supplied = BTreeSet::new();
+        for qualification in &assurance.qualifications {
+            let resolved = self
+                .resolve_detector_qualification(
+                    durable,
+                    &qualification.report,
+                    &qualification.evidence,
+                    &qualification.proof,
+                    &qualification.proof_authority,
+                    at,
+                )
+                .await?;
+            let report = resolved.report();
+            if report.digest().map_err(refusal)? != qualification.report {
+                return Err(CoordinatorError::Refused(
+                    "candidate control qualification report differs from its selected digest"
+                        .to_string(),
+                ));
+            }
+            let real_path = registry
+                .policy()
+                .validate_detector_qualification(report)
+                .map_err(refusal)?;
+            let proof = resolved.verified_proof()?.proof();
+            registry
+                .policy()
+                .validate_activation_proof(proof)
+                .map_err(refusal)?;
+            if proof.control != report.control
+                || proof.control_version != report.control_version
+                || proof.configuration_digest != report.configuration_digest
+                || proof.policy != report.policy
+                || proof.policy_digest != report.policy_digest
+                || proof.population != report.population
+                || proof.mediation_path != report.mediation_path
+            {
+                return Err(CoordinatorError::Refused(
+                    "candidate control proof differs from the exact candidate policy detector"
+                        .to_string(),
+                ));
+            }
+            let registered = registry
+                .execution()
+                .exact_operation(real_path.operation())
+                .ok_or_else(|| {
+                    CoordinatorError::Refused(
+                        "candidate control qualification operation differs from its execution registry"
+                            .to_string(),
+                    )
+                })?;
+            let handler = politeia_core::canonical::to_canonical_bytes(&registered.handler)
+                .map(|bytes| Digest::blake3(&bytes))
+                .map_err(refusal)?;
+            let resource = registry
+                .execution()
+                .resource(real_path.resource())
+                .ok_or_else(|| {
+                    CoordinatorError::Refused(
+                    "candidate control qualification resource differs from its execution registry"
+                        .to_string(),
+                )
+                })?;
+            if !real_path.matches_candidate(
+                generation,
+                artifact,
+                self.running_executable_digest(),
+                durable.active_generation.as_ref(),
+                durable.revision,
+            ) || real_path.handler() != &handler
+                || resource.adapter != *real_path.adapter()
+            {
+                return Err(CoordinatorError::Refused(
+                    "candidate control qualification differs from the exact target generation"
+                        .to_string(),
+                ));
+            }
+            let key = CandidateBlockingControl {
+                binding: real_path.binding().to_owned(),
+                scope: real_path.scope().to_owned(),
+                control: real_path.control().to_owned(),
+            };
+            if !required.contains(&key) {
+                return Err(CoordinatorError::Refused(
+                    "candidate control qualification is not required by the target policy"
+                        .to_string(),
+                ));
+            }
+            if !supplied.insert(key) {
+                return Err(CoordinatorError::Refused(
+                    "candidate control qualifications duplicate one blocking binding control"
+                        .to_string(),
+                ));
+            }
+        }
+        if supplied != required {
+            return Err(CoordinatorError::Refused(
+                "candidate control qualifications omit a blocking binding control".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     async fn recommission(
