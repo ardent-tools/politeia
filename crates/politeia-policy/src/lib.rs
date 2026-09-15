@@ -289,7 +289,7 @@ impl DecisionPurpose {
     }
 
     /// Exact qualification purpose, when this decision came from that path.
-    pub const fn qualification_purpose(&self) -> Option<&ControlQualificationPurpose> {
+    pub fn qualification_purpose(&self) -> Option<&ControlQualificationPurpose> {
         match &self.kind {
             DecisionPurposeKind::Operational => None,
             DecisionPurposeKind::ControlQualification(purpose) => Some(purpose),
@@ -389,7 +389,10 @@ pub struct Waiver {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(
+    clippy::expect_used,
+    reason = "decision wire fixtures must fail when canonical admission or decoding drifts"
+)]
 mod decision_tests {
     use super::PolicyDecision;
     use politeia_core::{Digest, PolicyBundleId, PrincipalId};
