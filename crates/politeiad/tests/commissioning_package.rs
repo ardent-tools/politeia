@@ -324,7 +324,8 @@ fn unanswered_cli_request_reaches_its_deadline_and_closes() -> TestResult {
     io::BufRead::read_line(&mut reader, &mut request)?;
     let _: politeiad::transport::LocalRequest = serde_json::from_str(&request)?;
     assert!(process.child.try_wait()?.is_none());
-    process.deadline = Instant::now();
+    let response_deadline = Instant::now() + Duration::from_millis(100);
+    process.deadline = response_deadline;
     let error = process
         .wait_with_output()
         .expect_err("a connected client with no response must exceed its deadline");
@@ -332,6 +333,7 @@ fn unanswered_cli_request_reaches_its_deadline_and_closes() -> TestResult {
         error.downcast_ref::<io::Error>().map(io::Error::kind),
         Some(io::ErrorKind::TimedOut)
     );
+    assert!(Instant::now() >= response_deadline);
     assert_eq!(reader.read_to_end(&mut Vec::new())?, 0);
     Ok(())
 }
