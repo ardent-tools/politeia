@@ -15,7 +15,7 @@ use politeia_evidence::assurance::{
 
 use crate::hardening::HardeningState;
 use crate::waiver::DelegatedWaiver;
-use crate::{Consequence, DetectorSpec, EvidenceClass, PolicyBinding, PolicyDecision};
+use crate::{DetectorSpec, EvidenceClass, PolicyBinding, PolicyDecision};
 
 /// One exact operation and population, as policy sees them.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1993,7 +1993,7 @@ impl PoliteiadService {
 
         let observation = DetectorQualificationObservation {
             artifact_manifest,
-            executable: self.running_executable_digest.clone(),
+            executable: self.running_executable_digest().clone(),
             handler: Digest::blake3(
                 &to_canonical_bytes(&known_good.registered.handler).map_err(operational_refusal)?,
             ),
