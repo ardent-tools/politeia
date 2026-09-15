@@ -28,9 +28,9 @@ use politeia_evidence::{
     authority::{AuthorityContext, DirectGrant, institution_audience},
 };
 use politeia_policy::operational::{
-    DetectorQualificationDenial, DetectorQualificationObservation, OperationalPolicyRegistry,
-    PublicDetectorCalibration, QualificationNoEffectObservation, QualificationVectorInputs,
-    operation_scope,
+    DetectorQualification, DetectorQualificationDenial, DetectorQualificationObservation,
+    OperationalPolicyRegistry, PublicDetectorCalibration, QualificationNoEffectObservation,
+    QualificationVectorInputs, operation_scope,
 };
 use politeia_policy::{PolicyDecision, QualificationVector, evaluate::EvaluationEvidence};
 use politeia_runtime::{
@@ -43,8 +43,8 @@ use politeia_runtime::{
     },
 };
 use politeia_storage::{
-    CanonicalPayload, EvidenceAdmission, OperationOutboxMessage, PostgresAuthorizationLedger,
-    ScopedCommit, StateMutation,
+    AttemptStatus, CanonicalPayload, EvidenceAdmission, OperationOutboxMessage,
+    PostgresAuthorizationLedger, ScopedCommit, StateMutation,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1461,9 +1461,10 @@ impl PoliteiadService {
         })
     }
 
-    /// Resolve a service-owned real-path report and the independent verifier
-    /// material that may later support activation. Transport never supplies a
-    /// report body: the digest selects exactly one immutable daemon receipt.
+    /// Check the service-owned real-path report and independent verifier
+    /// material before Stage 2 stores their signed wires. Transport never
+    /// supplies report bytes as truth: the digest selects immutable governed
+    /// state.
     #[expect(
         clippy::too_many_arguments,
         reason = "report, evidence, proof, authority, and trusted time are independent assurance axes"
@@ -1528,6 +1529,15 @@ impl PoliteiadService {
                 ),
             )
             .map_err(operational_refusal)?;
+        let qualification_registry = self
+            .operational_registry_for_generation(qualification.candidate().digest())
+            .await?;
+        self.validate_retained_qualification_completion(
+            &calibration,
+            qualification,
+            &qualification_registry,
+        )
+        .await?;
         let admitted_evidence = self
             .anchors()
             .admit_expected(AdmissionKind::Evidence, evidence.clone())
@@ -1614,6 +1624,99 @@ impl PoliteiadService {
         }
         self.validate_detector_qualification(durable, report, evidence, proof, authority, at)
             .await
+    }
+
+    /// Re-open the one completed candidate-ledger attempt named by the report.
+    /// The report is not execution proof by itself: its lease, reservation,
+    /// receipt, and target-control run must all still identify one canonical
+    /// completion retained by PostgreSQL.
+    async fn validate_retained_qualification_completion(
+        &self,
+        calibration: &PublicDetectorCalibration,
+        qualification: &DetectorQualification,
+        registry: &ActiveOperationalRegistry,
+    ) -> Result<(), CoordinatorError> {
+        let attempt = self
+            .storage()
+            .load_attempt(self.scope(), qualification.known_good_reservation())
+            .await
+            .map_err(operational_refusal)?;
+        if attempt.status != AttemptStatus::Completed {
+            return Err(operational_refusal(
+                "detector qualification known-good reservation is not durably completed",
+            ));
+        }
+        let receipt_digest = attempt.receipt_digest.ok_or_else(|| {
+            operational_refusal("detector qualification completion has no retained receipt digest")
+        })?;
+        let receipt_bytes = attempt.receipt_payload.ok_or_else(|| {
+            operational_refusal("detector qualification completion has no retained receipt bytes")
+        })?;
+        if receipt_digest != *qualification.known_good_receipt()
+            || Digest::blake3(&receipt_bytes) != receipt_digest
+        {
+            return Err(operational_refusal(
+                "detector qualification completion receipt differs from its retained report",
+            ));
+        }
+        let receipt: OperationReceipt =
+            serde_json::from_slice(&receipt_bytes).map_err(|error| {
+                operational_refusal(format!(
+                    "detector qualification completion receipt is malformed: {error}",
+                ))
+            })?;
+        let canonical =
+            CanonicalPayload::from_serializable(&receipt).map_err(operational_refusal)?;
+        if canonical.bytes() != receipt_bytes || canonical.digest() != &receipt_digest {
+            return Err(operational_refusal(
+                "detector qualification completion receipt is not exact canonical retained output",
+            ));
+        }
+        let checked = registry
+            .policy()
+            .validate_detector_qualification(calibration)
+            .map_err(operational_refusal)?;
+        let known_good = qualification.known_good_run();
+        let intent_digest = receipt
+            .intent
+            .payload
+            .digest()
+            .map_err(operational_refusal)?;
+        if receipt.schema != "politeia.operation-receipt.v1"
+            || receipt.institution != self.workspace().institution
+            || receipt.workspace != self.workspace().id
+            || receipt.generation != *qualification.candidate()
+            || receipt.lease != *qualification.known_good_lease()
+            || receipt.reservation != *qualification.known_good_reservation()
+            || receipt.intent.signer != *qualification.qualification_actor()
+            || intent_digest != known_good.input_digest
+            || receipt.intent.payload.operation != *checked.operation()
+            || receipt.intent.payload.principal != *qualification.qualification_actor()
+            || receipt.decision.bundle != known_good.policy
+            || receipt.decision.policy_digest != known_good.policy_digest
+            || receipt.decision.intent_digest != known_good.input_digest
+            || receipt.decision.subject != known_good.subject
+            || receipt.decision.population != known_good.population
+            || receipt.decision.principal != *qualification.qualification_actor()
+            || !receipt.decision.allowed
+            || !receipt
+                .decision
+                .binding_ids
+                .iter()
+                .any(|binding| binding == checked.binding())
+            || !receipt.decision.control_runs.contains(&known_good.id)
+            || receipt.execution.resource != *checked.resource()
+            || receipt.execution.adapter != *checked.adapter()
+            || receipt.adapter != *checked.adapter()
+            || receipt.completed_at < qualification.observed_started_at()
+            || receipt.completed_at < known_good.finished_at
+            || receipt.completed_at > qualification.observed_finished_at()
+        {
+            return Err(operational_refusal(
+                "detector qualification completion does not bind its retained candidate control run",
+            ));
+        }
+        Ok(())
     }
 
     /// Admit one complete active-generation submission for a typed effect port.
@@ -2037,7 +2140,8 @@ impl PoliteiadService {
             jiff::SignedDuration::from_mins(5).min(
                 vector
                     .capability_authority_expires_at
-                    .duration_since(vector.request.at),
+                    .duration_since(vector.request.at)
+                    .min(capability.expires_at().duration_since(vector.request.at)),
             ),
             vector.operation_chain.clone(),
             [vector.registered.spec.clone()],
