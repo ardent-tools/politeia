@@ -1045,7 +1045,7 @@ impl PoliteiadService {
     /// Normal and candidate qualification routes share this seam so signature,
     /// catalog, routing, capability-expiry, and delegation-chain checks cannot
     /// drift apart.
-    async fn admit_checked_operation_input(
+    fn admit_checked_operation_input(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
         registry: &ActiveOperationalRegistry,
@@ -1742,20 +1742,18 @@ impl PoliteiadService {
         let registry = self.operational_registry_for_generation(active).await?;
         let ledger = PostgresAuthorizationLedger::new(self.storage().clone(), self.scope().clone());
         let now = ledger.observed_at().await.map_err(operational_refusal)?;
-        let input = self
-            .admit_checked_operation_input(
-                durable,
-                &registry,
-                OperationInputSubmission {
-                    intent: submission.intent,
-                    availability: submission.availability,
-                    routing: submission.routing,
-                    capability_verifications: submission.capability_verifications,
-                    control_run: None,
-                },
-                now,
-            )
-            .await?;
+        let input = self.admit_checked_operation_input(
+            durable,
+            &registry,
+            OperationInputSubmission {
+                intent: submission.intent,
+                availability: submission.availability,
+                routing: submission.routing,
+                capability_verifications: submission.capability_verifications,
+                control_run: None,
+            },
+            now,
+        )?;
         let policy = self
             .admit_operational_decision(
                 durable,
@@ -1813,34 +1811,30 @@ impl PoliteiadService {
                 .observed_at()
                 .await
                 .map_err(operational_refusal)?;
-        let known_good = self
-            .admit_checked_operation_input(
-                &durable,
-                &registry,
-                OperationInputSubmission {
-                    intent: known_good.intent,
-                    availability: known_good.availability,
-                    routing: known_good.routing,
-                    capability_verifications: known_good.capability_verifications,
-                    control_run: Some(known_good.control_run),
-                },
-                admission_at,
-            )
-            .await?;
-        let planted_violation = self
-            .admit_checked_operation_input(
-                &durable,
-                &registry,
-                OperationInputSubmission {
-                    intent: planted_violation.intent,
-                    availability: planted_violation.availability,
-                    routing: planted_violation.routing,
-                    capability_verifications: planted_violation.capability_verifications,
-                    control_run: Some(planted_violation.control_run),
-                },
-                admission_at,
-            )
-            .await?;
+        let known_good = self.admit_checked_operation_input(
+            &durable,
+            &registry,
+            OperationInputSubmission {
+                intent: known_good.intent,
+                availability: known_good.availability,
+                routing: known_good.routing,
+                capability_verifications: known_good.capability_verifications,
+                control_run: Some(known_good.control_run),
+            },
+            admission_at,
+        )?;
+        let planted_violation = self.admit_checked_operation_input(
+            &durable,
+            &registry,
+            OperationInputSubmission {
+                intent: planted_violation.intent,
+                availability: planted_violation.availability,
+                routing: planted_violation.routing,
+                capability_verifications: planted_violation.capability_verifications,
+                control_run: Some(planted_violation.control_run),
+            },
+            admission_at,
+        )?;
         if known_good.intent().principal != planted_violation.intent().principal {
             return Err(operational_refusal(
                 "qualification vectors name different requesting principals",
@@ -2074,6 +2068,10 @@ impl PoliteiadService {
             .map_err(operational_refusal)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the candidate vector, sealed capability, policy decision, and port counter are independent dispatch axes"
+    )]
     fn qualification_dispatcher(
         &self,
         registry: &ActiveOperationalRegistry,

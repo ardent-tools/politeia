@@ -311,8 +311,12 @@ impl PoliteiadService {
                 "initialization is a local host trust-anchor action, not a running-daemon request"
                     .to_string(),
             )),
-            SemanticOperation::Commissioning { request } => self.commission(request).await,
-            SemanticOperation::Operate { request } => self.handle_operation(request).await,
+            SemanticOperation::Commissioning { request } => {
+                Box::pin(self.commission(request)).await
+            }
+            SemanticOperation::Operate { request } => {
+                Box::pin(self.handle_operation(request)).await
+            }
         }
     }
 
@@ -1125,7 +1129,7 @@ impl PoliteiadService {
                 self.admit_detector_calibration_evidence(*submission).await
             }
             CommissioningRequest::ExerciseDetectorQualification { submission } => {
-                self.exercise_detector_qualification(*submission).await
+                Box::pin(self.exercise_detector_qualification(*submission)).await
             }
             CommissioningRequest::Handoff { submission } => self.accept_handoff(*submission).await,
             CommissioningRequest::AdmitDelegation { delegation } => {

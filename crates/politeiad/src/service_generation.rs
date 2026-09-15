@@ -889,6 +889,10 @@ impl PoliteiadService {
     /// [`activation_assurance_digest`].  This method only resolves and checks
     /// it before the compare-and-swap commit; it never admits caller-supplied
     /// reports or treats a detector-only calibration as qualification.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the durable snapshot, registry, candidate artifact, assurance, and observation time are independent activation checks"
+    )]
     async fn require_candidate_control_qualifications(
         &self,
         durable: &politeia_storage::WorkspaceSnapshot,
