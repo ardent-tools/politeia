@@ -905,7 +905,6 @@ pub(crate) struct AdmittedOperationalSubmission {
     capability_verifications: Vec<CapabilityVerificationEvidence>,
     assurance: Vec<OperationalControlEvidence>,
     admission_revision: i64,
-    admitted_at: Timestamp,
     authorization_expires_at: Timestamp,
 }
 
@@ -1017,11 +1016,7 @@ impl AdmittedOperationalSubmission {
         Dispatcher<AdmittedOperationalDecision, P, PostgresAuthorizationLedger>,
         CoordinatorError,
     > {
-        let maximum_ttl = jiff::SignedDuration::from_mins(5).min(
-            self.authorization_expires_at
-                .duration_since(self.admitted_at),
-        );
-        let config = DispatcherConfig::new(
+        let mut config = DispatcherConfig::new(
             self.registry.policy().bundle().clone(),
             self.registry.policy().digest().clone(),
             self.registry.generation().clone(),
@@ -1029,12 +1024,13 @@ impl AdmittedOperationalSubmission {
                 "operational:{}",
                 self.registry.generation().digest().as_str()
             ),
-            maximum_ttl,
+            jiff::SignedDuration::from_mins(5),
             self.operation_chain.clone(),
             [self.registered.spec.clone()],
         )
         .and_then(|config| config.with_trusted_routing_decisions([self.routing.clone()]))
         .map_err(operational_refusal)?;
+        config.set_authorization_deadline(self.authorization_expires_at);
         Ok(Dispatcher::new(
             self.policy.clone(),
             port,
@@ -1783,7 +1779,6 @@ impl PoliteiadService {
             capability_verifications: input.capability_verifications,
             assurance: submission.assurance,
             admission_revision: durable.revision,
-            admitted_at: now,
             authorization_expires_at,
         })
     }
@@ -2132,17 +2127,12 @@ impl PoliteiadService {
             },
             invocations,
         };
-        let config = DispatcherConfig::new(
+        let mut config = DispatcherConfig::new(
             registry.policy().bundle().clone(),
             registry.policy().digest().clone(),
             registry.generation().clone(),
             capability.replay_domain(qualification_vector),
-            jiff::SignedDuration::from_mins(5).min(
-                vector
-                    .capability_authority_expires_at
-                    .duration_since(vector.request.at)
-                    .min(capability.expires_at().duration_since(vector.request.at)),
-            ),
+            jiff::SignedDuration::from_mins(5),
             vector.operation_chain.clone(),
             [vector.registered.spec.clone()],
         )
@@ -2155,6 +2145,7 @@ impl PoliteiadService {
                 .expires_at()
                 .min(vector.capability_authority_expires_at),
         };
+        config.set_authorization_deadline(policy.expires_at);
         let ledger = PostgresAuthorizationLedger::for_candidate_qualification(
             self.storage().clone(),
             self.scope().clone(),
