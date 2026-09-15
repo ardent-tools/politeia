@@ -625,12 +625,12 @@ CREATE TRIGGER {BARRIER_TRIGGER}
             if claims.len() > 1 {
                 return Err("completion barrier observed more than one claimed operation".into());
             }
-            if let Some(reservation) = claims.first()
-                && let Some(backend) = self.waiting_backend_at_barrier()?
-            {
-                self.bind_reservation(reservation)?;
-                self.blocked_backend = Some(backend);
-                return Ok(*reservation);
+            if let Some(reservation) = claims.first() {
+                if let Some(backend) = self.waiting_backend_at_barrier()? {
+                    self.bind_reservation(reservation)?;
+                    self.blocked_backend = Some(backend);
+                    return Ok(*reservation);
+                }
             }
             thread::sleep(Duration::from_millis(20));
         }

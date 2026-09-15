@@ -241,7 +241,7 @@ impl PolicyDecision {
         self,
         purpose: ControlQualificationPurpose,
     ) -> Result<Self, CanonicalError> {
-        self.seal(DecisionPurposeKind::ControlQualification(purpose))
+        self.seal(DecisionPurposeKind::ControlQualification(Box::new(purpose)))
     }
 
     fn seal(mut self, kind: DecisionPurposeKind) -> Result<Self, CanonicalError> {
@@ -279,7 +279,7 @@ pub struct DecisionPurpose {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum DecisionPurposeKind {
     Operational,
-    ControlQualification(ControlQualificationPurpose),
+    ControlQualification(Box<ControlQualificationPurpose>),
 }
 
 impl DecisionPurpose {
@@ -389,6 +389,7 @@ pub struct Waiver {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod decision_tests {
     use super::PolicyDecision;
     use politeia_core::{Digest, PolicyBundleId, PrincipalId};
