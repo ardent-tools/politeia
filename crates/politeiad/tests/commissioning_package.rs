@@ -647,6 +647,7 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
         lifecycle::activate(
             &database_url,
             fixture,
+            operations,
             &generation.generation,
             "activate",
             true,

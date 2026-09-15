@@ -5,6 +5,7 @@ use std::{collections::BTreeSet, path::Path};
 use jiff::Timestamp;
 use politeia_core::{BudgetReservationId, Delegation, Digest};
 use politeiad::service_generation::CommissioningReceipt;
+use tokio_postgres::NoTls;
 
 use super::{
     CommissionedGeneration, OperationalFixture, ReferenceFixture, TestResult, require_coordinated,
@@ -24,6 +25,7 @@ pub(super) fn exercise(
     commissioned: &CommissionedGeneration,
     temporary_grants: &[Delegation],
 ) -> TestResult<Digest> {
+    refuse_incomplete_or_substituted_assurance(database_url, fixture, operations)?;
     let prior_canary = positive_canary(database_url, fixture, operations, "pre-revocation")?;
     negative_canary(database_url, fixture, operations)?;
     let prior_reservation: BudgetReservationId =
@@ -246,6 +248,7 @@ pub(super) fn exercise(
     super::lifecycle::activate(
         database_url,
         fixture,
+        operations,
         &replacement_generation,
         "activate",
         true,
@@ -259,6 +262,7 @@ pub(super) fn exercise(
     super::lifecycle::activate(
         database_url,
         fixture,
+        operations,
         &commissioned.generation,
         "rollback",
         false,
@@ -410,6 +414,7 @@ fn negative_canary(
         "planted-policy-canary-authority.json",
         &prepared.authority_admission,
     )?;
+    let before = operation_effect_counts(database_url, fixture)?;
     require_refusal(
         &run(
             database_url,
@@ -426,5 +431,117 @@ fn negative_canary(
         "planted public resource policy canary",
         PLANTED_DENIAL_REASON,
     )?;
+    assert_eq!(
+        operation_effect_counts(database_url, fixture)?,
+        before,
+        "the planted manifest violation is denied before any effect attempt, reservation, completion, or outbox record"
+    );
     Ok(())
+}
+
+/// The service admits every installed native handler through this same
+/// operational boundary. Context compilation, capability discovery, source
+/// capture, and manifest derivation each build a fresh run through
+/// `OperationalFixture::submission`; this generic ingress falsifier proves a
+/// caller cannot omit or repurpose that assurance to reach any handler.
+fn refuse_incomplete_or_substituted_assurance(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    operations: &OperationalFixture,
+) -> TestResult {
+    let prepared = operations.positive_manifest(fixture, Timestamp::now());
+    submit_commissioning(
+        database_url,
+        fixture,
+        "shared-assurance-refusal-authority.json",
+        &prepared.authority_admission,
+    )?;
+    let before = operation_effect_counts(database_url, fixture)?;
+
+    let mut omitted = prepared.operate.clone();
+    *omitted
+        .get_mut("assurance")
+        .ok_or("native manifest operation omits assurance field")? = serde_json::json!([]);
+    require_refusal(
+        &run(
+            database_url,
+            &[
+                Path::new("operate"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &write_request(fixture, "shared-assurance-omitted.json", &omitted)?,
+            ],
+        )?,
+        "omitted shared native assurance",
+        "operation assurance does not exactly cover active policy controls",
+    )?;
+    assert_eq!(
+        operation_effect_counts(database_url, fixture)?,
+        before,
+        "omitted native assurance creates no effect attempt, reservation, completion, or outbox record"
+    );
+
+    let mut substituted = prepared.operate;
+    let control_run = substituted
+        .pointer("/assurance/0/run")
+        .cloned()
+        .ok_or("native manifest operation omits its signed control run")?;
+    *substituted
+        .pointer_mut("/assurance/0/activation")
+        .ok_or("native manifest operation omits its activation proof")? = control_run;
+    require_refusal(
+        &run(
+            database_url,
+            &[
+                Path::new("operate"),
+                &fixture.prefix().join("run/politeiad.sock"),
+                &write_request(
+                    fixture,
+                    "shared-assurance-substituted-activation.json",
+                    &substituted,
+                )?,
+            ],
+        )?,
+        "substituted shared native activation",
+        "expected ActivationProof statement, received ControlRun",
+    )?;
+    assert_eq!(
+        operation_effect_counts(database_url, fixture)?,
+        before,
+        "substituted native assurance creates no effect attempt, reservation, completion, or outbox record"
+    );
+    Ok(())
+}
+
+/// Read-only test administration at the shared dispatcher boundary. The
+/// attempt row owns the reservation and completion state; the outbox table
+/// records its atomic externalization counterpart.
+fn operation_effect_counts(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+) -> TestResult<(i64, i64, i64, i64)> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (client, connection) = runtime.block_on(tokio_postgres::connect(database_url, NoTls))?;
+    let _connection = runtime.spawn(connection);
+    let institution = fixture.host_trust.workspace.institution.0;
+    let workspace = fixture.host_trust.workspace.id.0;
+    let attempts = runtime.block_on(client.query_one(
+        "SELECT COUNT(*)::BIGINT,
+                COUNT(*) FILTER (WHERE reservation_id IS NOT NULL)::BIGINT,
+                COUNT(*) FILTER (WHERE status = 'completed')::BIGINT
+         FROM operation_attempts
+         WHERE institution_id = $1 AND workspace_id = $2",
+        &[&institution, &workspace],
+    ))?;
+    let outbox = runtime.block_on(client.query_one(
+        "SELECT COUNT(*)::BIGINT
+         FROM transactional_outbox
+         WHERE institution_id = $1 AND workspace_id = $2",
+        &[&institution, &workspace],
+    ))?;
+    Ok((
+        attempts.get(0),
+        attempts.get(1),
+        attempts.get(2),
+        outbox.get(0),
+    ))
 }

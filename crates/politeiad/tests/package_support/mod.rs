@@ -52,6 +52,7 @@ use politeiad::service_generation::{
     ActivationAssurance, CommissioningReceipt, GenerationTransitionAction,
     GenerationTransitionRequest, activation_assurance_digest,
 };
+use politeiad::service_operation::DetectorCalibrationEvidenceSubmission;
 
 /// The two intentionally disjoint reference institutions exercised by the package.
 #[derive(Clone, Copy, Debug)]
@@ -214,6 +215,8 @@ pub(crate) struct ActivationDocuments {
     pub(crate) proof: SignedAdmissionWire<ActivationProof>,
     /// Durable direct authority for the verifier.
     pub(crate) proof_authority: SignedAdmissionWire<Delegation>,
+    /// Exact independently admitted candidate-control qualification set.
+    pub(crate) qualifications: Vec<DetectorCalibrationEvidenceSubmission>,
 }
 
 impl ReferenceFixture {
@@ -934,6 +937,7 @@ impl ReferenceFixture {
             run_authority: assurance.run_authority.clone(),
             proof: assurance.proof.clone(),
             proof_authority: assurance.proof_authority.clone(),
+            qualifications: assurance.qualifications.clone(),
         };
         let transition = GenerationTransitionRequest {
             evidence: EvidenceId::new(),
@@ -974,6 +978,7 @@ impl ReferenceFixture {
                     "run_authority": assurance.run_authority,
                     "proof": assurance.proof,
                     "proof_authority": assurance.proof_authority,
+                    "qualifications": assurance.qualifications,
                 },
                 "transition": transition,
             },

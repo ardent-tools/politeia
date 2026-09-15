@@ -89,6 +89,18 @@ pub(crate) struct OperationalFixture {
     run_authority: SignedAdmissionWire<Delegation>,
     activation_authority: SignedAdmissionWire<Delegation>,
     activation: RefCell<Option<SignedAdmissionWire<ActivationProof>>>,
+    /// Retained Stage-2 material indexed by exact candidate and detector.
+    ///
+    /// A detector proof applies across every binding that shares its configured
+    /// control, version, configuration, population, and mediation path.  The
+    /// fixture deliberately binds this one detector in four operation scopes,
+    /// so a second copy per binding would only conceal the canonical proof
+    /// cardinality the activation gate must enforce.
+    qualifications:
+        RefCell<BTreeMap<Digest, BTreeMap<String, DetectorCalibrationEvidenceSubmission>>>,
+    /// Each native request must carry a new run for its exact signed intent;
+    /// an activation proof is reusable detector evidence, a control run is not.
+    active_control_runs: RefCell<BTreeSet<EvidenceId>>,
 }
 
 /// Stage-one material whose grants and vector identities are fixed before the
@@ -401,6 +413,8 @@ impl OperationalFixture {
             run_authority,
             activation_authority,
             activation: RefCell::new(None),
+            qualifications: RefCell::new(BTreeMap::new()),
+            active_control_runs: RefCell::new(BTreeSet::new()),
         }
     }
 
@@ -437,6 +451,27 @@ impl OperationalFixture {
             &to_canonical_bytes(&(self.operation_ids(), self.resource_ids()))
                 .expect("capability population encodes"),
         )
+    }
+
+    /// Canonical detector identities required by the fixture's blocking
+    /// bindings. The activation proof set follows these detector identities,
+    /// while ordinary operations still evaluate every matching binding.
+    pub(crate) fn blocking_detector_ids(&self) -> BTreeSet<String> {
+        self.policy
+            .bindings()
+            .iter()
+            .filter(|binding| binding.is_blocking())
+            .flat_map(|binding| binding.detector_ids.iter().cloned())
+            .collect()
+    }
+
+    /// Number of blocking policy bindings preserved by this fixture.
+    pub(crate) fn blocking_binding_count(&self) -> usize {
+        self.policy
+            .bindings()
+            .iter()
+            .filter(|binding| binding.is_blocking())
+            .count()
     }
 
     /// Availability observation naming both the eligible local resource and
@@ -580,13 +615,54 @@ impl OperationalFixture {
                 .activation_proof(EvidenceId::new(), evidence_id, Timestamp::now())
                 .expect("real-path report produces a verifier proof"),
         );
-        *self.activation.borrow_mut() = Some(proof.clone());
-        DetectorCalibrationEvidenceSubmission {
+        let submission = DetectorCalibrationEvidenceSubmission {
             report: report_digest,
             proof_authority: self.activation_authority.clone(),
             evidence,
             proof,
+        };
+        *self.activation.borrow_mut() = Some(submission.proof.clone());
+        submission
+    }
+
+    /// Retain one completed candidate qualification for its exact reuse on a
+    /// rollback. Re-executing the immutable exercise would be a replay, not a
+    /// fresh proof. One entry exists per detector, even where several blocking
+    /// bindings share that detector's mediation path.
+    pub(crate) fn remember_qualification(
+        &self,
+        candidate: Digest,
+        detector: String,
+        qualification: DetectorCalibrationEvidenceSubmission,
+    ) {
+        *self.activation.borrow_mut() = Some(qualification.proof.clone());
+        self.qualifications
+            .borrow_mut()
+            .entry(candidate)
+            .or_default()
+            .insert(detector, qualification);
+    }
+
+    /// Recover the exact retained proof set without replaying its signed
+    /// dispatcher vectors. BTreeMap order gives the owner-signed collection a
+    /// deterministic fixture construction order without making ordering an
+    /// admission requirement.
+    pub(crate) fn qualifications_for(
+        &self,
+        candidate: &Digest,
+    ) -> Option<Vec<DetectorCalibrationEvidenceSubmission>> {
+        let qualifications = self
+            .qualifications
+            .borrow()
+            .get(candidate)
+            .map(|by_detector| by_detector.values().cloned().collect::<Vec<_>>());
+        if let Some(qualifications) = &qualifications {
+            let activation = qualifications
+                .first()
+                .map(|qualification| qualification.proof.clone());
+            *self.activation.borrow_mut() = activation;
         }
+        qualifications
     }
 
     fn qualification_vector(
@@ -725,7 +801,7 @@ impl OperationalFixture {
             )
             .expect("public detector executes");
         run.finished_at = Timestamp::now();
-        OperationSubmission {
+        let submission = OperationSubmission {
             intent: sign(
                 fixture,
                 AdmissionKind::OperationIntent,
@@ -752,7 +828,109 @@ impl OperationalFixture {
                     .expect("real-path detector qualification precedes active operations"),
                 activation_authority: self.activation_authority.clone(),
             }],
+        };
+        self.assert_native_handler_assurance(fixture, &submission);
+        submission
+    }
+
+    /// Check the common operational ingress evidence used by every installed
+    /// native handler. The exhaustive handler match makes a new handler add a
+    /// fixture witness before it can claim the shared detector proof path.
+    fn assert_native_handler_assurance(
+        &self,
+        fixture: &ReferenceFixture,
+        submission: &OperationSubmission,
+    ) {
+        let intent = &submission.intent.payload;
+        let registered = self
+            .execution
+            .exact_operation(&intent.operation)
+            .expect("native fixture operation is registered");
+        match (&registered.handler, registered.spec.name.as_str()) {
+            (InstalledOperationHandler::ResourceManifest { .. }, RESOURCE_MANIFEST_OPERATION)
+            | (InstalledOperationHandler::CaptureAuthorizedSource, CAPTURE_SOURCE_OPERATION)
+            | (InstalledOperationHandler::CompileInstitutionalContext, COMPILE_CONTEXT_OPERATION)
+            | (
+                InstalledOperationHandler::DiscoverInstitutionalCapabilities,
+                DISCOVER_CAPABILITIES_OPERATION,
+            ) => {}
+            _ => panic!("fixture native handler and registered operation disagree"),
         }
+
+        let required_controls: BTreeSet<_> = self
+            .policy
+            .bindings()
+            .iter()
+            .filter(|binding| {
+                binding.is_blocking() && binding.scope == operation_scope(&intent.operation)
+            })
+            .flat_map(|binding| binding.detector_ids.iter().cloned())
+            .collect();
+        assert!(
+            !required_controls.is_empty(),
+            "every installed native handler has an applicable blocking binding"
+        );
+        assert_eq!(
+            submission.assurance.len(),
+            required_controls.len(),
+            "native handler assurance exactly covers its applicable detector set"
+        );
+        let expected_activation = self
+            .activation
+            .borrow()
+            .clone()
+            .expect("real-path detector qualification precedes active operations");
+        let request = OperationalEvaluationRequest {
+            institution: fixture.host_trust.workspace.institution.clone(),
+            workspace: fixture.host_trust.workspace.id.clone(),
+            intent_digest: intent.digest().expect("operation intent digests"),
+            principal: intent.principal.clone(),
+            operation: intent.operation.clone(),
+            resources: intent.resources.clone(),
+            at: submission.availability.observed_at,
+        };
+        let subject = request
+            .evaluation_subject(&self.policy)
+            .expect("native handler subject encodes");
+        let mut supplied_controls = BTreeSet::new();
+        for evidence in &submission.assurance {
+            let run = &evidence.run.payload;
+            assert!(
+                required_controls.contains(&run.control),
+                "native handler run names an applicable blocking detector"
+            );
+            assert!(
+                supplied_controls.insert(run.control.clone()),
+                "native handler does not reuse a control run for two controls"
+            );
+            assert_eq!(
+                evidence.activation, expected_activation,
+                "native handlers reuse the retained proof for the shared detector"
+            );
+            assert_eq!(
+                run.input_digest, subject.intent_digest,
+                "native handler run is bound to its exact signed operation intent"
+            );
+            assert_eq!(
+                run.subject, subject.subject,
+                "native handler run judges the exact operational subject"
+            );
+            assert_eq!(
+                run.population, subject.population,
+                "native handler run covers the exact operational population"
+            );
+            self.policy
+                .validate_control_run(&request, run)
+                .expect("native handler run is exact for its signed intent");
+            assert!(
+                self.active_control_runs.borrow_mut().insert(run.id.clone()),
+                "every native request receives a fresh control-run identity"
+            );
+        }
+        assert_eq!(
+            supplied_controls, required_controls,
+            "native handler assurance supplies every applicable blocking detector"
+        );
     }
 
     /// Positive local manifest canary and its exact owner grant admission.

@@ -182,6 +182,7 @@ impl ReferenceFixture {
             run_authority: authority_wires.run_authority.clone(),
             proof: calibration.proof.clone(),
             proof_authority: authority_wires.proof_authority.clone(),
+            qualifications: Vec::new(),
         }
     }
 

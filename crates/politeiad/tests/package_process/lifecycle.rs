@@ -10,20 +10,26 @@ use politeiad::{
     service_generation::GenerationTransitionAction,
     service_generation_validation::GenerationValidationReport,
 };
+use tokio_postgres::NoTls;
 
 use super::{
-    ReferenceFixture, TestResult, require_refusal, run, status_value, submit_commissioning,
-    write_request,
+    OperationalFixture, ReferenceFixture, TestResult, require_refusal, run, status_value,
+    submit_commissioning, write_request,
 };
 
 /// Activate or roll back only after independent public validation calls.
 pub(crate) fn activate(
     database_url: &str,
     fixture: &ReferenceFixture,
+    operations: &OperationalFixture,
     generation: &Digest,
     kind: &str,
     exercise_refusals: bool,
 ) -> TestResult {
+    let qualifications = match operations.qualifications_for(generation) {
+        Some(qualifications) => qualifications,
+        None => qualify_candidate(database_url, fixture, operations, generation)?,
+    };
     let control = format!("generation:{kind}");
     let authorities = fixture.lifecycle_authorities(&control);
     for (role, delegation) in [
@@ -41,7 +47,9 @@ pub(crate) fn activate(
     let calibration = fixture.lifecycle_calibration(&verifier, &authorities);
     let started_at = Timestamp::now();
     let producer = validate(database_url, fixture, generation, &control, "producer")?;
-    let assurance = fixture.lifecycle_assurance(&producer, &calibration, &authorities, started_at);
+    let mut assurance =
+        fixture.lifecycle_assurance(&producer, &calibration, &authorities, started_at);
+    assurance.qualifications = qualifications.clone();
     assert_eq!(producer.known_good_result, ControlResult::Clean);
     assert_eq!(producer.planted_violation_result, ControlResult::Violation);
     assert!(producer.coverage.is_complete());
@@ -52,6 +60,53 @@ pub(crate) fn activate(
     let active: Option<Digest> = serde_json::from_value(snapshot["active_generation"].clone())?;
 
     if exercise_refusals {
+        let mut missing_qualification = assurance.clone();
+        missing_qualification.qualifications.clear();
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-missing-control-qualification.json",
+            &fixture.activation_request(
+                kind,
+                generation,
+                revision,
+                active.as_ref(),
+                &missing_qualification,
+            ),
+            "candidate control qualification coverage differs",
+        )?;
+        assert_eq!(
+            status_value(database_url, fixture)?["active_generation"],
+            serde_json::json!(active.clone()),
+            "a missing candidate control proof leaves the active pointer unchanged"
+        );
+
+        let mut duplicate_qualification = assurance.clone();
+        duplicate_qualification.qualifications.push(
+            qualifications
+                .first()
+                .expect("fixture has one proof for its installed detector")
+                .clone(),
+        );
+        refuse(
+            database_url,
+            fixture,
+            "lifecycle-duplicate-control-qualification.json",
+            &fixture.activation_request(
+                kind,
+                generation,
+                revision,
+                active.as_ref(),
+                &duplicate_qualification,
+            ),
+            "candidate control qualifications duplicate one detector",
+        )?;
+        assert_eq!(
+            status_value(database_url, fixture)?["active_generation"],
+            serde_json::json!(active.clone()),
+            "a duplicate candidate control proof leaves the active pointer unchanged"
+        );
+
         let requested_action = match kind {
             "activate" => GenerationTransitionAction::Activate,
             "rollback" => GenerationTransitionAction::Rollback,
@@ -326,6 +381,99 @@ pub(crate) fn activate(
         "typed assurance rows preserve commissioning provenance"
     );
     Ok(())
+}
+
+/// Complete Stage 1 and Stage 2 once for an inactive candidate, then cache the
+/// retained qualified proof for an exact future rollback.
+fn qualify_candidate(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    operations: &OperationalFixture,
+    generation: &Digest,
+) -> TestResult<Vec<politeiad::service_operation::DetectorCalibrationEvidenceSubmission>> {
+    let documents =
+        operations.detector_qualification_documents(fixture, generation, Timestamp::now());
+    for (index, authority) in documents.authority_admissions.iter().enumerate() {
+        submit_commissioning(
+            database_url,
+            fixture,
+            &format!("qualification-authority-{index}.json"),
+            authority,
+        )?;
+    }
+    let result = submit_commissioning(
+        database_url,
+        fixture,
+        "exercise-detector-qualification.json",
+        &documents.exercise,
+    )?;
+    let report: politeia_policy::operational::PublicDetectorCalibration =
+        serde_json::from_value(result["report"].clone())?;
+    let detector = report.control.clone();
+    let qualification = operations.detector_calibration_evidence(fixture, report);
+    submit_commissioning(
+        database_url,
+        fixture,
+        "admit-detector-qualification.json",
+        &serde_json::json!({
+            "kind": "detector_calibration_evidence",
+            "submission": qualification,
+        }),
+    )?;
+    let attempts_before_replay = operation_attempt_counts(database_url, fixture)?;
+    refuse(
+        database_url,
+        fixture,
+        "replayed-detector-qualification.json",
+        &documents.exercise,
+        "replay",
+    )?;
+    assert_eq!(
+        operation_attempt_counts(database_url, fixture)?,
+        attempts_before_replay,
+        "replaying Stage 1 must not create another candidate effect attempt or completion"
+    );
+    operations.remember_qualification(generation.clone(), detector, qualification);
+    let qualifications = operations
+        .qualifications_for(generation)
+        .expect("completed Stage 2 retains candidate detector qualification");
+    assert_eq!(
+        qualifications.len(),
+        operations.blocking_detector_ids().len(),
+        "activation carries one retained proof for every blocking detector"
+    );
+    assert_eq!(
+        operations.blocking_binding_count(),
+        4,
+        "the fixture retains all four enforced operation-scope bindings"
+    );
+    assert_eq!(
+        qualifications.len(),
+        1,
+        "the fixture's four blocking bindings share one detector proof"
+    );
+    Ok(qualifications)
+}
+
+/// Read the same durable attempt/completion seam used by the package's
+/// executable-identity witness. This observes the exact subject of the replay
+/// refusal instead of treating a transport failure as proof of no execution.
+fn operation_attempt_counts(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+) -> TestResult<(i64, i64)> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let (client, connection) = runtime.block_on(tokio_postgres::connect(database_url, NoTls))?;
+    let _connection = runtime.spawn(connection);
+    let institution = fixture.host_trust.workspace.institution.0;
+    let workspace = fixture.host_trust.workspace.id.0;
+    let row = runtime.block_on(client.query_one(
+        "SELECT COUNT(*)::BIGINT, COUNT(*) FILTER (WHERE status = 'completed')::BIGINT
+         FROM operation_attempts
+         WHERE institution_id = $1 AND workspace_id = $2",
+        &[&institution, &workspace],
+    ))?;
+    Ok((row.get(0), row.get(1)))
 }
 
 fn validate(
