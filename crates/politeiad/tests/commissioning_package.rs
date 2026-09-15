@@ -18,6 +18,8 @@ mod package_support;
 mod continuity;
 #[path = "package_process/evidence.rs"]
 mod evidence;
+#[path = "package_process/executable_identity.rs"]
+mod executable_identity;
 #[path = "package_process/handoff.rs"]
 mod handoff;
 #[path = "package_process/learning.rs"]
@@ -242,6 +244,10 @@ fn two_institution_installations_start_disjoint_daemons() -> TestResult {
     let evidence = evidence::Session::begin(client_binary(), daemon_binary())?;
     let database_url = database_url()?;
     assert_ne!(client_binary(), daemon_binary());
+    evidence::record_observation(
+        "mismatched_daemon_executable",
+        &executable_identity::exercise(&database_url)?,
+    )?;
     let executable = Path::new(daemon_binary());
     let mut software =
         ReferenceFixture::new(ReferenceInstitutionKind::SoftwareDevelopment, executable);

@@ -748,7 +748,7 @@ impl ActiveOperationalRegistry {
         generation: RuntimeGenerationId,
         policy: OperationalPolicyRegistry,
         execution: OperationalExecutionRegistry,
-        executable_digest: Digest,
+        executable_digest: &Digest,
     ) -> Result<Self, OperationalRegistryRefusal> {
         let operation_scopes: BTreeSet<_> = execution
             .document
@@ -769,7 +769,7 @@ impl ActiveOperationalRegistry {
                 resource.descriptor,
                 ExecutionResourceDescriptor::DeterministicTool { .. }
             ) {
-                validate_builtin_descriptor_identity(&resource.descriptor, &executable_digest)
+                validate_builtin_descriptor_identity(&resource.descriptor, executable_digest)
                     .map_err(OperationalRegistryRefusal::ExecutableIdentity)?;
             }
         }
@@ -976,7 +976,7 @@ impl PoliteiadService {
             generation.id().clone(),
             policy,
             execution,
-            executable_digest,
+            &executable_digest,
         )
         .map_err(|error| operational_refusal(error.to_string()))
     }
@@ -2401,7 +2401,7 @@ mod tests {
 
     fn active_registry_with_descriptor(
         descriptor: ExecutionResourceDescriptor,
-        executable: Digest,
+        executable: &Digest,
     ) -> Result<ActiveOperationalRegistry, OperationalRegistryRefusal> {
         let trust_domain = TrustDomainId::try_from("fixture.daemon".to_owned())
             .expect("fixture trust domain is valid");
@@ -2566,7 +2566,7 @@ mod tests {
                 artifact_digest: Digest::blake3(b"another deterministic tool"),
                 version: "fixture".to_owned(),
             },
-            approved,
+            &approved,
         )
         .expect_err("a target operational registry must reject a substituted builtin descriptor");
         assert!(matches!(
@@ -2586,7 +2586,7 @@ mod tests {
                 runtime: "fixture-runtime".to_owned(),
                 harness: "fixture-harness".to_owned(),
             },
-            Digest::blake3(b"approved daemon executable"),
+            &Digest::blake3(b"approved daemon executable"),
         )
         .expect("a non-builtin resource remains outside daemon executable binding");
     }
