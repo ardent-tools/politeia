@@ -1,6 +1,13 @@
 # Documentation inventory for Politeia.
 
 [[doc]]
+path = "docs/adr/0021-institutional-learning-and-commissioning.md"
+type = "decision-record"
+evergreen = true
+description = "ADR: broad institutional learning through a complete client-owned commissioning package."
+decided = "2026-09-09"
+
+[[doc]]
 path = "docs/00-CHARTER.md"
 type = "authored"
 evergreen = true

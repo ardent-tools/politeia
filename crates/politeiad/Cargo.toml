@@ -5,19 +5,36 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "politeia"
+path = "src/main.rs"
+
+[[bin]]
+name = "politeiad"
+path = "src/bin/politeiad.rs"
+
 [dependencies]
 anyhow.workspace = true
-tokio.workspace = true
-
-# WHY dev-only: the binary is still a scaffold and does not run the slice. The
-# integration test does, which is the increment that can be honest today --
-# depending on these from the binary would claim the daemon composes them when
-# it does not.
-[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "net"] }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+rustix = { version = "1", features = ["fs"] }
 jiff.workspace = true
+schemars.workspace = true
+cap-std = "3"
+cap-fs-ext = "3"
 politeia-core.workspace = true
-politeia-evidence.workspace = true
+politeia-runtime.workspace = true
 politeia-policy.workspace = true
+politeia-storage = { version = "0.1.0", path = "../politeia-storage" }
+politeia-protocol.workspace = true
+politeia-evidence.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+tokio-postgres.workspace = true
+tokio = { workspace = true, features = ["time"] }
 
 [lints]
 workspace = true

@@ -7,19 +7,23 @@
 
 pub mod assessment;
 pub mod assurance;
+pub mod authority;
 
 use std::collections::BTreeSet;
 
 use politeia_core::canonical::{CanonicalError, to_canonical_bytes};
 use politeia_core::{
-    AdapterId, CommissioningRecordId, DelegationId, Digest, DigestDomain, EvidenceId,
+    AdapterId, CommissioningRecordId, Delegation, DelegationId, Digest, DigestDomain, EvidenceId,
     InstitutionId, InstitutionWorkspaceId, PolicyBundleId, PrincipalId, RuntimeGenerationId,
     generation::{RuntimeGeneration, RuntimeGenerationError},
     institution::InstitutionWorkspace,
     lifecycle::LifecycleProfile,
+    trust::{AdmissionKind, Admitted},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use authority::{AuthorityContext, AuthorityRefusal, DirectGrant};
 
 pub use politeia_core::{
     commissioning::{CommissioningApproval, CommissioningRecord, TrustedCommissionerGrantRegistry},
@@ -93,24 +97,172 @@ pub fn operational_continuity_subject_digest(
 pub struct Verification {
     /// Digest of the verified subject.
     pub subject: Digest,
-    /// The verifying principal.
-    pub verifier: PrincipalId,
     /// The evidence records the verdict relies on.
     pub evidence: Vec<EvidenceId>,
     /// Whether the subject passed.
     pub passed: bool,
-    /// The verifier's independence class.
-    pub independence: IndependenceClass,
+    /// When the verification was performed.
+    pub verified_at: jiff::Timestamp,
+}
+
+/// Semantic action delegated to an assurance verifier.
+pub const VERIFY_ASSURANCE_ACTION: &str = "verify-assurance";
+
+/// Exact delegation resource for verification of one subject digest.
+///
+/// # Errors
+///
+/// Returns the JSON encoding error if the canonical digest token cannot be
+/// represented. The JSON string token is retained in the resource so no
+/// display implementation can silently redefine the authority boundary.
+pub fn assurance_subject_resource(subject: &Digest) -> Result<String, serde_json::Error> {
+    serde_json::to_string(subject).map(|token| format!("assurance-subject:{token}"))
+}
+
+/// An authenticated verification produced by a separately delegated verifier.
+///
+/// The signed admission supplies the verifier identity. No caller-provided
+/// independence label participates in this type: independence is established
+/// by a direct owner grant and by comparison with the actor under judgement
+/// when an attestation is issued.
+#[derive(Clone, Debug)]
+pub struct DelegatedVerification<'admission> {
+    admission: &'admission Admitted<Verification>,
+    grant: DirectGrant<'admission>,
+}
+
+impl<'admission> DelegatedVerification<'admission> {
+    /// Admit one verification under exact subject-scoped authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VerificationAdmissionRefusal`] when admission scope, time,
+    /// subject-resource derivation, or the direct verifier grant is invalid.
+    pub fn admit(
+        admission: &'admission Admitted<Verification>,
+        authority: &'admission Admitted<Delegation>,
+        context: &AuthorityContext,
+    ) -> Result<Self, VerificationAdmissionRefusal> {
+        if admission.kind() != AdmissionKind::Verification {
+            return Err(VerificationAdmissionRefusal::UnexpectedAdmissionKind);
+        }
+        if admission.institution() != context.institution() {
+            return Err(VerificationAdmissionRefusal::ForeignInstitution);
+        }
+        if admission.workspace() != context.workspace() {
+            return Err(VerificationAdmissionRefusal::ForeignWorkspace);
+        }
+        if admission.payload().verified_at > context.at() {
+            return Err(VerificationAdmissionRefusal::FutureVerification);
+        }
+        let resource = assurance_subject_resource(&admission.payload().subject)
+            .map_err(|error| VerificationAdmissionRefusal::Encoding(error.to_string()))?;
+        let grant = DirectGrant::admit(
+            authority,
+            context,
+            admission.signer(),
+            VERIFY_ASSURANCE_ACTION,
+            &resource,
+        )
+        .map_err(VerificationAdmissionRefusal::Authority)?;
+        Ok(Self { admission, grant })
+    }
+
+    /// The authenticated verification payload.
+    pub fn verification(&self) -> &Verification {
+        self.admission.payload()
+    }
+
+    /// The authenticated verifier identity.
+    pub fn verifier(&self) -> &PrincipalId {
+        self.admission.signer()
+    }
+
+    /// Institution under which the verification was admitted.
+    pub fn institution(&self) -> &InstitutionId {
+        self.admission.institution()
+    }
+
+    /// Workspace under which the verification was admitted.
+    pub fn workspace(&self) -> &InstitutionWorkspaceId {
+        self.admission.workspace()
+    }
+
+    /// Direct delegation that carries verifier authority.
+    pub fn delegation(&self) -> &Delegation {
+        self.grant.admission().payload()
+    }
+}
+
+/// Why a signed verification did not become delegated assurance evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VerificationAdmissionRefusal {
+    /// The payload was admitted for another semantic use.
+    UnexpectedAdmissionKind,
+    /// The verification belongs to another institution.
+    ForeignInstitution,
+    /// The verification belongs to another workspace.
+    ForeignWorkspace,
+    /// The verification claims to occur after the trusted instant.
+    FutureVerification,
+    /// The subject-scoped authority resource could not be encoded.
+    Encoding(String),
+    /// The direct semantic grant was invalid.
+    Authority(AuthorityRefusal),
+}
+
+impl std::fmt::Display for VerificationAdmissionRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnexpectedAdmissionKind => {
+                formatter.write_str("verification payload was admitted for another use")
+            }
+            Self::ForeignInstitution => {
+                formatter.write_str("verification belongs to another institution")
+            }
+            Self::ForeignWorkspace => {
+                formatter.write_str("verification belongs to another workspace")
+            }
+            Self::FutureVerification => {
+                formatter.write_str("verification postdates the trusted instant")
+            }
+            Self::Encoding(message) => {
+                write!(
+                    formatter,
+                    "verification subject cannot be encoded: {message}"
+                )
+            }
+            Self::Authority(refusal) => {
+                write!(formatter, "verification authority refused: {refusal}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for VerificationAdmissionRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Authority(refusal) => Some(refusal),
+            _ => None,
+        }
+    }
 }
 
 /// The exact identities one attestation binds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AttestationStatement {
+    /// Institution whose assurance boundary admitted the verification.
+    pub institution: InstitutionId,
+    /// Workspace whose assurance boundary admitted the verification.
+    pub workspace: InstitutionWorkspaceId,
     /// Digest of the attested subject.
     pub subject: Digest,
     /// The attesting verifier.
     pub verifier: PrincipalId,
+    /// Direct delegation authorizing this verifier for the exact subject.
+    pub verification_delegation: DelegationId,
     /// The policy bundle identity.
     pub policy: PolicyBundleId,
     /// The runtime generation identity.
@@ -147,18 +299,7 @@ pub enum AttestationRefusal {
     /// separates the detector from the claim precisely so that a verdict has to
     /// name what it read.
     NoEvidence,
-    /// The verifier reported on itself.
-    ///
-    /// `AGENTS.md`: do not allow the actor being judged to satisfy an
-    /// independence requirement by self-certification. `IndependenceClass`
-    /// already documents `SelfReported` as never satisfying the obligation;
-    /// this is where that stops being documentation.
-    SelfCertified,
     /// The verifier is the principal whose work was judged.
-    ///
-    /// Distinct from the class: a verifier can honestly record itself as an
-    /// independent service and still *be* the actor under judgement, and the
-    /// class is a claim while this is a comparison.
     VerifierIsTheSubjectActor,
     /// The recorded statement digest is not the digest of the statement.
     StatementDigestMismatch,
@@ -174,9 +315,6 @@ impl std::fmt::Display for AttestationRefusal {
             }
             AttestationRefusal::NoEvidence => {
                 formatter.write_str("the verification cites no evidence")
-            }
-            AttestationRefusal::SelfCertified => {
-                formatter.write_str("a self-reported verification cannot be attested")
             }
             AttestationRefusal::VerifierIsTheSubjectActor => {
                 formatter.write_str("the verifier is the principal whose work was judged")
@@ -214,7 +352,7 @@ pub struct Attestation {
 }
 
 impl Attestation {
-    /// Issue an attestation over a passed, independent verification.
+    /// Issue an attestation over a passed, independently delegated verification.
     ///
     /// `subject_actor` is the principal whose work was judged, which the
     /// verifier may not be.
@@ -222,39 +360,40 @@ impl Attestation {
     /// # Errors
     ///
     /// Returns [`AttestationRefusal`] when the verification did not pass, cites
-    /// no evidence, is self-reported, or was performed by the actor under
-    /// judgement — and when the statement cannot be encoded.
+    /// no evidence, was performed by the actor under judgement, or the
+    /// statement cannot be encoded.
     ///
     /// Time: O(n) in the statement size. Space: O(n).
     pub fn issue(
-        verification: &Verification,
+        verification: &DelegatedVerification<'_>,
         subject_actor: &PrincipalId,
         policy: PolicyBundleId,
         runtime: RuntimeGenerationId,
         adapter: AdapterId,
         delegation: DelegationId,
     ) -> Result<Self, AttestationRefusal> {
-        if !verification.passed {
+        let verdict = verification.verification();
+        if !verdict.passed {
             return Err(AttestationRefusal::VerificationFailed);
         }
-        if verification.evidence.is_empty() {
+        if verdict.evidence.is_empty() {
             return Err(AttestationRefusal::NoEvidence);
         }
-        if verification.independence == IndependenceClass::SelfReported {
-            return Err(AttestationRefusal::SelfCertified);
-        }
-        if &verification.verifier == subject_actor {
+        if verification.verifier() == subject_actor {
             return Err(AttestationRefusal::VerifierIsTheSubjectActor);
         }
 
         let statement = AttestationStatement {
-            subject: verification.subject.clone(),
-            verifier: verification.verifier.clone(),
+            institution: verification.institution().clone(),
+            workspace: verification.workspace().clone(),
+            subject: verdict.subject.clone(),
+            verifier: verification.verifier().clone(),
+            verification_delegation: verification.delegation().id.clone(),
             policy,
             runtime,
             adapter,
             delegation,
-            evidence: verification.evidence.clone(),
+            evidence: verdict.evidence.clone(),
         };
         let statement_digest = statement
             .digest()
@@ -580,6 +719,10 @@ impl HandoffReceipt {
 #[cfg(test)]
 #[path = "tests/handoff.rs"]
 mod commissioning_tests;
+
+#[cfg(test)]
+#[path = "tests/support.rs"]
+mod test_support;
 
 #[cfg(test)]
 #[path = "tests/assessment.rs"]

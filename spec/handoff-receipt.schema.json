@@ -27,7 +27,6 @@
       "type": "string"
     },
     "EvidenceRecord": {
-      "additionalProperties": false,
       "description": "A provenance-bearing evidence record admitted for an exact subject.",
       "properties": {
         "id": {

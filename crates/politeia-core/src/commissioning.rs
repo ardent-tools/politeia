@@ -8,7 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     CommissioningRecordId, Delegation, DelegationId, Digest, InstitutionId, InstitutionWorkspaceId,
-    PolicyBundleId, evidence::EvidenceRecord, generation::ApprovedGenerationInputs,
+    PolicyBundleId, PrincipalId,
+    evidence::EvidenceRecord,
+    generation::ApprovedGenerationInputs,
+    knowledge::{Observation, SourceCaptureRequest},
+    reconnaissance::ReconnaissanceScope,
 };
 
 mod grants;
@@ -16,6 +20,8 @@ mod record;
 mod subjects;
 #[cfg(test)]
 mod tests;
+
+pub use record::CommissioningRebuild;
 
 pub use subjects::{
     commissioning_approval_subject_digest, commissioning_observation_set_digest,
@@ -53,6 +59,43 @@ pub struct CommissionerGrantRecord {
     pub revoked_at: Option<Timestamp>,
     /// Complete delegated authority.
     pub delegation: Delegation,
+}
+
+/// One historical reconnaissance grant retained with a sourced observation.
+///
+/// It is distinct from the current commissioner grant: the latter authorizes
+/// commissioning, while this record proves the earlier read was authorized at
+/// the instant it occurred.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HistoricalReconnaissanceGrantRecord {
+    /// Institution in which the read occurred.
+    pub institution: InstitutionId,
+    /// Workspace in which the read occurred.
+    pub workspace: InstitutionWorkspaceId,
+    /// Earliest trusted instant at which this delegation was admitted.
+    pub valid_from: Timestamp,
+    /// Trusted revocation time, when later recorded.
+    pub revoked_at: Option<Timestamp>,
+    /// Exact scope checked before the historical source access.
+    pub scope: ReconnaissanceScope,
+    /// Complete original read-only delegation.
+    pub delegation: Delegation,
+}
+
+/// Complete, validated provenance for one retained reconnaissance observation.
+///
+/// Its fields remain private so callers cannot manufacture this value without
+/// re-admitting the capture, observation, evidence, grant, and scope through
+/// [`Self::from_trusted`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HistoricalObservationProvenance {
+    evidence: EvidenceRecord,
+    observation: Observation,
+    capture: SourceCaptureRequest,
+    capture_signer: PrincipalId,
+    grant: HistoricalReconnaissanceGrantRecord,
 }
 
 /// Immutable trusted snapshot of commissioner grants.
@@ -135,6 +178,7 @@ pub struct CommissioningRecord {
     commissioner_grant: CommissionerGrantRecord,
     commissioner_grant_digest: Digest,
     observations: Vec<EvidenceRecord>,
+    historical_observations: Vec<HistoricalObservationProvenance>,
     observation_set_digest: Digest,
     approvals: Vec<CommissioningApproval>,
     policy_bundle: PolicyBundleId,
@@ -166,6 +210,8 @@ pub enum CommissioningError {
     EvidenceClassMismatch,
     /// Evidence was outside the active grant/snapshot interval or predated its basis.
     EvidenceOutsideWindow,
+    /// Historical capture, scope, observation, or grant provenance was absent or mismatched.
+    HistoricalObservationMismatch,
     /// Reconnaissance produced no admitted observations.
     MissingObservations,
     /// An approval was duplicated or did not match any required typed subject.

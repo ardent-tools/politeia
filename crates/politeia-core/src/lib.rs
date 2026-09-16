@@ -26,6 +26,7 @@ pub mod outbox;
 pub mod reconnaissance;
 pub mod records;
 pub mod state;
+pub mod trust;
 
 #[cfg(test)]
 mod test_support;
@@ -149,6 +150,10 @@ typed_id!(
     ClaimId,
     "Identity of one interpreted proposition with provenance."
 );
+typed_id!(
+    SourceCaptureId,
+    "Identity of one descriptor-bounded external source capture."
+);
 /// A content digest (blake3, lowercase hex).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
@@ -228,6 +233,8 @@ pub enum DigestDomain {
     OperationIntent,
     /// The sealed claims of one dispatcher-issued effect lease.
     LeaseClaims,
+    /// The canonical semantic subject of one potentially productive effect.
+    EffectSubject,
     /// An execution resource available for bounded work.
     ExecutionResource,
     /// An evidence-backed execution-resource capability profile.
@@ -263,6 +270,7 @@ impl DigestDomain {
             | Self::RuntimeGenerationInputs
             | Self::OperationIntent
             | Self::LeaseClaims
+            | Self::EffectSubject
             | Self::ExecutionResource
             | Self::CapabilityProfile
             | Self::CapabilityVerification
@@ -281,6 +289,7 @@ impl DigestDomain {
             Self::RuntimeGenerationInputs,
             Self::OperationIntent,
             Self::LeaseClaims,
+            Self::EffectSubject,
             Self::ExecutionResource,
             Self::CapabilityProfile,
             Self::CapabilityVerification,
@@ -306,6 +315,7 @@ impl DigestDomain {
             DigestDomain::RuntimeGenerationInputs => "runtime_generation_inputs_v1",
             DigestDomain::OperationIntent => "operation_intent_v1",
             DigestDomain::LeaseClaims => "lease_claims_v1",
+            DigestDomain::EffectSubject => "effect_subject_v1",
             DigestDomain::ExecutionResource => "execution_resource_v1",
             DigestDomain::CapabilityProfile => "capability_profile_v1",
             DigestDomain::CapabilityVerification => "capability_verification_v1",
@@ -422,6 +432,8 @@ pub enum Effect {
     WriteSecret,
     /// Read from an external system.
     ReadExternalSystem,
+    /// Read approved institutional context through the coordinator.
+    ReadInstitutionalContext,
     /// Write to an external system.
     WriteExternalSystem,
     /// Create an artifact.
@@ -453,7 +465,10 @@ impl Effect {
     /// document, and a delegation naming the effect has done that naming.
     pub const fn mutates(&self) -> bool {
         match self {
-            Effect::ReadFilesystem | Effect::ReadSecret | Effect::ReadExternalSystem => false,
+            Effect::ReadFilesystem
+            | Effect::ReadSecret
+            | Effect::ReadExternalSystem
+            | Effect::ReadInstitutionalContext => false,
             Effect::WriteFilesystem
             | Effect::SpawnProcess
             | Effect::NetworkEgress
@@ -654,41 +669,6 @@ impl Delegation {
             && self.expires_at <= parent.expires_at
             && self.budget.is_attenuation_of(&parent.budget)
     }
-}
-
-/// The epistemic state of an institutional claim. Inference never becomes
-/// approved truth silently.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[non_exhaustive]
-#[serde(rename_all = "snake_case")]
-pub enum EpistemicState {
-    /// A sourced statement about reality.
-    Observation,
-    /// An interpreted proposition with confidence and provenance.
-    Inferred,
-    /// A claim with unresolved contradiction.
-    Contested,
-    /// An institutionally accepted fact.
-    Approved,
-}
-
-/// An interpreted proposition about the institution, carrying its epistemic
-/// state, confidence, provenance, and the axes known to be missing.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Claim {
-    /// The claim's key (what fact is claimed about).
-    pub key: String,
-    /// The claimed value.
-    pub value: serde_json::Value,
-    /// Epistemic state.
-    pub state: EpistemicState,
-    /// Confidence in [0, 1].
-    pub confidence: f32,
-    /// Provenance references (where the claim was observed or inferred from).
-    pub provenance: Vec<String>,
-    /// Axes known to be missing from the claim's evidence.
-    pub missed_axes: Vec<String>,
 }
 
 /// A typed operation contract: what an operation may do, which effects and

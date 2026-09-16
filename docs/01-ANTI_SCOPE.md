@@ -23,6 +23,8 @@ Politeia may select a typed `ExecutionResource` for bounded work. Selection firs
 
 A component belongs in the kernel only if all product deployments require the invariant it owns.
 
+A small trusted kernel does not imply a small institutional model. Approved knowledge, relationships, responsibilities, and practices may be represented before an operational use is selected. Politeia governs their provenance, authority, interpretation, and projections while source systems retain the content and responsibilities they own. These boundaries constrain product ownership, not what the institution is allowed to understand.
+
 A component belongs in an adapter when it exists to translate between the product's semantic protocol and an external system.
 
 A component belongs in a domain pack when it supplies declarative domain knowledge, policy templates, probes, mappings, or workflows without changing kernel semantics.

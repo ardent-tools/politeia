@@ -1,5 +1,6 @@
+//! Administrative CLI for the local Politeia service.
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    println!("politeiad starter: semantic kernel scaffold only");
-    Ok(())
+    politeiad::cli::run().await
 }

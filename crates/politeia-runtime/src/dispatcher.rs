@@ -1,12 +1,14 @@
 use jiff::Timestamp;
 use politeia_core::{BudgetReservationId, Delegation, EffectLeaseId};
+use politeia_policy::QualificationVector;
 use snafu::ensure;
 
 use super::{
     AuthorizationLedger, AuthorizedEffect, DecisionMismatchSnafu, DeniedSnafu, Dispatcher,
     DispatcherConfig, EffectLease, EffectPort, InvalidDelegationSnafu,
     InvalidExecutionAssignmentSnafu, LeaseClaims, LeaseMismatchSnafu, OperationIntent,
-    PolicyDecisionPoint, RuntimeError, WrongAudienceSnafu,
+    PolicyDecisionPoint, QualificationViolationExecutionSnafu, RuntimeError, WrongAudienceSnafu,
+    effect_reservation, lease_expired,
 };
 
 impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P, H, L> {
@@ -36,6 +38,13 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
     /// normalized policy decision is invalid or denied.
     pub async fn authorize(&self, intent: &OperationIntent) -> Result<EffectLease, RuntimeError> {
         let now = self.ledger.observed_at().await?;
+        if self
+            .config
+            .authorization_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return Err(lease_expired());
+        }
         let delegation = self.validate_intent(intent, now)?;
         let intent_digest = intent.digest()?;
         let decision =
@@ -45,6 +54,12 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
                 .map_err(|source| RuntimeError::PolicyEvaluation {
                     source: Box::new(source),
                 })?;
+        let purpose = decision.verified_purpose().cloned().ok_or_else(|| {
+            DecisionMismatchSnafu {
+                field: "admitted decision purpose",
+            }
+            .build()
+        })?;
         ensure!(
             decision.principal == intent.principal,
             DecisionMismatchSnafu { field: "principal" }
@@ -67,28 +82,72 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
                 field: "operation intent digest"
             }
         );
-        ensure!(decision.allowed, DeniedSnafu);
+        let purpose_expiry = if let Some(qualification) = purpose.qualification_purpose() {
+            ensure!(
+                qualification.intent() == &intent_digest,
+                DecisionMismatchSnafu {
+                    field: "qualification intent"
+                }
+            );
+            ensure!(
+                qualification.generation() == &self.config.runtime,
+                DecisionMismatchSnafu {
+                    field: "qualification generation"
+                }
+            );
+            ensure!(
+                qualification.replay_domain() == self.config.replay_domain,
+                DecisionMismatchSnafu {
+                    field: "qualification replay domain"
+                }
+            );
+            ensure!(
+                now < qualification.expires_at(),
+                DecisionMismatchSnafu {
+                    field: "qualification authority expiry"
+                }
+            );
+            qualification.expires_at()
+        } else {
+            now + self.config.max_lease_ttl
+        };
+        ensure!(
+            decision.allowed,
+            DeniedSnafu {
+                reasons: decision.reasons.clone()
+            }
+        );
         let max_expiry = now + self.config.max_lease_ttl;
+        let authorization_deadline = self.config.authorization_deadline.unwrap_or(max_expiry);
         let assignment_expiry = intent
             .execution
             .as_ref()
             .map_or(max_expiry, |assignment| assignment.expires_at);
+        let effect = effect_reservation(intent, &self.adapter, self.port.audience())?;
         let claims = LeaseClaims {
             id: EffectLeaseId::new(),
             reservation_id: BudgetReservationId::new(),
             principal: intent.principal.clone(),
+            input_digest: intent.input_digest.clone(),
             delegation_chain: intent.delegation_chain.clone(),
             operation: intent.operation.clone(),
             resources: intent.resources.clone(),
             budget: intent.budget.clone(),
             idempotency_key: intent.idempotency_key.clone(),
+            effect,
             execution: intent.execution.clone(),
             decision,
             runtime: self.config.runtime.clone(),
             adapter: self.adapter.clone(),
             audience: delegation.audience.clone(),
-            expires_at: delegation.expires_at.min(max_expiry).min(assignment_expiry),
+            expires_at: delegation
+                .expires_at
+                .min(max_expiry)
+                .min(authorization_deadline)
+                .min(assignment_expiry)
+                .min(purpose_expiry),
             replay_domain: self.config.replay_domain.clone(),
+            purpose,
         };
         let claims_digest = EffectLease::claims_digest(&claims)?;
         let lease = EffectLease {
@@ -324,6 +383,22 @@ impl<P: PolicyDecisionPoint, H: EffectPort, L: AuthorizationLedger> Dispatcher<P
             lease.allows_audience(self.port.audience()),
             WrongAudienceSnafu
         );
+        if let Some(subject) = lease.effect_subject() {
+            ensure!(
+                subject.overlap().target().adapter() == &self.adapter
+                    && subject.overlap().target().audience() == self.port.audience(),
+                LeaseMismatchSnafu {
+                    field: "effect target"
+                }
+            );
+        }
+        if lease
+            .purpose()
+            .qualification_purpose()
+            .is_some_and(|purpose| purpose.vector() == QualificationVector::PlantedViolation)
+        {
+            return QualificationViolationExecutionSnafu.fail();
+        }
 
         let reservation = lease.reservation_request()?;
         self.ledger.claim(&reservation).await?;
