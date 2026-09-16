@@ -189,7 +189,8 @@ async fn required_idempotency_key_cannot_be_omitted() {
         matches!(
             result,
             Err(RuntimeError::InvalidDelegation {
-                reason: "operation idempotency key is missing or invalid"
+                reason: "operation idempotency key is missing or invalid",
+                ..
             })
         ),
         "an operation that requires idempotency must reject a missing key"
