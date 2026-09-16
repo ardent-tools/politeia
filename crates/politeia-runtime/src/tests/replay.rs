@@ -226,7 +226,7 @@ async fn sibling_reservations_share_the_parent_budget_and_pending_expiry_release
 )]
 async fn supplied_idempotency_key_survives_dispatcher_recreation_after_completion_and_expiry() {
     for requires_idempotency in [false, true] {
-        let mut fixture = fixture();
+        let mut fixture = mutating_fixture(BTreeSet::from(["artifact:keyed-replay".to_string()]));
         fixture.intent.operation.requires_idempotency = requires_idempotency;
         fixture.intent.idempotency_key = Some(format!("stable-request-{requires_idempotency}"));
         fixture.dispatcher.config.trusted_operations.insert(
@@ -319,7 +319,7 @@ async fn supplied_idempotency_key_survives_dispatcher_recreation_after_completio
     reason = "the keyless fixture must construct one valid ordinary lease"
 )]
 async fn keyless_optional_operation_keeps_lease_scoped_replay() {
-    let mut fixture = fixture();
+    let mut fixture = mutating_fixture(BTreeSet::from(["artifact:keyless-replay".to_string()]));
     fixture.dispatcher.config.max_lease_ttl = SignedDuration::from_mins(5);
     let lease = fixture
         .dispatcher
