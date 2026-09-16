@@ -546,7 +546,7 @@
       "description": "Exact resource selection bound before policy evaluation, when the work\nrequires an external execution resource."
     },
     "idempotency_key": {
-      "description": "Stable operation key required when the operation declares idempotency.",
+      "description": "Stable semantic replay key. Required when the operation declares\nidempotency; when supplied for another operation, it still retains that\noperation's completed replay identity.",
       "type": [
         "string",
         "null"
