@@ -16,7 +16,7 @@ use std::{
 
 use jiff::Timestamp;
 use politeia_core::{
-    DelegationId, Digest,
+    BudgetReservationId, DelegationId, Digest,
     canonical::to_canonical_bytes,
     trust::{AdmissionKind, SignedAdmissionWire},
 };
@@ -276,7 +276,7 @@ fn fresh_manifest(
         resources,
         template.intent.payload.budget,
         Timestamp::now(),
-        None,
+        Some(format!("continuity-manifest:{}", Uuid::now_v7())),
     );
     Ok(FreshManifest {
         authority_admission: serde_json::json!({
@@ -312,13 +312,71 @@ pub(crate) fn observe_completed_disclosure(
     fixture: &ReferenceFixture,
     completion: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn Error + Send + Sync>> {
+    let completion = completion.get("completion").unwrap_or(completion);
+    let identity = response_completion_identity(completion)?;
+    observe_completion(database_url, fixture, identity)
+}
+
+/// Read the exact known-good completion named by a retained qualification.
+/// The report does not expose a transport outbox ID, so this projection starts
+/// from its authoritative reservation and receipt identities rather than
+/// weakening the normal CLI completion's required identity checks.
+pub(crate) fn observe_qualified_completion(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    generation: &Digest,
+    reservation: &BudgetReservationId,
+    receipt_digest: &Digest,
+) -> Result<serde_json::Value, Box<dyn Error + Send + Sync>> {
+    observe_completion(
+        database_url,
+        fixture,
+        CompletionIdentity {
+            generation: generation.clone(),
+            reservation: reservation.0,
+            receipt_digest: receipt_digest.clone(),
+            outbox: None,
+        },
+    )
+}
+
+struct CompletionIdentity {
+    generation: Digest,
+    reservation: Uuid,
+    receipt_digest: Digest,
+    outbox: Option<Uuid>,
+}
+
+fn response_completion_identity(completion: &serde_json::Value) -> TestResult<CompletionIdentity> {
+    assert_completion_ids(completion)?;
+    Ok(CompletionIdentity {
+        generation: serde_json::from_value(completion["generation"].clone())?,
+        reservation: Uuid::parse_str(
+            completion["reservation"]
+                .as_str()
+                .ok_or("completion omitted its reservation")?,
+        )?,
+        receipt_digest: serde_json::from_value(completion["receipt_digest"].clone())?,
+        outbox: Some(Uuid::parse_str(
+            completion["outbox"]
+                .as_str()
+                .ok_or("completion omitted its outbox")?,
+        )?),
+    })
+}
+
+fn observe_completion(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    identity: CompletionIdentity,
+) -> Result<serde_json::Value, Box<dyn Error + Send + Sync>> {
     with_admin(database_url, |runtime, client| {
         observe_completed_attempt(
             runtime,
             client,
             fixture.host_trust.workspace.institution.0,
             fixture.host_trust.workspace.id.0,
-            completion.get("completion").unwrap_or(completion),
+            identity,
         )
     })
 }
@@ -328,23 +386,26 @@ fn observe_completed_attempt(
     client: &Client,
     institution: Uuid,
     workspace: Uuid,
-    completion: &serde_json::Value,
+    identity: CompletionIdentity,
 ) -> TestResult<serde_json::Value> {
-    assert_completion_ids(completion)?;
-    let reservation = Uuid::parse_str(
-        completion["reservation"]
-            .as_str()
-            .ok_or("completion omitted its reservation")?,
-    )?;
-    let generation: Digest = serde_json::from_value(completion["generation"].clone())?;
-    let receipt_digest: Digest = serde_json::from_value(completion["receipt_digest"].clone())?;
-    let outbox = Uuid::parse_str(
-        completion["outbox"]
-            .as_str()
-            .ok_or("completion omitted its outbox")?,
-    )?;
+    let CompletionIdentity {
+        generation,
+        reservation,
+        receipt_digest,
+        outbox,
+    } = identity;
+    let outbox = match outbox {
+        Some(outbox) => outbox,
+        None => runtime
+            .block_on(client.query_one(
+                "SELECT outbox_id FROM transactional_outbox
+                 WHERE institution_id = $1 AND workspace_id = $2 AND payload_digest = $3",
+                &[&institution, &workspace, &receipt_digest.as_str()],
+            ))?
+            .get(0),
+    };
     let row = runtime.block_on(client.query_one(
-        "SELECT status::text, receipt_digest, receipt_payload
+        "SELECT status::text, receipt_digest, receipt_payload, retain_replay
          FROM operation_attempts
          WHERE institution_id = $1 AND workspace_id = $2 AND reservation_id = $3",
         &[&institution, &workspace, &reservation],
@@ -352,6 +413,7 @@ fn observe_completed_attempt(
     assert_eq!(row.get::<_, String>(0), "completed");
     let stored_digest: String = row.get(1);
     let stored_payload: Vec<u8> = row.get(2);
+    let retain_replay: bool = row.get(3);
     assert_eq!(stored_digest, receipt_digest.as_str());
     assert_eq!(Digest::blake3(&stored_payload), receipt_digest);
     let receipt: serde_json::Value = serde_json::from_slice(&stored_payload)?;
@@ -385,6 +447,7 @@ fn observe_completed_attempt(
         "receipt": receipt,
         "outbox": outbox,
         "outbox_digest": outbox_digest,
+        "retain_replay": retain_replay,
     }))
 }
 
@@ -719,7 +782,7 @@ CREATE TRIGGER {BARRIER_TRIGGER}
             &self.client,
             self.institution,
             self.workspace,
-            completion,
+            response_completion_identity(completion)?,
         )
     }
 

@@ -20,20 +20,22 @@ use super::{ReferenceFixture, TestResult};
 
 static TRANSCRIPT: Mutex<Option<File>> = Mutex::new(None);
 
-/// Durable dispatcher-side state visible after one process request. Each
-/// attempt owns one non-null reservation; completion and outbox prove its
-/// atomic externalization counterpart.
+/// Durable effect and admission state visible after one process request.
+/// Each attempt owns one non-null reservation; completion and outbox prove its
+/// atomic externalization counterpart, while evidence records prove an
+/// admission transaction did not commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub(super) struct EffectObservation {
     pub(super) attempts: i64,
     pub(super) completions: i64,
     pub(super) outbox: i64,
+    pub(super) evidence: i64,
 }
 
-/// Read only the durable effect boundary. Refusal witnesses compare this
-/// before and after a request so a transport failure cannot be mistaken for
-/// proof that no attempt/reservation, completion, or outbox record was
-/// created.
+/// Read the durable effect and admission boundary. Refusal witnesses compare
+/// this before and after a request so a transport failure cannot be mistaken
+/// for proof that no attempt/reservation, completion, outbox, or evidence
+/// record was created.
 pub(super) fn observe_effects(
     database_url: &str,
     fixture: &ReferenceFixture,
@@ -56,10 +58,17 @@ pub(super) fn observe_effects(
          WHERE institution_id = $1 AND workspace_id = $2",
         &[&institution, &workspace],
     ))?;
+    let evidence = runtime.block_on(client.query_one(
+        "SELECT COUNT(*)::BIGINT
+         FROM evidence_journal
+         WHERE institution_id = $1 AND workspace_id = $2",
+        &[&institution, &workspace],
+    ))?;
     Ok(EffectObservation {
         attempts: attempts.get(0),
         completions: attempts.get(1),
         outbox: outbox.get(0),
+        evidence: evidence.get(0),
     })
 }
 

@@ -108,6 +108,28 @@ pub(super) fn exercise(
         "revoked commissioner publication credential",
         "delegation is revoked",
     )?;
+    let keyless = keyless_canary(
+        database_url,
+        fixture,
+        operations,
+        "after-commissioner-revocation-keyless",
+    )?;
+    let keyless_reservation: BudgetReservationId =
+        serde_json::from_value(keyless["reservation"].clone())?;
+    let keyless_receipt: Digest = serde_json::from_value(keyless["receipt_digest"].clone())?;
+    let before_keyless_handoff = observe_effects(database_url, fixture)?;
+    refuse_handoff(
+        database_url,
+        fixture,
+        "handoff-with-keyless-canary.json",
+        &ended_authority.submission(fixture, keyless_reservation, keyless_receipt),
+        "durable authority refused operation: attempt is missing, expired, replayed, or not claimable",
+    )?;
+    assert_eq!(
+        observe_effects(database_url, fixture)?,
+        before_keyless_handoff,
+        "a completed keyless ordinary canary cannot retain handoff effects or evidence",
+    );
     let continuity = positive_canary(
         database_url,
         fixture,
@@ -336,8 +358,31 @@ fn positive_canary(
     operations: &OperationalFixture,
     stage: &str,
 ) -> TestResult<serde_json::Value> {
+    completed_canary(database_url, fixture, operations, stage, true)
+}
+
+fn keyless_canary(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    operations: &OperationalFixture,
+    stage: &str,
+) -> TestResult<serde_json::Value> {
+    completed_canary(database_url, fixture, operations, stage, false)
+}
+
+fn completed_canary(
+    database_url: &str,
+    fixture: &ReferenceFixture,
+    operations: &OperationalFixture,
+    stage: &str,
+    retain_replay: bool,
+) -> TestResult<serde_json::Value> {
     let routed_at = Timestamp::now();
-    let prepared = operations.positive_manifest(fixture, routed_at);
+    let prepared = if retain_replay {
+        operations.positive_manifest(fixture, routed_at)
+    } else {
+        operations.keyless_manifest(fixture, routed_at)
+    };
     let expected_remote_rejections = serde_json::to_value(operations.remote_rejections(routed_at))?;
     submit_commissioning(
         database_url,
@@ -362,6 +407,11 @@ fn positive_canary(
     )?;
     let durable =
         super::continuity::observe_completed_disclosure(database_url, fixture, &response)?;
+    assert_eq!(
+        durable["retain_replay"],
+        serde_json::json!(retain_replay),
+        "the completed canary retains replay exactly when it supplied a semantic key",
+    );
     assert_manifest_decision(operations, &prepared.operate, &durable)?;
     assert_eq!(
         response["manifest"]["resources"],

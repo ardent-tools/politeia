@@ -412,6 +412,25 @@ fn qualify_candidate(
     let report: politeia_policy::operational::PublicDetectorCalibration =
         serde_json::from_value(result["report"].clone())?;
     let detector = report.control.clone();
+    let retained = report
+        .qualification()
+        .ok_or("Stage 1 omitted real-path qualification")?;
+    let qualified_completion = super::continuity::observe_qualified_completion(
+        database_url,
+        fixture,
+        generation,
+        retained.known_good_reservation(),
+        retained.known_good_receipt(),
+    )?;
+    assert_eq!(
+        qualified_completion["retain_replay"],
+        serde_json::json!(true),
+        "candidate qualification retains its exact signed intent without an ordinary idempotency key"
+    );
+    super::evidence::record_observation(
+        "qualified_detector_known_good_completion",
+        &qualified_completion,
+    )?;
     let qualification = operations.detector_calibration_evidence(fixture, &report);
     submit_commissioning(
         database_url,

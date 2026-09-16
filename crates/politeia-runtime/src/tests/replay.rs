@@ -222,59 +222,150 @@ async fn sibling_reservations_share_the_parent_budget_and_pending_expiry_release
 #[tokio::test]
 #[expect(
     clippy::expect_used,
-    reason = "idempotency retention starts from one valid reserved and claimed lease"
+    reason = "replay retention starts from valid reserved and completed leases"
 )]
-async fn idempotency_key_survives_dispatcher_recreation_on_the_shared_ledger() {
+async fn supplied_idempotency_key_survives_dispatcher_recreation_after_completion_and_expiry() {
+    for requires_idempotency in [false, true] {
+        let mut fixture = fixture();
+        fixture.intent.operation.requires_idempotency = requires_idempotency;
+        fixture.intent.idempotency_key = Some(format!("stable-request-{requires_idempotency}"));
+        fixture.dispatcher.config.trusted_operations.insert(
+            fixture.intent.operation.id.clone(),
+            fixture.intent.operation.clone(),
+        );
+        let lease = fixture
+            .dispatcher
+            .authorize(&fixture.intent)
+            .await
+            .expect("the first keyed request must reserve");
+        assert!(
+            lease
+                .reservation_request()
+                .expect("the keyed lease encodes its reservation")
+                .retains_replay(),
+            "a supplied key retains replay even when the operation does not require one"
+        );
+        assert!(
+            matches!(
+                fixture.dispatcher.authorize(&fixture.intent).await,
+                Err(RuntimeError::ReplayDetected { .. })
+            ),
+            "a duplicate pending semantic key must fail before another lease is returned"
+        );
+        fixture
+            .dispatcher
+            .execute(&lease)
+            .await
+            .expect("the reserved keyed request must execute once");
+        fixture
+            .dispatcher
+            .ledger
+            .record_completion(
+                lease.reservation_id(),
+                Digest::blake3(b"completed keyed request evidence"),
+            )
+            .await
+            .expect("the keyed effect supplies exact completion evidence");
+
+        let replay_at = fixture.now + SignedDuration::from_hours(2);
+        fixture.dispatcher.ledger.set_observed_at(replay_at).await;
+        let mut replay = fixture.intent.clone();
+        let mut renewed_authority = replay
+            .delegation_chain
+            .first()
+            .expect("the replay fixture keeps its trusted root")
+            .clone();
+        renewed_authority.id = DelegationId::new();
+        renewed_authority.expires_at = replay_at + SignedDuration::from_hours(2);
+        replay.delegation_chain = vec![renewed_authority.clone()];
+        let replacement = Dispatcher::new(
+            AllowAll {
+                bundle: fixture.dispatcher.config.policy_bundle.clone(),
+                policy_digest: fixture.dispatcher.config.policy_digest.clone(),
+                fault: None,
+            },
+            TestPort::new(fixture.dispatcher.adapter.clone(), "effect-port:fs"),
+            fixture.dispatcher.ledger.clone(),
+            DispatcherConfig::new(
+                fixture.dispatcher.config.policy_bundle.clone(),
+                fixture.dispatcher.config.policy_digest.clone(),
+                fixture.dispatcher.config.runtime.clone(),
+                fixture.dispatcher.config.replay_domain.clone(),
+                fixture.dispatcher.config.max_lease_ttl,
+                [renewed_authority],
+                [replay.operation.clone()],
+            )
+            .expect("the replacement dispatcher configuration must renew exact authority"),
+        );
+        assert!(
+            matches!(
+                replacement.authorize(&replay).await,
+                Err(RuntimeError::ReplayDetected { .. })
+            ),
+            "a recreated dispatcher must retain the completed semantic key after the old lease expires"
+        );
+        let mut fresh = replay;
+        fresh.idempotency_key = Some(format!("fresh-request-{requires_idempotency}"));
+        assert!(
+            replacement.authorize(&fresh).await.is_ok(),
+            "a distinct valid key must remain authorizable after replay retention rejects only the prior key"
+        );
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "the keyless fixture must construct one valid ordinary lease"
+)]
+async fn keyless_optional_operation_keeps_lease_scoped_replay() {
     let mut fixture = fixture();
-    fixture.intent.operation.requires_idempotency = true;
-    fixture.intent.idempotency_key = Some("stable-request-42".to_string());
-    fixture.dispatcher.config.trusted_operations.insert(
-        fixture.intent.operation.id.clone(),
-        fixture.intent.operation.clone(),
-    );
+    fixture.dispatcher.config.max_lease_ttl = SignedDuration::from_mins(5);
     let lease = fixture
         .dispatcher
         .authorize(&fixture.intent)
         .await
-        .expect("the first idempotent request must reserve");
+        .expect("a false-idempotency operation remains valid without a key");
     assert!(
-        matches!(
-            fixture.dispatcher.authorize(&fixture.intent).await,
-            Err(RuntimeError::ReplayDetected { .. })
-        ),
-        "a duplicate pending idempotency key must fail before another lease is returned"
+        !lease
+            .reservation_request()
+            .expect("the keyless lease encodes its reservation")
+            .retains_replay(),
+        "an ordinary keyless lease must not become a retained semantic replay record"
     );
     fixture
         .dispatcher
         .execute(&lease)
         .await
-        .expect("the reserved idempotent request must execute once");
-
-    let replacement = Dispatcher::new(
-        AllowAll {
-            bundle: fixture.dispatcher.config.policy_bundle.clone(),
-            policy_digest: fixture.dispatcher.config.policy_digest.clone(),
-            fault: None,
-        },
-        TestPort::new(fixture.dispatcher.adapter.clone(), "effect-port:fs"),
-        fixture.dispatcher.ledger.clone(),
-        DispatcherConfig::new(
-            fixture.dispatcher.config.policy_bundle.clone(),
-            fixture.dispatcher.config.policy_digest.clone(),
-            fixture.dispatcher.config.runtime.clone(),
-            fixture.dispatcher.config.replay_domain.clone(),
-            fixture.dispatcher.config.max_lease_ttl,
-            fixture.intent.delegation_chain.clone(),
-            [fixture.intent.operation.clone()],
+        .expect("the keyless lease must execute once");
+    fixture
+        .dispatcher
+        .ledger
+        .record_completion(
+            lease.reservation_id(),
+            Digest::blake3(b"completed keyless request evidence"),
         )
-        .expect("the replacement dispatcher configuration must be equivalent"),
-    );
-    assert!(
-        matches!(
-            replacement.authorize(&fixture.intent).await,
-            Err(RuntimeError::ReplayDetected { .. })
-        ),
-        "a recreated dispatcher must observe the retained semantic replay key"
+        .await
+        .expect("the keyless effect supplies exact completion evidence");
+    fixture
+        .dispatcher
+        .ledger
+        .set_observed_at(fixture.now + SignedDuration::from_mins(6))
+        .await;
+    let repeated = fixture
+        .dispatcher
+        .authorize(&fixture.intent)
+        .await
+        .expect("a keyless operation may receive a new lease after the old lease expires");
+    fixture
+        .dispatcher
+        .execute(&repeated)
+        .await
+        .expect("the new lease reaches the effect port");
+    assert_eq!(
+        fixture.dispatcher.port.call_count(),
+        2,
+        "keyless ordinary replay remains lease-scoped after completion and expiry"
     );
 }
 

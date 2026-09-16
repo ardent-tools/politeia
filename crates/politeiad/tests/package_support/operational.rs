@@ -728,7 +728,10 @@ impl OperationalFixture {
             operation: operation.spec.clone(),
             resources,
             budget,
-            idempotency_key: Some(format!("qualification:{label}:{}", candidate.as_str())),
+            // WHY: candidate qualification retains its sealed exact signed
+            // intent independently of ordinary operation keys, so this key
+            // stays absent to exercise that distinct replay contract.
+            idempotency_key: None,
             execution: Some(assignment),
         };
         PreparedQualificationVector {
@@ -958,7 +961,22 @@ impl OperationalFixture {
         fixture: &ReferenceFixture,
         at: Timestamp,
     ) -> PreparedManifestOperation {
-        self.manifest_case(fixture, at, "public:approved-operation")
+        self.manifest_case(
+            fixture,
+            at,
+            "public:approved-operation",
+            Some(format!("manifest:{}", uuid::Uuid::now_v7())),
+        )
+    }
+
+    /// A valid ordinary request without an optional replay key. It is used only
+    /// to prove that completed non-retained work cannot certify handoff.
+    pub(crate) fn keyless_manifest(
+        &self,
+        fixture: &ReferenceFixture,
+        at: Timestamp,
+    ) -> PreparedManifestOperation {
+        self.manifest_case(fixture, at, "public:approved-operation", None)
     }
 
     /// Planted forbidden-resource canary. Routing remains valid and policy
@@ -968,7 +986,12 @@ impl OperationalFixture {
         fixture: &ReferenceFixture,
         at: Timestamp,
     ) -> PreparedManifestOperation {
-        self.manifest_case(fixture, at, PLANTED_FORBIDDEN_RESOURCE)
+        self.manifest_case(
+            fixture,
+            at,
+            PLANTED_FORBIDDEN_RESOURCE,
+            Some(format!("manifest:{}", uuid::Uuid::now_v7())),
+        )
     }
 
     fn manifest_case(
@@ -976,6 +999,7 @@ impl OperationalFixture {
         fixture: &ReferenceFixture,
         at: Timestamp,
         resource: &str,
+        idempotency_key: Option<String>,
     ) -> PreparedManifestOperation {
         let resources = BTreeSet::from([resource.to_string()]);
         let budget = operation_budget();
@@ -1000,7 +1024,7 @@ impl OperationalFixture {
             resources,
             budget,
             at,
-            None,
+            idempotency_key,
         );
         PreparedManifestOperation {
             authority_admission: delegation_admission(&grant),

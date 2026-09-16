@@ -194,7 +194,9 @@ pub struct OperationIntent {
     pub resources: BTreeSet<String>,
     /// The bounded resources this invocation requests.
     pub budget: ResourceBudget,
-    /// Stable operation key required when the operation declares idempotency.
+    /// Stable semantic replay key. Required when the operation declares
+    /// idempotency; when supplied for another operation, it still retains that
+    /// operation's completed replay identity.
     pub idempotency_key: Option<String>,
     /// Exact resource selection bound before policy evaluation, when the work
     /// requires an external execution resource.
@@ -313,7 +315,7 @@ impl EffectLease {
     pub fn budget(&self) -> &ResourceBudget {
         &self.claims.budget
     }
-    /// Stable operation key bound to the lease, when idempotency is required.
+    /// Stable semantic replay key bound to the lease, when supplied.
     pub fn idempotency_key(&self) -> Option<&str> {
         self.claims.idempotency_key.as_deref()
     }
@@ -387,23 +389,24 @@ impl EffectLease {
         if let Some(qualification) = self.claims.purpose.qualification_purpose() {
             return ReplayKey::QualificationIntent(qualification.intent().clone());
         }
-        match (
-            self.claims.operation.requires_idempotency,
-            self.claims.idempotency_key.as_ref(),
-        ) {
-            (true, Some(key)) => ReplayKey::Operation {
+        match self.claims.idempotency_key.as_ref() {
+            Some(key) => ReplayKey::Operation {
                 principal: self.claims.principal.clone(),
                 operation: self.claims.operation.id.clone(),
                 key: key.clone(),
             },
-            _ => ReplayKey::Lease(self.claims.id.clone()),
+            None => ReplayKey::Lease(self.claims.id.clone()),
         }
     }
 
     fn reservation_request(&self) -> Result<ReservationRequest, RuntimeError> {
-        let replay_key =
-            to_canonical_bytes(&(self.claims.replay_domain.as_str(), self.replay_key()))
-                .context(LeaseEncodingSnafu)?;
+        let replay_key = self.replay_key();
+        let retain_replay = match &replay_key {
+            ReplayKey::Lease(_) => false,
+            ReplayKey::Operation { .. } | ReplayKey::QualificationIntent(_) => true,
+        };
+        let replay_key = to_canonical_bytes(&(self.claims.replay_domain.as_str(), replay_key))
+            .context(LeaseEncodingSnafu)?;
         let mut budget_scopes = Vec::with_capacity(self.claims.delegation_chain.len());
         for delegation in &self.claims.delegation_chain {
             let encoded = to_canonical_bytes(delegation).context(LeaseEncodingSnafu)?;
@@ -416,8 +419,7 @@ impl EffectLease {
         Ok(ReservationRequest::new(
             self.claims.reservation_id.clone(),
             Digest::blake3(&replay_key),
-            self.claims.operation.requires_idempotency
-                || self.claims.purpose.qualification_purpose().is_some(),
+            retain_replay,
             self.claims.effect.clone(),
             self.claims.replay_domain.clone(),
             budget_scopes,

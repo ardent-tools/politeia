@@ -262,7 +262,7 @@ impl ReservationRequest {
         &self.replay_key
     }
 
-    /// Whether a claimed semantic idempotency key must be retained durably.
+    /// Whether the completed semantic replay identity must be retained durably.
     pub fn retains_replay(&self) -> bool {
         self.retain_replay
     }

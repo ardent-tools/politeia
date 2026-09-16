@@ -175,6 +175,32 @@ async fn caller_cannot_weaken_the_registered_operation_contract() {
     );
 }
 
+#[tokio::test]
+async fn required_idempotency_key_cannot_be_omitted() {
+    let mut fixture = fixture();
+    fixture.intent.operation.requires_idempotency = true;
+    fixture.dispatcher.config.trusted_operations.insert(
+        fixture.intent.operation.id.clone(),
+        fixture.intent.operation.clone(),
+    );
+
+    let result = fixture.dispatcher.authorize(&fixture.intent).await;
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::InvalidDelegation {
+                reason: "operation idempotency key is missing or invalid"
+            })
+        ),
+        "an operation that requires idempotency must reject a missing key"
+    );
+    assert_eq!(
+        fixture.dispatcher.port.call_count(),
+        0,
+        "a missing required key must fail before the effect port"
+    );
+}
+
 #[test]
 fn retryable_productive_operation_requires_idempotency() {
     let fixture = fixture();
